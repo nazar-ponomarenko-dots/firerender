@@ -170,21 +170,52 @@ int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    // Если в текущей папке нет данных (map/map.json) — переходим в папку
-    // исполняемого файла: двойной клик запускает из любого места.
+    // Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
+    // Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
+    const char *base_dir = ".";
     FILE *probe = fopen("map/map.json", "rb");
-    if (!probe) {
+    if (probe) {
+        fclose(probe);
+        base_dir = ".";   // CWD — это корень проекта
+    } else {
         const char *base = SDL_GetBasePath();
         if (base && base[0]) {
-#ifdef _WIN32
-            _chdir(base);
-#else
-            chdir(base);
-#endif
+            // Проверяем папку exe
+            char test_path[512];
+            snprintf(test_path, sizeof test_path, "%smap/map.json", base);
+            probe = fopen(test_path, "rb");
+            if (probe) {
+                fclose(probe);
+                base_dir = base;
+            } else {
+                // Проверяем родительскую папку (проект при запуске из build/)
+                snprintf(test_path, sizeof test_path, "%s../map/map.json", base);
+                probe = fopen(test_path, "rb");
+                if (probe) {
+                    fclose(probe);
+                    // base_dir = base + ".."
+                    char parent[512];
+                    snprintf(parent, sizeof parent, "%s..", base);
+                    base_dir = parent;
+                } else {
+                    base_dir = base;   // fallback: папка exe
+                }
+            }
+            SDL_free((void *)base);
         }
-        SDL_free((void *)base);
-    } else {
-        fclose(probe);
+    }
+
+    // Устанавливаем базовую директорию ДО resources_init()
+    resources_set_base_dir(base_dir);
+
+    // Если в текущей папке нет данных — переходим в папку исполняемого файла
+    // (для config.cfg, логов и т.п.)
+    if (strcmp(base_dir, ".") != 0) {
+#ifdef _WIN32
+        _chdir(base_dir);
+#else
+        chdir(base_dir);
+#endif
     }
 
     // 1) Инициализация SDL -----------------------------------------------------

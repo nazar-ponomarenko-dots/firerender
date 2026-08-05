@@ -65,4 +65,8 @@ int resources_pak_open(const char *path);
 void resources_pak_close(void);
 int resources_pak_is_open(void);
 
+// Устанавливает базовую директорию ресурсов (путь к папке с map/, shaders/, img/).
+// Вызывать один раз при старте ДО любых загрузок ресурсов.
+void resources_set_base_dir(const char *dir);
+
 #endif

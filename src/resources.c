@@ -23,6 +23,20 @@
 // --- Пак карты (maps/*.zip) ----------------------------------------------------
 static mz_zip_archive s_pak;
 static int s_pak_open = 0;
+static char s_base_dir[512] = ".";   // базовая директория ресурсов (по умолчанию CWD)
+
+// Устанавливает базовую директорию для поиска ресурсов.
+// Вызывать один раз при старте (из main, после определения пути к exe).
+void resources_set_base_dir(const char *dir)
+{
+    if (!dir || !dir[0]) return;
+    snprintf(s_base_dir, sizeof s_base_dir, "%s", dir);
+    // Убираем trailing slash
+    size_t len = strlen(s_base_dir);
+    if (len > 1 && (s_base_dir[len-1] == '/' || s_base_dir[len-1] == '\\'))
+        s_base_dir[len-1] = 0;
+    SDL_Log("Resources base dir: %s", s_base_dir);
+}
 
 // Очистка кеша от ресурсов карты (объявлена ниже, используется в pak_close)
 static void cache_purge_pak(void);
@@ -86,10 +100,15 @@ unsigned char *resources_read_file(const char *path, unsigned int *size)
         return buf;
     }
 
-    char alt[512];
-    snprintf(alt, sizeof alt, "../%s", path);
-    const char *candidates[] = { path, alt };
-    for (int i = 0; i < 2; i++) {
+    // Кандидаты: base_dir/path, base_dir/../path, path, ../path
+    char candidates[4][512];
+    int ncand = 0;
+    snprintf(candidates[ncand++], sizeof candidates[0], "%s/%s", s_base_dir, path);
+    snprintf(candidates[ncand++], sizeof candidates[0], "%s/../%s", s_base_dir, path);
+    snprintf(candidates[ncand++], sizeof candidates[0], "%s", path);
+    snprintf(candidates[ncand++], sizeof candidates[0], "../%s", path);
+
+    for (int i = 0; i < ncand; i++) {
         FILE *f = fopen(candidates[i], "rb");
         if (!f) continue;
         fseek(f, 0, SEEK_END);
@@ -98,7 +117,7 @@ unsigned char *resources_read_file(const char *path, unsigned int *size)
         unsigned char *buf = malloc((size_t)szl + 1);
         if (buf && fread(buf, 1, (size_t)szl, f) == (size_t)szl) {
             fclose(f);
-            buf[szl] = 0;                 // завершающий \0 — и для текста
+            buf[szl] = 0;
             if (size) *size = (unsigned int)szl;
             return buf;
         }
@@ -165,33 +184,38 @@ static void cache_remove(ResEntry *e)
 
 // Удаляет из кеша все ресурсы, пришедшие из пака карты: при смене карты
 // те же пути (img/tree.png и т.п.) обязаны загрузиться заново.
+// Использует безопасную итерацию через указатель-на-указатель, чтобы
+// корректно удалять несколько подряд идущих элементов.
 static void cache_purge_pak(void)
 {
-    ResEntry *e = s_cache;
-    while (e) {
-        ResEntry *next = e->next;
+    ResEntry **pp = &s_cache;
+    while (*pp) {
+        ResEntry *e = *pp;
         if (e->from_pak) {
-            if (strncmp(e->key, "tex#", 4) == 0) {
-                GLuint t = (GLuint)(uintptr_t)e->data;
-                glDeleteTextures(1, &t);
-            } else if (strncmp(e->key, "prog#", 5) == 0) {
-                glDeleteProgram((GLuint)(uintptr_t)e->data);
-            } else {
-                stbi_image_free(e->data);
-            }
-            cache_remove(e);
+            // GL-ресурсы уже удалены через refcount в scene_teardown.
+            // Здесь только освобождаем структуру кеша.
+            *pp = e->next;
+            free(e);
+        } else {
+            pp = &e->next;
         }
-        e = next;
     }
 }
 
-// stat с fallback: путь -> ../путь (как resources_read_file)
+// stat с fallback: base_dir/path -> base_dir/../path -> path -> ../path
 static int stat_with_fallback(const char *path, struct stat *st)
 {
-    if (stat(path, st) == 0) return 1;
-    char alt[512];
-    snprintf(alt, sizeof alt, "../%s", path);
-    return stat(alt, st) == 0;
+    char candidates[4][512];
+    int ncand = 0;
+    snprintf(candidates[ncand++], sizeof candidates[0], "%s/%s", s_base_dir, path);
+    snprintf(candidates[ncand++], sizeof candidates[0], "%s/../%s", s_base_dir, path);
+    snprintf(candidates[ncand++], sizeof candidates[0], "%s", path);
+    snprintf(candidates[ncand++], sizeof candidates[0], "../%s", path);
+
+    for (int i = 0; i < ncand; i++)
+        if (stat(candidates[i], st) == 0)
+            return 1;
+    return 0;
 }
 
 // --- Картинки ----------------------------------------------------------------
