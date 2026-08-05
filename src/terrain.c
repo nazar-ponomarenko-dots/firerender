@@ -20,6 +20,12 @@
 
 #include <SDL3/SDL.h>
 
+// --- Теневой проход (pass == RP_SHADOW) ----------------------------------------
+// Глубина рельефа в каскад: та же сетка, высота из карты высот в шейдере.
+// Программа раньше жила в shadow.c — теперь принадлежит рельефу.
+static GLuint s_shadow_prog = 0;
+static GLint u_sh_viewproj, u_sh_heightmap, u_sh_hmin, u_sh_hmax;
+
 // --- Статические тени (режим r_shadows_mode 2) ---------------------------------
 // Разрешение карты теней: ~1 тексель на 1 м (2000x1125 -> 2048x1152).
 #define STATIC_SHADOW_W 2048
@@ -220,6 +226,13 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     int vert_count;
     terrain_geometry_create(w, &vao, &vbo, &ibo, &vert_count);
 
+    // Программа теневого прохода (глубина из карты высот)
+    s_shadow_prog = make_program("shaders/shadow.vs", "shaders/shadow.fs");
+    u_sh_viewproj = glGetUniformLocation(s_shadow_prog, "uViewProj");
+    u_sh_heightmap = glGetUniformLocation(s_shadow_prog, "uHeightmap");
+    u_sh_hmin = glGetUniformLocation(s_shadow_prog, "uHeightMin");
+    u_sh_hmax = glGetUniformLocation(s_shadow_prog, "uHeightMax");
+
     TerrainParams *p = calloc(1, sizeof *p);
     p->world = w;
     p->rc = rc;                           // кадровые данные (renderer.c)
@@ -287,19 +300,23 @@ void terrain_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     TerrainParams *p = n->params;
-    // Каскадные карты теней: камеры на солнце, пишем глубину. Каждый кадр
-    // со свежим направлением солнца (p->sun->dir) — свет и тени всегда
-    // в одном направлении. Карты выровнены по текселям, чтобы тени не
-    // "плыли" при движении камеры.
-    {
-        Uint64 t0 = SDL_GetPerformanceCounter();
-        prof_gpu_begin(PROF_SHADOW);
-        shadow_render(p);
-        prof_gpu_end(PROF_SHADOW);
-        Uint64 t1 = SDL_GetPerformanceCounter();
-        prof_add_ms(PROF_SHADOW,
-                    (float)(t1 - t0) * 1000.0f /
-                    (float)SDL_GetPerformanceFrequency());
+    const RendererContext *rc = p->rc;
+
+    // Теневой проход (RP_SHADOW): глубина рельефа в текущий каскад.
+    // Оркестрацию делает shadow.c (см. shadow_render в renderer_frame).
+    if (rc->pass == RP_SHADOW) {
+        if (g_shadow_terrain) {
+            glUseProgram(s_shadow_prog);
+            glUniformMatrix4fv(u_sh_viewproj, 1, GL_FALSE, rc->shadow_vp);
+            glUniform1i(u_sh_heightmap, 2);
+            glUniform1f(u_sh_hmin, p->world->min_height);
+            glUniform1f(u_sh_hmax, p->world->max_height);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, p->tex_height);
+            glBindVertexArray(p->vao);
+            glDrawElements(GL_TRIANGLES, p->vert_count, GL_UNSIGNED_INT, NULL);
+        }
+        return;
     }
 
     // обычный проход
@@ -334,6 +351,8 @@ void terrain_node_render(SceneNode *n, float dt)
 void terrain_cleanup(SceneNode *n)
 {
     TerrainParams *p = n->params;
+    resources_program_release(s_shadow_prog);
+    s_shadow_prog = 0;
     resources_program_release(p->prog);
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->ibo);

@@ -42,6 +42,7 @@ void field_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     FieldParams *p = n->params;
+    if (p->rc->pass == RP_SHADOW) return;   // в карты теней рамка не пишет
     float x0 = n->pos[0] - n->size[0] * 0.5f, z0 = n->pos[2] - n->size[2] * 0.5f;
     float x1 = n->pos[0] + n->size[0] * 0.5f, z1 = n->pos[2] + n->size[2] * 0.5f;
     float v[5][3] = {

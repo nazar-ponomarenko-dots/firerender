@@ -1,37 +1,38 @@
 // ============================================================================
-//  shadow.c — каскадные карты теней: камеры на солнце, глубина земли и травы
+//  shadow.c — каскадные карты теней: FBO, матрицы и оркестрация прохода
 // ----------------------------------------------------------------------------
+//  Теневой проход ЕДИН (п.13): shadow_render для каждого каскада выставляет
+//  в RendererContext pass = RP_SHADOW и обходит дерево сцены — рельеф,
+//  растительность и объекты рисуют СВОЮ геометрию в глубину (у каждого узла
+//  своя программа и свои правила прореживания), остальные узлы в теневом
+//  проходе пропускаются. Здесь остаются только FBO каскадов и матрицы
+//  "свет -> NDC" (с выравниванием по текселям).
+//
 //  Оптимизировано под частоту кадров:
 //    - растительность в тенях: прореживание делается на CPU (vegetation.c:
 //      статика — каждый 2-й экземпляр, динамика — правило uThin), шейдер
 //      не отбраковывает экземпляры, вершинный этап вдвое дешевле;
 //    - каскады 0/1 (боксы 8/16 м): рисуются только супер-чанки/чанки
 //      внутри бокса (ARB_base_instance) — вершинный этап не гоняет сотни
-//      тысяч экземпляров ради нескольких видимых; карты глубины байт-
-//      в-байт те же (проверено оффскрин-сравнением кадров);
-//    - каскад 3 (512 м, тексель 25 см) рисует только статику: тени густой
-//      динамики там меньше текселя и не видны;
-//    - локации uniform'ов кэшируются при инициализации.
+//      тысяч экземпляров ради нескольких видимых;
+//    - каскад 3 (512 м) рисует только статику: тени густой динамики там
+//      меньше текселя и не видны.
 // ============================================================================
 #include "shadow.h"
 
 #include "cvars.h"
 #include "linalg.h"
 #include "mapdata.h"
-#include "objects.h"
 #include "renderer.h"
-#include "resources.h"
 #include "shader.h"
-#include "terrain.h"
-#include "vegetation.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
 static GLuint g_shadow_fbo[SHADOW_CASCADES], g_shadow_tex[SHADOW_CASCADES];
-static GLuint g_shadow_prog = 0, g_shadowveg_prog = 0;
 static int g_shadow_on = 1;         // [ — вкл/выкл теней
 int g_shadow_size[SHADOW_CASCADES] = { 2048, 2048, 2048, 2048 };
 // Тестовые тумблеры замеров производительности (FR_TEST в main.c):
@@ -39,13 +40,8 @@ int g_shadow_terrain = 1;           // рельеф в картах теней
 int g_shadow_cull = 1;              // culling чанков по боксу каскада
 int g_shadow_veg = 1;               // растительность в картах теней
 int g_shadow_obj = 1;               // объекты (деревья) в картах теней
-// Матрицы каскадов последнего кадра — для растительности (приём теней)
+// Матрицы каскадов последнего кадра (для renderer.c/совместимости)
 static float g_last_mvp[SHADOW_CASCADES][16];
-
-// Кэш локаций uniform'ов (обновляются каждый кадр)
-static GLint u_shadow_viewproj, u_shadow_heightmap, u_shadow_hmin, u_shadow_hmax;
-static GLint u_veg_viewproj, u_veg_veg, u_veg_thin, u_veg_time, u_veg_campos;
-static GLint u_veg_dyn;      // 1 = динамический слой (только lod0/lod1)
 
 void shadow_init(void)
 {
@@ -64,18 +60,6 @@ void shadow_init(void)
                 g_shadow_size[c] = sh.size;
         SDL_Log("Shadows: %dx%d per cascade", g_shadow_size[0], g_shadow_size[0]);
     }
-    g_shadow_prog = make_program("shaders/shadow.vs", "shaders/shadow.fs");
-    g_shadowveg_prog = make_program("shaders/shadowveg.vs", "shaders/shadowveg.fs");
-    u_shadow_viewproj = glGetUniformLocation(g_shadow_prog, "uViewProj");
-    u_shadow_heightmap = glGetUniformLocation(g_shadow_prog, "uHeightmap");
-    u_shadow_hmin = glGetUniformLocation(g_shadow_prog, "uHeightMin");
-    u_shadow_hmax = glGetUniformLocation(g_shadow_prog, "uHeightMax");
-    u_veg_viewproj = glGetUniformLocation(g_shadowveg_prog, "uViewProj");
-    u_veg_veg = glGetUniformLocation(g_shadowveg_prog, "uVeg");
-    u_veg_thin = glGetUniformLocation(g_shadowveg_prog, "uThin");
-    u_veg_time = glGetUniformLocation(g_shadowveg_prog, "uTime");
-    u_veg_campos = glGetUniformLocation(g_shadowveg_prog, "uCamPos");
-    u_veg_dyn = glGetUniformLocation(g_shadowveg_prog, "uDyn");
 
     // Карты теней каскадов: FBO без цвета (только глубина)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
@@ -130,7 +114,6 @@ const float *shadow_matrix(int c)
     return g_last_mvp[c];
 }
 
-
 // Матрица теней от позиции солнца: вид+проекция (vp) и с bias'ом [0..1] (mvp).
 // center — центр бокса (позиция игрока).
 // ndc_texel — размер NDC-квадрата одного текселя (0 = без выравнивания):
@@ -164,175 +147,72 @@ static void shadow_matrix_for(const float *center, const float *sun_dir,
     mat4_mul(mvp, bias, vp);
 }
 
-// Рисует землю + растительность в карту глубины (fbo, size, vp).
-// draw_static/draw_dyn — какие слои растительности рисовать; оба слоя уже
-// предпрорежены на CPU (vegetation.c), в шейдере отбраковки нет.
-// cull_mode: 0 = весь буфер, 1 = только супер-чанки/чанки внутри бокса
-// каскада (карта глубины идентична: остальное всё равно отсекалось
-// аппаратным клипом, только ПОСЛЕ вершинного шейдера).
-static void shadow_render_into(GLuint fbo, int size, float box,
-                               const float vp[16], TerrainParams *p,
-                               int cull_mode,
-                               int draw_static, int draw_dyn)
-{
-    GLint prev_fbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glViewport(0, 0, size, size);
-    // ВАЖНО: маска записи глубины должна быть TRUE ДО glClear — иначе glClear
-    // игнорируется (скайбокс перед этим ставит glDepthMask(GL_FALSE), и без
-    // сброса карта теней "смазывается": старые глубины не стираются и
-    // накапливаются, тени чернеют и плывут при движении камеры).
-    glDepthMask(GL_TRUE);
-    glClear(GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
-    glCullFace(GL_BACK);         // лицевые грани — как в обычном рендере
-    glUseProgram(g_shadow_prog);
-    glUniformMatrix4fv(u_shadow_viewproj, 1, GL_FALSE, vp);
-    glUniform1i(u_shadow_heightmap, 2);
-    glUniform1f(u_shadow_hmin, p->world->min_height);
-    glUniform1f(u_shadow_hmax, p->world->max_height);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, p->tex_height);
-    glBindVertexArray(p->vao);
-    if (g_shadow_terrain)
-        glDrawElements(GL_TRIANGLES, p->vert_count, GL_UNSIGNED_INT, NULL);
-
-    // растительность. Густую (динамика) прореживаем: иначе 100 шт/м2
-    // перекрывают каждый тексель и земля уходит в сплошную черноту.
-    // Прореживание делается на CPU (vegetation.c: статика — каждый 2-й,
-    // динамика — по правилу uThin из shadowveg.vs), поэтому здесь
-    // uThin = 0 всегда и вершинный этап не тратит время на отбраковку.
-    glDisable(GL_CULL_FACE);     // биллборды — с двух сторон
-    glUseProgram(g_shadowveg_prog);
-    glUniformMatrix4fv(u_veg_viewproj, 1, GL_FALSE, vp);
-    glUniform1i(u_veg_veg, 0);
-    glUniform1f(u_veg_time, veg_time());
-    const RendererContext *rc = renderer_context();
-    glUniform3f(u_veg_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
-    glUniform1f(glGetUniformLocation(g_shadowveg_prog, "uWalk"),
-                rc->cam_fly ? 0.0f : 1.0f);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, veg_texture());
-    glUniform1i(u_veg_thin, 0);
-    glUniform1f(u_veg_dyn, 0.0f);   // статика: полный LOD (в т.ч. lod2)
-    if (draw_static && g_shadow_veg) {
-        glBindVertexArray(veg_shadow_vao(0));
-        if (cull_mode && veg_has_base_instance()) {
-            // только супер-чанки внутри бокса каскада: бокс + полудиагональ
-            // супер-чанка (64 м: 32*1.414 ≈ 45.3) — остальные вне бокса всё
-            // равно отсекались бы аппаратным клипом
-            float r2 = (45.3f + box * 0.7071f) * (45.3f + box * 0.7071f);
-            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
-            for (int s = 0; s < veg_shadow_super_n(); s++) {
-                int cnt = veg_shadow_super_cnt(0, s);
-                if (cnt <= 0) continue;
-                float dx = veg_shadow_super_cx(s) - pcx;
-                float dz = veg_shadow_super_cz(s) - pcz;
-                if (dx*dx + dz*dz > r2) continue;
-                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                        GL_UNSIGNED_INT, NULL, cnt,
-                        veg_shadow_super_base(0, s));
-            }
-        } else {
-            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
-                                    veg_shadow_count(0));
-        }
-        glBindVertexArray(veg_shadow_vao(1));
-        if (cull_mode && veg_has_base_instance()) {
-            float r2 = (45.3f + box * 0.7071f) * (45.3f + box * 0.7071f);
-            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
-            for (int s = 0; s < veg_shadow_super_n(); s++) {
-                int cnt = veg_shadow_super_cnt(1, s);
-                if (cnt <= 0) continue;
-                float dx = veg_shadow_super_cx(s) - pcx;
-                float dz = veg_shadow_super_cz(s) - pcz;
-                if (dx*dx + dz*dz > r2) continue;
-                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                        GL_UNSIGNED_INT, NULL, cnt,
-                        veg_shadow_super_base(1, s));
-            }
-        } else {
-            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
-                                    veg_shadow_count(1));
-        }
-    }
-    glUniform1f(u_veg_dyn, 1.0f);   // динамика: только lod0/lod1 (без lod2)
-    if (draw_dyn && g_shadow_veg) {
-        if (cull_mode && veg_has_base_instance()) {
-            // чанки внутри бокса: бокс + полудиагональ чанка (16 м: 11.3)
-            float r2 = (11.3f + box * 0.7071f) * (11.3f + box * 0.7071f);
-            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
-            for (int k = 0; k < veg_dyn_shadow_chunks(); k++) {
-                float cx, cz;
-                GLuint gbase, wbase;
-                int gcnt, wcnt;
-                veg_dyn_shadow_chunk(k, &cx, &cz, &gbase, &gcnt, &wbase, &wcnt);
-                float dx = cx - pcx, dz = cz - pcz;
-                if (dx*dx + dz*dz > r2) continue;
-                if (gcnt > 0) {
-                    glBindVertexArray(veg_shadow_vao(2));
-                    glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                            GL_UNSIGNED_INT, NULL, gcnt, gbase);
-                }
-                if (wcnt > 0) {
-                    glBindVertexArray(veg_shadow_vao(3));
-                    glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                            GL_UNSIGNED_INT, NULL, wcnt, wbase);
-                }
-            }
-        } else {
-            glBindVertexArray(veg_shadow_vao(2));
-            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
-                                    veg_shadow_count(2));
-            glBindVertexArray(veg_shadow_vao(3));
-            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
-                                    veg_shadow_count(3));
-        }
-    }
-    // Объекты (деревья): крест из двух квадов с альфа-тестом,
-    // отсечение по боксу каскада (см. objects.c)
-    if (g_shadow_obj)
-        objects_shadow_render(vp, box);
-    glEnable(GL_CULL_FACE);
-    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
-}
-
-void shadow_render(TerrainParams *p)
+// Рисует все каскады из камеры солнца. Узлы сцены сами рисуют глубину
+// (pass == RP_SHADOW в контексте); здесь — только матрицы и FBO каскадов.
+void shadow_render(SceneNode *root, RendererContext *rc)
 {
     // Тени рисуем, только если включены глобально (клавиша [) и сам
     // источник света отбрасывает тени (shadow.enabled из map/map.json).
-    // Всё состояние — из единого рендер-контекста (renderer.c).
-    const RendererContext *rc = renderer_context();
     if (!rc->shadow_on) return;
     const float *sd = rc->light_dir[0];
-    const float boxes[SHADOW_CASCADES] = { SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3 };
-    const int sizes[SHADOW_CASCADES] = { g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3] };
+    const float boxes[SHADOW_CASCADES] = {
+        SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3
+    };
+    const int sizes[SHADOW_CASCADES] = {
+        g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3]
+    };
+
+    GLint prev_fbo = 0, prev_vp[4] = { 0, 0, 0, 0 };
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_VIEWPORT, prev_vp);
+
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         float box = boxes[c];
         float depth = box * SHADOW_DEPTH_MUL + 400.0f;
         float vp[16], mvp[16];
         shadow_matrix_for(rc->cam_pos, sd, box, depth,
                           2.0f / sizes[c], mvp, vp);
-        // Свежие матрицы — в контекст (их читают vegetation/objects/voxfog
-        // в этом же кадре) и в g_last_mvp (для совместимости)
-        memcpy((float *)rc->shadow_matrix[c], mvp, sizeof mvp);
+        // Свежие матрицы каскада — в контекст (их читают vegetation/objects/
+        // voxfog в этом же кадре) и в g_last_mvp (для renderer_ctx_fill)
+        memcpy(rc->shadow_matrix[c], mvp, sizeof mvp);
         memcpy(g_last_mvp[c], mvp, sizeof mvp);
+
+        // Теневой проход: узлы рисуют глубину в этот каскад
+        rc->pass = RP_SHADOW;
+        memcpy(rc->shadow_vp, vp, sizeof vp);
+        rc->shadow_box_cur = box;
+        rc->shadow_cascade = c;
         // Каскады 0-1 (8/16 м): статика + динамика (детальные тени у ног).
         // Каскад 2 (96 м): только статика — динамика там (~200 тыс.
         // инстансов) даёт неразличимую на текселе 4.7 см тень.
         // Каскад 3 (512 м): статика пшеницы — тени поля до ~256 м.
-        shadow_render_into(g_shadow_fbo[c], sizes[c], boxes[c], vp, p,
-                           (c < 2 && g_shadow_cull) ? 1 : 0,
-                           c < 3, c < 2);
+        rc->shadow_dyn = (c < 2) ? 1 : 0;
+        rc->shadow_static = (c < 3) ? 1 : 0;
+        rc->shadow_cull = (c < 2 && g_shadow_cull) ? 1 : 0;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, g_shadow_fbo[c]);
+        glViewport(0, 0, sizes[c], sizes[c]);
+        // ВАЖНО: маска записи глубины должна быть TRUE ДО glClear — иначе
+        // glClear игнорируется (скайбокс перед этим ставит glDepthMask(FALSE),
+        // и без сброса карта теней "смазывается").
+        glDepthMask(GL_TRUE);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glCullFace(GL_BACK);         // лицевые грани — как в обычном рендере
+
+        // Единый проход: узлы сами выбирают, что рисовать в RP_SHADOW
+        for (SceneNode *n = root->first_child; n; n = n->next)
+            if (n->render) n->render(n, 0.0f);
     }
+    rc->pass = RP_COLOR;
+    // Вернуть FBO и вьюпорт цветного прохода (первый узел — небо — не
+    // сбрасывает вьюпорт сам, а рисует полноэкранный треугольник)
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
 }
 
 void shadow_cleanup(void)
 {
-    resources_program_release(g_shadow_prog);
-    resources_program_release(g_shadowveg_prog);
     glDeleteTextures(SHADOW_CASCADES, g_shadow_tex);
     glDeleteFramebuffers(SHADOW_CASCADES, g_shadow_fbo);
-    g_shadow_prog = g_shadowveg_prog = 0;
 }

@@ -93,6 +93,12 @@ static GLuint g_veg_mesh_vbo, g_veg_mesh_ibo, g_veg_vb[4];
 // шейдере, но вершинный этап обрабатывал вдвое меньше экземпляров.
 static GLuint g_veg_shadow_vao[4], g_veg_shadow_vbo[4];
 static int g_veg_shadow_cnt[4];
+
+// Теневой шейдер растительности (глубина с прореживанием на CPU) —
+// раньше жил в shadow.c, теперь принадлежит растительности.
+static GLuint s_shadowveg_prog = 0;
+static GLint u_veg_viewproj, u_veg_veg, u_veg_thin, u_veg_time;
+static GLint u_veg_campos, u_veg_dyn, u_veg_walk;
 static float g_veg_time;         // время симуляции (ветер)
 static int g_veg_visible = 1;    // тестовый тумблер отрисовки (perf-харнесс)
 static int g_draw_static_main = 1, g_draw_dyn_main = 1;   // FR_TEST: e/f
@@ -560,11 +566,106 @@ static void veg_dyn_thin_build(int need[][2], int nn, VegParams *p)
     free(tg); free(tw);
 }
 
+// Теневой проход (RP_SHADOW): прореженные буферы, диапазоны по
+// супер-чанкам/чанкам внутри бокса каскада (логика переехала из shadow.c).
+static void veg_shadow_draw(const RendererContext *rc)
+{
+    (void)rc;
+    glDisable(GL_CULL_FACE);     // биллборды — с двух сторон
+    glUseProgram(s_shadowveg_prog);
+    glUniformMatrix4fv(u_veg_viewproj, 1, GL_FALSE, rc->shadow_vp);
+    glUniform1i(u_veg_veg, 0);
+    glUniform1f(u_veg_time, g_veg_time);
+    glUniform3f(u_veg_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
+    glUniform1f(u_veg_walk, rc->cam_fly ? 0.0f : 1.0f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, g_veg_tex);
+    glUniform1i(u_veg_thin, 0);    // прореживание уже сделано на CPU
+
+    // Статика: полный LOD (в т.ч. lod2). Только супер-чанки внутри бокса.
+    glUniform1f(u_veg_dyn, 0.0f);
+    if (rc->shadow_static && g_shadow_veg) {
+        if (rc->shadow_cull && g_has_base_instance) {
+            // бокс + полудиагональ супер-чанка (64 м: 32*1.414 ≈ 45.3)
+            float r2 = (45.3f + rc->shadow_box_cur * 0.7071f) *
+                       (45.3f + rc->shadow_box_cur * 0.7071f);
+            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
+            for (int s = 0; s < g_sc_n; s++) {
+                int cnt = g_sc_shcnt[0][s];
+                if (cnt <= 0) continue;
+                float dx = g_sc_cx[s] - pcx;
+                float dz = g_sc_cz[s] - pcz;
+                if (dx*dx + dz*dz > r2) continue;
+                glBindVertexArray(g_veg_shadow_vao[0]);
+                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
+                        GL_UNSIGNED_INT, NULL, cnt, (GLuint)g_sc_shoff[0][s]);
+            }
+            for (int s = 0; s < g_sc_n; s++) {
+                int cnt = g_sc_shcnt[1][s];
+                if (cnt <= 0) continue;
+                float dx = g_sc_cx[s] - pcx;
+                float dz = g_sc_cz[s] - pcz;
+                if (dx*dx + dz*dz > r2) continue;
+                glBindVertexArray(g_veg_shadow_vao[1]);
+                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
+                        GL_UNSIGNED_INT, NULL, cnt, (GLuint)g_sc_shoff[1][s]);
+            }
+        } else {
+            glBindVertexArray(g_veg_shadow_vao[0]);
+            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
+                                    g_veg_shadow_cnt[0]);
+            glBindVertexArray(g_veg_shadow_vao[1]);
+            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
+                                    g_veg_shadow_cnt[1]);
+        }
+    }
+    // Динамика: только lod0/lod1 (без lod2). Чанки внутри бокса.
+    glUniform1f(u_veg_dyn, 1.0f);
+    if (rc->shadow_dyn && g_shadow_veg) {
+        if (rc->shadow_cull && g_has_base_instance) {
+            // бокс + полудиагональ чанка (16 м: 11.3)
+            float r2 = (11.3f + rc->shadow_box_cur * 0.7071f) *
+                       (11.3f + rc->shadow_box_cur * 0.7071f);
+            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
+            for (int k = 0; k < g_dyn_sh_n; k++) {
+                float dx = g_dyn_sh_x[k] - pcx;
+                float dz = g_dyn_sh_z[k] - pcz;
+                if (dx*dx + dz*dz > r2) continue;
+                if (g_dyn_sh_gc[k] > 0) {
+                    glBindVertexArray(g_veg_shadow_vao[2]);
+                    glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
+                            GL_UNSIGNED_INT, NULL, g_dyn_sh_gc[k],
+                            (GLuint)g_dyn_sh_go[k]);
+                }
+                if (g_dyn_sh_wc[k] > 0) {
+                    glBindVertexArray(g_veg_shadow_vao[3]);
+                    glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
+                            GL_UNSIGNED_INT, NULL, g_dyn_sh_wc[k],
+                            (GLuint)g_dyn_sh_wo[k]);
+                }
+            }
+        } else {
+            glBindVertexArray(g_veg_shadow_vao[2]);
+            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
+                                    g_veg_shadow_cnt[2]);
+            glBindVertexArray(g_veg_shadow_vao[3]);
+            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
+                                    g_veg_shadow_cnt[3]);
+        }
+    }
+    glEnable(GL_CULL_FACE);
+}
+
 void veg_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     VegParams *p = n->params;
     const RendererContext *rc = p->rc;
+    // Теневой проход (RP_SHADOW): прореженные буферы и culling по боксу
+    if (rc->pass == RP_SHADOW) {
+        veg_shadow_draw(rc);
+        return;
+    }
     g_veg_time += dt;                // время для ветра
     // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
     // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
@@ -646,88 +747,16 @@ void veg_node_render(SceneNode *n, float dt)
     glEnable(GL_CULL_FACE);
 }
 
-GLuint veg_vao(int q)
-{
-    return g_veg_vao[q];
-}
-
 int veg_count(int q)
 {
     const int cnt[4] = { g_static_gc, g_static_wc, g_dyn_gc, g_dyn_wc };
     return cnt[q];
 }
 
-GLuint veg_texture(void)
-{
-    return g_veg_tex;
-}
-
-GLuint veg_shadow_vao(int q)
-{
-    return g_veg_shadow_vao[q];
-}
-
-int veg_shadow_count(int q)
-{
-    return g_veg_shadow_cnt[q];
-}
-
-int veg_has_base_instance(void)
-{
-    return g_has_base_instance;
-}
-
 // Теневой проход: рисовать только супер-чанки внутри бокса каскада —
 // возвращает диапазон супер-чанков [*first, *last) для сброса глобального
 // счётчика (супер-чанки идут подряд, culling идёт по ним).
-int veg_shadow_super_n(void)
-{
-    return g_sc_n;
-}
-
-int veg_shadow_super_cnt(int q, int s)
-{
-    return g_sc_shcnt[q][s];
-}
-
-GLuint veg_shadow_super_base(int q, int s)
-{
-    return (GLuint)g_sc_shoff[q][s];
-}
-
-float veg_shadow_super_cx(int s)
-{
-    return g_sc_cx[s];
-}
-
-float veg_shadow_super_cz(int s)
-{
-    return g_sc_cz[s];
-}
-
 // Динамика в тенях: чанки и их предпрореженные диапазоны.
-int veg_dyn_shadow_chunks(void)
-{
-    return g_dyn_sh_n;
-}
-
-void veg_dyn_shadow_chunk(int k, float *x, float *z,
-                          GLuint *gbase, int *gcnt,
-                          GLuint *wbase, int *wcnt)
-{
-    *x = g_dyn_sh_x[k];
-    *z = g_dyn_sh_z[k];
-    *gbase = (GLuint)g_dyn_sh_go[k];
-    *gcnt = g_dyn_sh_gc[k];
-    *wbase = (GLuint)g_dyn_sh_wo[k];
-    *wcnt = g_dyn_sh_wc[k];
-}
-
-float veg_time(void)
-{
-    return g_veg_time;
-}
-
 // Настраивает VAO растительности на общий меш (квад 4 вершины, 6 индексов)
 // и буфер экземпляров (12 float: pos3, нормаль2, yaw/scale/tint/layer, lean,
 // slope2 — см. veg_gen_chunk). Используется для всех VAO: обычных и теневых.
@@ -785,6 +814,15 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
                 s_wheat_density, s_grass_density, s_dyn_r, s_vis_r);
     }
     GLuint prog = make_program("shaders/wheat.vs", "shaders/wheat.fs");
+    // Теневой шейдер (глубина): прореживание уже сделано на CPU
+    s_shadowveg_prog = make_program("shaders/shadowveg.vs", "shaders/shadowveg.fs");
+    u_veg_viewproj = glGetUniformLocation(s_shadowveg_prog, "uViewProj");
+    u_veg_veg      = glGetUniformLocation(s_shadowveg_prog, "uVeg");
+    u_veg_thin     = glGetUniformLocation(s_shadowveg_prog, "uThin");
+    u_veg_time     = glGetUniformLocation(s_shadowveg_prog, "uTime");
+    u_veg_campos   = glGetUniformLocation(s_shadowveg_prog, "uCamPos");
+    u_veg_dyn      = glGetUniformLocation(s_shadowveg_prog, "uDyn");
+    u_veg_walk     = glGetUniformLocation(s_shadowveg_prog, "uWalk");
     // LOD пшеницы: 0 — старая текстура, 1 — склейка 3-4 старых,
     // 2 — склейка 16+ старых. Все слои уложены в один 2D-массив
     // 256x178 (самый большой слой задаёт холст, остальные слева сверху).
@@ -944,5 +982,7 @@ void veg_cleanup(SceneNode *n)
         glDeleteVertexArrays(1, &g_veg_shadow_vao[q]);
     }
     glDeleteTextures(1, &p->tex);
+    resources_program_release(s_shadowveg_prog);
+    s_shadowveg_prog = 0;
     resources_program_release(p->prog);
 }

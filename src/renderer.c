@@ -311,6 +311,18 @@ void renderer_frame(Game *g, float dt, int draw_3d)
     // В игре и в паузе — рисуем сцену (пауза затемняет её меню).
     // В главном меню с фоткой-фоном сцену не рисуем вовсе (draw_3d = 0).
     if (world && draw_3d) {
+        // Каскадные тени: узлы рисуют глубину (pass = RP_SHADOW). Всегда
+        // заполненными — до включения каркасного режима.
+        if (s_rc.shadow_on) {
+            Uint64 t0 = SDL_GetPerformanceCounter();
+            prof_gpu_begin(PROF_SHADOW);
+            shadow_render(world, &s_rc);
+            prof_gpu_end(PROF_SHADOW);
+            Uint64 t1 = SDL_GetPerformanceCounter();
+            prof_add_ms(PROF_SHADOW,
+                        (float)(t1 - t0) * 1000.0f /
+                        (float)SDL_GetPerformanceFrequency());
+        }
 #ifndef USE_GLES_PATH
         glPolygonMode(GL_FRONT_AND_BACK, s_wire ? GL_LINE : GL_FILL);
 #endif

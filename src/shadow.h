@@ -8,10 +8,18 @@
 //  покрытие далеко, между каскадами плавный переход (без "подгрузки").
 //  Карты рендерятся каждый кадр со свежим направлением солнца — свет и
 //  тени всегда согласованы. Включение/выключение — клавиша [.
+//
+//  ТЕНЕВОЙ ПРОХОД ЕДИН: shadow_render (вызывает renderer_frame) для каждого
+//  каскада выставляет в RendererContext pass = RP_SHADOW и обходит дерево
+//  сцены — узлы сами рисуют свою геометрию в глубину (рельеф, растительность,
+//  объекты), остальные узлы в теневом проходе пропускаются.
 // ============================================================================
 #ifndef SHADOW_H
 #define SHADOW_H
 #include "gl_loader.h"
+#include "scene.h"
+
+typedef struct RendererContext RendererContext;   // определён в render_ctx.h
 
 #define SHADOW_CASCADES 4
 // Каскады (0 — самый детальный у ног игрока):
@@ -30,21 +38,21 @@ extern int g_shadow_size[SHADOW_CASCADES];   // все каскады (из shad
 #define SHADOW_DEPTH_MUL 1.6f    // глубина бокса = box*1.6 + 400 м
 extern int g_shadow_size[SHADOW_CASCADES];   // все каскады (из shadows.size)
 
-typedef struct TerrainParams TerrainParams;
-
 // Компилирует шейдеры теней и создаёт FBO/текстуры каскадов. Вызывается
 // после готовности GL-контекста, до первого кадра.
 void shadow_init(void);
 
+// Рисует все каскады (обход дерева: узлы рисуют глубину при pass == RP_SHADOW).
+// Ничего не делает, если тени выключены. Вызывается из renderer_frame
+// ПЕРЕД обычным проходом.
+void shadow_render(SceneNode *root, RendererContext *rc);
+
 // Тестовый тумблер (FR_TEST: c) — выключить culling чанков в картах теней.
 extern int g_shadow_cull;
-// Тестовые тумблеры (FR_TEST): рельеф/растительность в картах теней.
+// Тестовые тумблеры (FR_TEST): рельеф/растительность/объекты в картах теней.
 extern int g_shadow_terrain;
 extern int g_shadow_veg;
-// Рисует все каскады (земля + растительность) из камеры солнца.
-// Ничего не делает, если тени выключены. Вызывается первым в terrain_node_render.
-void shadow_render(TerrainParams *terr);
-
+extern int g_shadow_obj;
 int shadow_is_on(void);
 void shadow_toggle(void);
 void shadow_set(int on);   // для консоли (cvar r_shadows)
