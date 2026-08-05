@@ -185,6 +185,15 @@ static void cache_purge_pak(void)
     }
 }
 
+// stat с fallback: путь -> ../путь (как resources_read_file)
+static int stat_with_fallback(const char *path, struct stat *st)
+{
+    if (stat(path, st) == 0) return 1;
+    char alt[512];
+    snprintf(alt, sizeof alt, "../%s", path);
+    return stat(alt, st) == 0;
+}
+
 // --- Картинки ----------------------------------------------------------------
 unsigned char *resources_image(const char *path, int *w, int *h, int channels)
 {
@@ -314,8 +323,8 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     snprintf(ne->fs, sizeof ne->fs, "%s", fs_path);
     if (!ne->from_pak) {
         struct stat st;
-        if (stat(vs_path, &st) == 0) ne->vs_mt = (long)st.st_mtime;
-        if (stat(fs_path, &st) == 0) ne->fs_mt = (long)st.st_mtime;
+        if (stat_with_fallback(vs_path, &st)) ne->vs_mt = (long)st.st_mtime;
+        if (stat_with_fallback(fs_path, &st)) ne->fs_mt = (long)st.st_mtime;
     }
     return prog;
 }
@@ -341,8 +350,8 @@ int resources_shader_reload(void)
         if (e->from_pak || e->vs[0] == 0) continue;
         struct stat st;
         long mt0 = 0, mt1 = 0;
-        if (stat(e->vs, &st) == 0) mt0 = (long)st.st_mtime;
-        if (stat(e->fs, &st) == 0) mt1 = (long)st.st_mtime;
+        if (stat_with_fallback(e->vs, &st)) mt0 = (long)st.st_mtime;
+        if (stat_with_fallback(e->fs, &st)) mt1 = (long)st.st_mtime;
         if (mt0 == e->vs_mt && mt1 == e->fs_mt) continue;
         // Перекомпиляция: новый id встаёт в кеш, старую программу удаляем
         GLuint prog = program_link(e->vs, e->fs);
