@@ -1,0 +1,57 @@
+// ============================================================================
+//  resources.h — единый менеджер ресурсов: файлы, картинки, текстуры, шейдеры
+// ----------------------------------------------------------------------------
+//  Вся загрузка в проекте идёт через ОДИН модуль:
+//    - файлы:    пак карты -> диск -> ../диск (в папке игры или выше);
+//    - картинки: stb_image с кешем (ключ = путь + число каналов);
+//    - текстуры: GL-текстуры с кешем и подсчётом ссылок — один файл
+//                (напр. img/tree.png у 60 деревьев) грузится в GL один раз;
+//    - шейдеры:  кеш по паре (vs, fs) — один и тот же шейдер компилируется
+//                один раз (например field.vs+field.fs у FieldArea и Selection).
+//  Картинки живут до resources_shutdown() и вручную НЕ освобождаются;
+//  текстуры/программы освобождаются по счётчику ссылок
+//  (resources_*_release вместо glDelete*).
+// ============================================================================
+#ifndef RESOURCES_H
+#define RESOURCES_H
+#include "gl_loader.h"
+
+// Читает файл целиком: ПАК КАРТЫ (если открыт) -> диск -> ../диск -> вшитые данные.
+// Возвращает malloc'нутый буфер (освобождать free()) или NULL.
+unsigned char *resources_read_file(const char *path, unsigned int *size);
+
+// Текстовый файл (то же, что read_file, но с завершающим \0).
+char *resources_read_text(const char *path);
+
+// Загружает картинку через stb_image (с кешем). Возвращает указатель на
+// данные, которыми ВЛАДЕЕТ кеш — НЕ освобождать; живут до shutdown().
+// channels: 3 = RGB, 4 = RGBA. NULL — не загрузилась.
+unsigned char *resources_image(const char *path, int *w, int *h, int channels);
+
+// Текстура из файла с кешем и подсчётом ссылок.
+// wrap: GL_REPEAT / GL_CLAMP_TO_EDGE; linear: 1 = GL_LINEAR, 0 = GL_NEAREST.
+GLuint resources_texture(const char *path, int channels, int wrap, int linear);
+
+// Шейдерная программа из файлов (кеш + подсчёт ссылок).
+GLuint resources_program(const char *vs_path, const char *fs_path);
+
+// Уменьшить счётчик ссылок ресурса; при нуле — удалить GL-объект.
+// Использовать ВМЕСТО glDeleteProgram/glDeleteTextures для ресурсов кеша.
+void resources_program_release(GLuint prog);
+void resources_texture_release(GLuint tex);
+
+// Инициализация — до любых загрузок (в начале main), и полная очистка —
+// в самом конце main, ПОСЛЕ освобождения всех модулей сцены.
+void resources_init(void);
+void resources_shutdown(void);
+
+// --- Пак карты (maps/*.zip) ---------------------------------------------------
+// Открывает zip-архив карты: его файлы получают приоритет над диском и
+// вшитыми данными (карта может подсосать движковые ресурсы — их просто
+// кладут в архив либо оставляют в img/ движка). Вызывать при загрузке карты.
+// Возвращает 1, если архив открылся.
+int resources_pak_open(const char *path);
+void resources_pak_close(void);
+int resources_pak_is_open(void);
+
+#endif

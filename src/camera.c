@@ -1,0 +1,313 @@
+// ============================================================================
+//  camera.c — камера: ввод (WASD + мышь), физика ходьбы, матрицы вида/проекции
+// ============================================================================
+#include "camera.h"
+
+#include "actions.h"
+#include "audio.h"
+#include "cvars.h"
+#include "linalg.h"
+#include "world.h"
+#include "objects.h"
+
+#include <SDL3/SDL.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// --- Звуки игрока (шаги/прыжок/приземление) ------------------------------------
+// Грузятся лениво, через ресурсы: карта может переопределить их из zip.
+static Sound *s_step[3] = { NULL, NULL, NULL };
+static Sound *s_land = NULL;
+static Sound *s_rustle[3] = { NULL, NULL, NULL };  // три варианта шелеста
+static Sound *s_jump = NULL;
+static int s_rustle_sel = 0;
+static int s_step_tried = 0;
+static int s_step_sel = 0;
+static float s_step_timer = 0.0f;
+static float s_rustle_timer = 0.0f;
+static int s_was_air = 0;    // был ли в воздухе в прошлом кадре (приземление)
+static int s_prev_duck = 0;  // приседали ли в прошлом кадре (смена — не падение)
+
+// Позиция игрока (слушатель = камера; источник звуков — игрок)
+#define SOUND_RADIUS 25.0f    // радиус слышимости звуков игрока, м
+static float s_player_pos[3] = { 0, 0, 0 };
+
+static void player_sounds_load(void)
+{
+    if (s_step_tried) return;
+    s_step_tried = 1;
+    for (int i = 0; i < 3; i++) {
+        char p[64];
+        snprintf(p, sizeof p, "audio/step%d.wav", i + 1);
+        s_step[i] = audio_load(p);
+    }
+    s_land = audio_load("audio/land.wav");
+    for (int i = 0; i < 3; i++) {
+        char p[64];
+        snprintf(p, sizeof p, "audio/rustle%d.wav", i + 1);
+        s_rustle[i] = audio_load(p);
+    }
+    s_jump = audio_load("audio/jump.wav");
+}
+
+// Счётчик сыгранных шагов (для snd_debug в главном цикле)
+int g_step_calls = 0;
+
+static void player_step_sound(void)
+{
+    if (!s_step[0] && !s_step[1] && !s_step[2]) return;
+    Sound *s = s_step[s_step_sel++ % 3];
+    // Присед — тише шаги. Позиционно: источник на месте игрока.
+    float vol = g_act[A_DUCK] ? 0.25f : 0.5f;
+    g_step_calls++;
+    audio_3d_play_once(s, vol, s_player_pos, SOUND_RADIUS);
+}
+
+void camera_dirs(const Camera *cam, float *forward, float *right)
+{
+    float cp = cosf(cam->pitch);
+    forward[0] = sinf(cam->yaw) * cp;
+    forward[1] = sinf(cam->pitch);
+    forward[2] = cosf(cam->yaw) * cp;
+    if (right) {
+        right[0] = -forward[2];   // cross(forward, up) = (-f.z, 0, f.x)
+        right[1] = 0.0f;
+        right[2] = forward[0];
+    }
+}
+
+void camera_update(Camera *cam, const WorldState *w,
+                    float dx, float dy, float dt)
+{
+    // Параметры движения — cvar'ы из консоли (set cl_sens 0.01 и т.п.)
+    float sens = cvar_get("cl_sens");
+    if (sens <= 0.0f) sens = MOUSE_SENS;
+
+    // Мышь вправо (dx>0) — поворачиваем взгляд вправо. В нашей системе
+    // yaw растёт ВЛЕВО (forward = (sin yaw, 0, cos yaw)), поэтому минус.
+    // m_invert — инверсия вертикали (меню: Управление).
+    float inv = cvar_get("m_invert") > 0.5f ? -1.0f : 1.0f;
+    cam->yaw   -= dx * sens;
+    cam->pitch -= dy * sens * inv;        // мышь вверх — смотрим вверх
+    float lim = 3.14159f / 2.0f - 0.01f;
+    if (cam->pitch >  lim) cam->pitch =  lim;   // не даём уйти "за голову"
+    if (cam->pitch < -lim) cam->pitch = -lim;
+
+    float fwd[3], right[3];
+    camera_dirs(cam, fwd, right);
+    // Движение — через действия из биндов (+forward/-forward и т.п.)
+    float maxspeed = cvar_get(cam->fly ? "cl_flightspeed" : "cl_walkspeed");
+    if (!cam->fly) {                 // sv_maxspeed перекрывает ходьбу (HL-стиль)
+        float ms = cvar_get("sv_maxspeed");
+        if (ms > 0.0f) maxspeed = ms;
+    }
+    if (maxspeed <= 0.0f) maxspeed = cam->fly ? CAM_SPEED : WALK_SPEED;
+    if (g_act[A_SPEED]) maxspeed *= 4.0f;          // +speed — бег
+    float speed = maxspeed * dt;
+
+    if (cam->fly) {
+        // --- полёт: свободное перемещение по взгляду ---
+        if (g_act[A_FORWARD]) { cam->pos[0] += fwd[0]*speed; cam->pos[1] += fwd[1]*speed; cam->pos[2] += fwd[2]*speed; }
+        if (g_act[A_BACK])    { cam->pos[0] -= fwd[0]*speed; cam->pos[1] -= fwd[1]*speed; cam->pos[2] -= fwd[2]*speed; }
+        if (g_act[A_RIGHT])   { cam->pos[0] += right[0]*speed; cam->pos[2] += right[2]*speed; }
+        if (g_act[A_LEFT])    { cam->pos[0] -= right[0]*speed; cam->pos[2] -= right[2]*speed; }
+        if (g_act[A_JUMP]) cam->pos[1] += speed;
+        if (g_act[A_DOWN]) cam->pos[1] -= speed;
+    } else {
+        // --- ходьба: контроллер в духе Half-Life 1 ---
+        // Приседание (+duck): ниже глаза, медленнее, тише шаги.
+        // Смена присед/встать МГНОВЕННО ставит камеру на землю — это
+        // НЕ падение: звук приземления не играет.
+        bool duck = g_act[A_DUCK];
+        float eye = duck ? EYE_DUCK : EYE_H;
+        float ground = sample_height(w, cam->pos[0], cam->pos[2]) + eye;
+        if (duck != s_prev_duck) {
+            s_prev_duck = duck;
+            cam->pos[1] = ground;    // мгновенно сесть/встать
+            cam->vy = 0;
+            s_was_air = 0;
+        }
+        bool on_ground = cam->pos[1] <= ground + 0.01f && cam->vy <= 0.01f;
+        if (duck) maxspeed *= 0.5f;          // в приседе медленнее
+
+        float wishx = 0, wishz = 0;
+        if (g_act[A_FORWARD]) { wishx += fwd[0]; wishz += fwd[2]; }
+        if (g_act[A_BACK])    { wishx -= fwd[0]; wishz -= fwd[2]; }
+        if (g_act[A_RIGHT])   { wishx += right[0]; wishz += right[2]; }
+        if (g_act[A_LEFT])    { wishx -= right[0]; wishz -= right[2]; }
+        float wlen = sqrtf(wishx*wishx + wishz*wishz);
+        bool want_move = wlen > 1e-4f;
+        if (want_move) { wishx /= wlen; wishz /= wlen; }
+
+        // ускорение к желаемой скорости (в воздухе — слабее)
+        if (want_move) {
+            float dot = cam->vx*wishx + cam->vz*wishz;
+            float add = maxspeed - dot;
+            if (add > 0.0f) {
+                float a = (on_ground ? 8.0f : 2.5f) * maxspeed * dt;
+                if (a > add) a = add;
+                cam->vx += wishx * a;
+                cam->vz += wishz * a;
+            }
+        } else if (on_ground) {
+            // трение о землю
+            float fr = 1.0f - 6.0f * dt;
+            if (fr < 0.0f) fr = 0.0f;
+            cam->vx *= fr;
+            cam->vz *= fr;
+        }
+        // потолок скорости
+        float sp2 = cam->vx*cam->vx + cam->vz*cam->vz;
+        if (sp2 > maxspeed*maxspeed) {
+            float s = maxspeed / sqrtf(sp2);
+            cam->vx *= s; cam->vz *= s;
+        }
+        cam->pos[0] += cam->vx * dt;
+        cam->pos[2] += cam->vz * dt;
+        // Коллизии объектов карты (collision=1): не проходить сквозь них
+        objects_collide(&cam->pos[0], &cam->pos[2], 0.6f);
+
+        float gravity = cvar_get("sv_gravity");
+        if (gravity <= 0.0f) gravity = GRAVITY;
+        cam->vy -= gravity * dt;                 // гравитация
+        float ny = cam->pos[1] + cam->vy * dt;
+        if (ny <= ground) {                      // приземлились (или уже стоим)
+            float fall = cam->vy;
+            cam->pos[1] = ground;
+            cam->vy = 0;
+            float jump = cvar_get("sv_jumpspeed");
+            if (jump <= 0.0f) jump = JUMP_V;
+            if (g_act[A_JUMP]) {
+                cam->vy = jump;                  // прыжок
+                if (s_jump)
+                    audio_3d_play_once(s_jump, 0.3f, s_player_pos, SOUND_RADIUS);
+            } else if (s_was_air && fall < -1.5f) {
+                // Приземление после падения с высоты: звук ВСЕГДА,
+                // громкость зависит от скорости падения.
+                if (s_land) {
+                    float vol = 0.2f + (-fall) / 14.0f;
+                    if (vol > 0.6f) vol = 0.6f;
+                    audio_3d_play_once(s_land, vol, s_player_pos, SOUND_RADIUS);
+                }
+            }
+            s_was_air = 0;
+        } else {
+            cam->pos[1] = ny;                    // летим/падаем
+            s_was_air = 1;
+        }
+
+        // Шаги: движение по земле (не в полёте, не падаем). Таймер зависит
+        // от скорости: бег — чаще. Присед — тише.
+        float vsp2 = cam->vx * cam->vx + cam->vz * cam->vz;
+        if (cam->vy <= 0.1f && vsp2 > 0.5f) {
+            s_step_timer -= dt;
+            if (s_step_timer <= 0.0f) {
+                float spd = sqrtf(vsp2);
+                s_step_timer = (spd > 1.5f) ? 0.34f : 0.5f;
+                player_step_sound();
+            }
+        } else {
+            s_step_timer = 0.0f;
+        }
+
+        // Шуршание: только при движении сквозь пшеницу (поле). Трава/кусты
+        // звука не дают. Три варианта шелеста чередуются (как шаги).
+        if (cam->vy <= 0.1f && vsp2 > 0.5f) {
+            bool in_field =
+                cam->pos[0] >= w->field_x0 && cam->pos[0] <= w->field_x0 + w->field_w &&
+                cam->pos[2] >= w->field_z0 && cam->pos[2] <= w->field_z0 + w->field_d;
+            if (in_field) {
+                s_rustle_timer -= dt;
+                if (s_rustle_timer <= 0.0f) {
+                    s_rustle_timer = 0.45f;
+                    Sound *s = s_rustle[s_rustle_sel++ % 3];
+                    if (s)
+                        audio_3d_play_once(s, 0.32f, s_player_pos, SOUND_RADIUS);
+                }
+            } else {
+                s_rustle_timer = 0.0f;
+            }
+        } else {
+            s_rustle_timer = 0.0f;
+        }
+    }
+    // не выходить за край мира
+    if (cam->pos[0] < 2.0f) cam->pos[0] = 2.0f;
+    if (cam->pos[0] > w->world_w - 2.0f) cam->pos[0] = w->world_w - 2.0f;
+    if (cam->pos[2] < 2.0f) cam->pos[2] = 2.0f;
+    if (cam->pos[2] > w->world_d - 2.0f) cam->pos[2] = w->world_d - 2.0f;
+    // позиция игрока — для позиционных звуков (шаги и т.п.)
+    s_player_pos[0] = cam->pos[0];
+    s_player_pos[1] = cam->pos[1];
+    s_player_pos[2] = cam->pos[2];
+}
+
+SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
+                            float yaw, float pitch,
+                            float fov_deg, float znear, float zfar)
+{
+    CameraParams *p = calloc(1, sizeof *p);
+    p->world = w;
+    p->cam.pos[0] = start_pos[0];
+    p->cam.pos[1] = start_pos[1];
+    p->cam.pos[2] = start_pos[2];
+    p->cam.yaw = yaw;
+    p->cam.pitch = pitch;
+    p->fov_deg = fov_deg;
+    p->znear = znear;
+    p->zfar = zfar;
+    const float size[3] = { fov_deg, znear, zfar };   // fov, near, far — тоже "размер"
+    return node_new("Camera", "Camera3D", start_pos, size, p,
+                    camera_node_update, NULL);
+}
+
+static int s_demo = 0;          // демо-сцена: ввод выключен, камеру ведёт main.c
+static int s_input_lock = 0;    // консоль открыта: ввод игрока выключен
+
+void camera_demo_set(int on)
+{
+    s_demo = on;
+}
+
+void camera_lock_input(int lock)
+{
+    s_input_lock = lock;
+}
+
+void camera_node_update(SceneNode *n, float dt)
+{
+    CameraParams *p = n->params;
+    player_sounds_load();   // ленивая загрузка звуков игрока
+    // FOV — cvar (консоль: set fov 90, колесо мыши тоже пишет в cvar)
+    float fov = cvar_get("fov");
+    if (fov > 0.0f && fov <= 180.0f) p->fov_deg = fov;
+    if (!s_demo && !s_input_lock) {              // в демо/консоли камеру не трогаем
+        float mx = 0, my = 0;
+        SDL_GetRelativeMouseState(&mx, &my);      // мышь — обзор
+        camera_update(&p->cam, p->world, mx, my, dt);
+    }
+
+    // Матрицы вида и проекции. Вид от третьего лица (cvar cam_thirdperson):
+    // камера сзади-сверху персонажа, смотрит на него.
+    float fwd[3], up[3] = {0, 1, 0}, center[3], view[16], proj[16];
+    camera_dirs(&p->cam, fwd, NULL);
+    center[0] = p->cam.pos[0] + fwd[0];
+    center[1] = p->cam.pos[1] + fwd[1];
+    center[2] = p->cam.pos[2] + fwd[2];
+    if (cvar_get("cam_thirdperson") > 0.5f) {
+        float eye[3] = {
+            p->cam.pos[0] - fwd[0] * 4.0f,
+            p->cam.pos[1] + 1.7f,
+            p->cam.pos[2] - fwd[2] * 4.0f,
+        };
+        // Камера не проваливается в рельеф (на склонах/у обрывов)
+        float ground = sample_height(p->world, eye[0], eye[2]) + 0.35f;
+        if (eye[1] < ground) eye[1] = ground;
+        mat4_lookat(view, eye, p->cam.pos, up);
+    } else {
+        mat4_lookat(view, p->cam.pos, center, up);
+    }
+    mat4_perspective(proj, p->fov_deg * 3.14159f / 180.0f, p->aspect, p->znear, p->zfar);
+    mat4_mul(p->viewproj, proj, view);
+}

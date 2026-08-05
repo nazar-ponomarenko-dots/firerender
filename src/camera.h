@@ -1,0 +1,66 @@
+// ============================================================================
+//  camera.h — камера (POV от первого лица)
+// ----------------------------------------------------------------------------
+//  Два режима (клавиша F):
+//    fly  — свободный полёт: WASD по взгляду, SPACE/CTRL вверх/вниз;
+//    walk — ходьба с минимальной физикой: гравитация, коллизия с рельефом
+//           (земля = та же квантованная высота, что рисует шейдер), прыжок.
+// ============================================================================
+#ifndef CAMERA_H
+#define CAMERA_H
+#include <stdbool.h>
+#include "scene.h"
+#include "world.h"
+
+#define CAM_SPEED 25.0f     // Скорость полёта (м/с), Shift умножает на 4
+#define WALK_SPEED 2.5f     // Максимальная скорость ходьбы (м/с)
+#define MOUSE_SENS 0.0025f  // Чувствительность мыши (рад/пиксель)
+#define EYE_H   0.8f        // высота глаз над землёй (персонаж низкий)
+#define EYE_DUCK 0.35f      // высота глаз при приседании (+duck)
+#define GRAVITY 20.0f       // ускорение свободного падения, м/с2
+#define JUMP_V   7.0f       // скорость прыжка, м/с
+
+typedef struct {
+    float pos[3];   // позиция в мире
+    float yaw;      // поворот влево-вправо (рад)
+    float pitch;    // наклон вверх-вниз (рад)
+    float vy;       // вертикальная скорость (физика ходьбы)
+    float vx, vz;   // горизонтальная скорость (HL1-контроллер: инерция)
+    bool fly;       // режим полёта (F)
+} Camera;
+
+typedef struct {
+    Camera cam;          // позиция, yaw, pitch
+    const WorldState *world;  // данные мира: высоты, размеры, поле
+    float fov_deg;       // угол обзора
+    float znear, zfar;   // ближняя/дальняя плоскости отсечения
+    float aspect;        // пропорции окна (обновляет главный цикл)
+    float viewproj[16];  // вид * проекция — считает сам узел каждый кадр
+} CameraParams;
+
+// Направления взгляда камеры (forward, right) — для движения WASD.
+// right = cross(forward, up) — ТОТ ЖЕ базис, что строит mat4_lookat
+// (там s = cross(f, up)), иначе "вправо" окажется зеркальным.
+void camera_dirs(const Camera *cam, float *forward, float *right);
+
+// Перемещение по действиям (actions.h: +forward/-forward и т.п.) и поворот
+// мыши (dx, dy). В режиме ходьбы — гравитация и земля под ногами;
+// в полёте — свободно.
+void camera_update(Camera *cam, const WorldState *w, float dx, float dy, float dt);
+
+// Создаёт узел Camera3D с заданной стартовой позицией и параметрами вида.
+SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
+                            float yaw, float pitch,
+                            float fov_deg, float znear, float zfar);
+
+void camera_node_update(SceneNode *n, float dt);
+
+// Демо-сцена (клавиша Q): 1 — камера игнорирует ввод, позицию и взгляд
+// задаёт main.c (автополёт по маршруту); 0 — обычный ввод.
+void camera_demo_set(int on);
+
+// Блокировка ввода игрока (1 = консоль открыта): мышь и WASD не трогают
+// камеру, пока консоль принимает текст.
+void camera_lock_input(int lock);
+
+#endif
