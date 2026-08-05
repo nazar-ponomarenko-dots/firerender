@@ -11,7 +11,7 @@
 #include <stdlib.h>
 
 SceneNode *field_make_node(const WorldState *w, const float *center,
-                           const float *size, CameraParams *cam)
+                           const float *size, const RendererContext *rc)
 {
     GLuint prog = make_program("shaders/field.vs", "shaders/field.fs");
     if (!prog) return NULL;
@@ -31,7 +31,7 @@ SceneNode *field_make_node(const WorldState *w, const float *center,
     p->vao = vao;
     p->vbo = vbo;
     p->world = w;
-    p->cam = cam;
+    p->rc = rc;
     p->u_viewproj = glGetUniformLocation(prog, "uViewProj");
     p->u_color    = glGetUniformLocation(prog, "uColor");
     return node_new("FieldArea", "FieldArea3D", center, size, p,
@@ -51,7 +51,7 @@ void field_node_render(SceneNode *n, float dt)
         v[i][1] = sample_height(p->world, v[i][0], v[i][2]) + 0.5f;
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
-    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->cam->viewproj);
+    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->rc->viewproj);
     glUniform3f(p->u_color, 0.95f, 0.75f, 0.15f);   // жёлтая рамка поля
     glBindVertexArray(p->vao);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo);

@@ -286,11 +286,11 @@ static void mat4_invert(const float *m, float *o)
 // Рендер объёмного тумана в заданный FBO (0 = экран) и viewport.
 // Общий для режимов 1 (полное разрешение) и 2 (1/4 + растяжка).
 static void render_volumetric(int vw, int vh, GLuint target_fbo,
-                              const CameraParams *cam, const SunParams *sun,
+                              const RendererContext *rc,
                               GLuint scene_tex, GLuint scene_depth)
 {
     float invvp[16];
-    mat4_invert(cam->viewproj, invvp);
+    mat4_invert(rc->viewproj, invvp);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
@@ -306,11 +306,11 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         glBindTexture(GL_TEXTURE_3D, s_tex3d[c]);
     }
     glUniformMatrix4fv(u_invviewproj, 1, GL_FALSE, invvp);
-    glUniform3f(u_campos, cam->cam.pos[0], cam->cam.pos[1], cam->cam.pos[2]);
-    glUniform1f(u_znear, cam->znear);
-    glUniform1f(u_zfar, cam->zfar);
-    glUniform3f(u_sundir, sun->light_dir[0][0], sun->light_dir[0][1],
-                sun->light_dir[0][2]);
+    glUniform3f(u_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
+    glUniform1f(u_znear, rc->znear);
+    glUniform1f(u_zfar, rc->zfar);
+    glUniform3f(u_sundir, rc->light_dir[0][0], rc->light_dir[0][1],
+                rc->light_dir[0][2]);
     glUniform1f(u_strength, 1.0f);
     glUniform1f(u_fogmode, s_mode == 2 ? 1.0f : 0.0f);
     // цвета и лучи из map/map.json (fog = { color, color_sun, glare, ... })
@@ -324,38 +324,31 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         glUniform1f(u_box[c], s_box[c]);
         glUniform1f(u_res[c], (float)s_res[c]);
     }
-    // CSM-тени солнца для god rays: матрицы, bias и градиент — как у сцены
-    {
-        const float boxes[SHADOW_CASCADES] = { SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3 };
-        const int sizes[SHADOW_CASCADES] = { g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3] };
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
-            float depth = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
-            float bias_world = sun->shadow_bias_veg * boxes[c] / sizes[c];
-            glUniformMatrix4fv(u_shadowmatrix[c], 1, GL_FALSE, shadow_matrix(c));
-            // bias ВДВОЕ меньше, чем у сцены: лучи резче (тоньше полутень)
-            glUniform1f(u_shadowbias[c], bias_world * 0.5f / depth);
-            glUniform1f(u_shadowgrad[c], 5.0f / depth);
-        }
-        glUniform1f(u_shadowon,
-                    (shadow_is_on() && sun->shadow_on) ? 1.0f : 0.0f);
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
+    // CSM-тени солнца для god rays: матрицы, bias и градиент — из rc
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        glUniformMatrix4fv(u_shadowmatrix[c], 1, GL_FALSE, rc->shadow_matrix[c]);
+        // bias ВДВОЕ меньше, чем у сцены: лучи резче (тоньше полутень)
+        glUniform1f(u_shadowbias[c], rc->shadow_bias_veg[c] * 0.5f);
+        glUniform1f(u_shadowgrad[c], 5.0f / rc->shadow_depth[c]);
+        if (rc->shadow_tex[c]) {
             glActiveTexture(GL_TEXTURE5 + c);
-            glBindTexture(GL_TEXTURE_2D, shadow_texture(c));
+            glBindTexture(GL_TEXTURE_2D, rc->shadow_tex[c]);
         }
     }
+    glUniform1f(u_shadowon, rc->shadow_on ? 1.0f : 0.0f);
     glBindVertexArray(s_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glEnable(GL_DEPTH_TEST);
 }
 
-void voxfog_render(int vw, int vh, const CameraParams *cam,
-                   const SunParams *sun, GLuint scene_tex, GLuint scene_depth)
+void voxfog_render(int vw, int vh, const RendererContext *rc,
+                   GLuint scene_tex, GLuint scene_depth)
 {
     if (!s_on) return;
     if (!s_prog || !s_fbo) return;
     // Один и тот же проход в ПОЛНОМ разрешении экрана. Режим 2 отличается
     // только выборкой каскада (uFogMode): марш по одному грубому каскаду.
-    render_volumetric(vw, vh, 0, cam, sun, scene_tex, scene_depth);
+    render_volumetric(vw, vh, 0, rc, scene_tex, scene_depth);
 }
 
 void voxfog_cleanup(void)

@@ -9,37 +9,26 @@
 #ifndef TERRAIN_H
 #define TERRAIN_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
-#include "sun.h"
 #include "world.h"
-#include "shadow.h"
 
 typedef struct TerrainParams {
     const WorldState *world;        // данные мира: размеры, высоты, поле
+    const RendererContext *rc;      // кадровые данные (renderer.c)
+    SceneUniforms su;               // общий uniform-набор сцены
     GLuint prog, vao, vbo, ibo;      // программа и геометрия (с индексами)
     GLuint tex_base, tex_norm, tex_height;  // земля, нормали, высоты
-    GLint u_viewproj, u_campos, u_lightdir, u_lightcolor, u_lightint,
-          u_lightcount,
-          u_ambient, u_skycolor, u_groundcolor,
-          u_fogcolor, u_fogstart, u_fogend, u_fogon, u_specpow, u_specint,
-          u_heightmin, u_heightmax, u_texscale,
-          u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES],
-          u_shadowbias[SHADOW_CASCADES],
-          u_shadowdepth[SHADOW_CASCADES], u_shadowgrad[SHADOW_CASCADES],
-          u_shadow_on;
+    GLint u_specpow, u_specint;     // блики (земля матовая: spec = 0)
+    GLint u_heightmin, u_heightmax, u_texscale;
     GLint u_statictex, u_static_on, u_worldsize;   // статические тени
     int vert_count;                // сколько вершин рисуем
-    float shadow_mvp[SHADOW_CASCADES][16];  // матрицы теней каскадов
-                                          // (заполняет shadow_render каждый кадр)
-    CameraParams *cam;             // ссылка на узел Camera
-    SunParams *sun;                // ссылка на узел Sun
 } TerrainParams;
 
 // Создаёт узел Terrain: строит сетку рельефа, материал земли (с травой),
 // компилирует шейдеры и настраивает статичные uniform'ы. NULL при ошибке.
 SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
-                             CameraParams *cam, SunParams *sun);
+                             const RendererContext *rc);
 
 void terrain_node_render(SceneNode *n, float dt);
 

@@ -14,7 +14,7 @@
 
 static int s_on = 1;       // вкл/выкл (клавиша G, вместе с HUD)
 
-SceneNode *selection_make_node(SceneNode *root, CameraParams *cam)
+SceneNode *selection_make_node(SceneNode *root, const RendererContext *rc)
 {
     // Тот же шейдер, что у рамки поля: позиция в мире + цвет. Новые файлы
     // не нужны — для линий этого хватает.
@@ -37,7 +37,7 @@ SceneNode *selection_make_node(SceneNode *root, CameraParams *cam)
     p->prog = prog;
     p->vao = vao;
     p->vbo = vbo;
-    p->cam = cam;
+    p->rc = rc;
     p->root = root;
     p->u_viewproj = glGetUniformLocation(prog, "uViewProj");
     p->u_color    = glGetUniformLocation(prog, "uColor");
@@ -92,7 +92,7 @@ void selection_node_render(SceneNode *n, float dt)
 
     glEnable(GL_DEPTH_TEST);   // рёбра закрываются рельефом, как положено
     glUseProgram(p->prog);
-    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->cam->viewproj);
+    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->rc->viewproj);
     glUniform3f(p->u_color, 1.0f, 0.6f, 0.15f);   // оранжевый, как в Godot
     glBindVertexArray(p->vao);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo);

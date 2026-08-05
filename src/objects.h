@@ -10,14 +10,13 @@
 #ifndef OBJECTS_H
 #define OBJECTS_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
-#include "sun.h"
 #include "world.h"
 
 // Создаёт узел Objects: грузит текстуры объектов из map.json, компилирует
 // шейдер, строит общий квад. NULL при ошибке.
-SceneNode *objects_make_node(const WorldState *w, CameraParams *cam, SunParams *sun);
+SceneNode *objects_make_node(const WorldState *w, const RendererContext *rc);
 
 void objects_node_render(SceneNode *n, float dt);
 

@@ -276,7 +276,7 @@ void hud_shared_cleanup(void)
     s_shared_prog = s_shared_vao = s_shared_vbo = 0;
 }
 
-SceneNode *hud_make_node(const WorldState *w, CameraParams *cam, SunParams *sun)
+SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
 {
     // Шрифт/программа/буферы — общие (hud_shared_init); узел — только панель
     if (!s_shared_prog) return NULL;
@@ -285,14 +285,13 @@ SceneNode *hud_make_node(const WorldState *w, CameraParams *cam, SunParams *sun)
     p->vao = s_shared_vao;
     p->vbo = s_shared_vbo;
     p->tex_font = s_font.tex;
-    p->cam = cam;
-    p->sun = sun;
+    p->rc = rc;
     p->world = w;                              // квантованные высоты (GRND/ALT)
     p->fps = 60.0f;
     p->visible = 1;                // панель видна с первой секунды (G — вкл/выкл)
-    p->last_x = cam->cam.pos[0];
-    p->last_y = cam->cam.pos[1];
-    p->last_z = cam->cam.pos[2];
+    p->last_x = rc->cam_pos[0];
+    p->last_y = rc->cam_pos[1];
+    p->last_z = rc->cam_pos[2];
     p->u_font   = s_shared.u_font;
     p->u_color  = s_shared.u_color;
     p->u_usetex = s_shared.u_usetex;
@@ -522,34 +521,34 @@ static float hud_line_width(const char *s)
 void hud_node_update(SceneNode *n, float dt)
 {
     HudParams *p = n->params;
-    const Camera *cam = &p->cam->cam;
+    const RendererContext *rc = p->rc;
 
     // Скорость по перемещению за кадр
-    float dx = cam->pos[0] - p->last_x;
-    float dy = cam->pos[1] - p->last_y;
-    float dz = cam->pos[2] - p->last_z;
-    p->last_x = cam->pos[0]; p->last_y = cam->pos[1]; p->last_z = cam->pos[2];
+    float dx = rc->cam_pos[0] - p->last_x;
+    float dy = rc->cam_pos[1] - p->last_y;
+    float dz = rc->cam_pos[2] - p->last_z;
+    p->last_x = rc->cam_pos[0]; p->last_y = rc->cam_pos[1]; p->last_z = rc->cam_pos[2];
     float speed = (dt > 0.0f) ? sqrtf(dx*dx + dy*dy + dz*dz) / dt : 0.0f;
 
-    float ground = sample_height(p->world, cam->pos[0], cam->pos[2]);
-    float yaw_deg = cam->yaw * 180.0f / 3.14159f;
-    float pit_deg = cam->pitch * 180.0f / 3.14159f;
+    float ground = sample_height(p->world, rc->cam_pos[0], rc->cam_pos[2]);
+    float yaw_deg = rc->cam_yaw * 180.0f / 3.14159f;
+    float pit_deg = rc->cam_pitch * 180.0f / 3.14159f;
 
     int i = 0;
     snprintf(p->lines[i++], HUD_LINE_LEN, "firerender | FPS: %.0f (%.1f ms)",
              p->fps, p->fps > 0.0f ? 1000.0f / p->fps : 0.0f);
     snprintf(p->lines[i++], HUD_LINE_LEN, "POS:  %.1f, %.1f, %.1f",
-             cam->pos[0], cam->pos[1], cam->pos[2]);
+             rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
     snprintf(p->lines[i++], HUD_LINE_LEN, "GRND: %.1f m | ALT: %+.1f m",
-             ground, cam->pos[1] - ground);
+             ground, rc->cam_pos[1] - ground);
     snprintf(p->lines[i++], HUD_LINE_LEN, "MODE: %s (F) | VY: %+.1f",
-             cam->fly ? "FLY" : "WALK", cam->vy);
+             rc->cam_fly ? "FLY" : "WALK", rc->cam_vy);
     snprintf(p->lines[i++], HUD_LINE_LEN, "YAW: %.1f | PITCH: %.1f",
              yaw_deg, pit_deg);
     snprintf(p->lines[i++], HUD_LINE_LEN, "SPEED: %.1f m/s", speed);
     snprintf(p->lines[i++], HUD_LINE_LEN, "SUN: az %.0f deg | el %.0f deg",
-             atan2f(p->sun->dir[0], p->sun->dir[2]) * 180.0f / 3.14159f,
-             asinf(p->sun->dir[1]) * 180.0f / 3.14159f);
+             atan2f(rc->light_dir[0][0], rc->light_dir[0][2]) * 180.0f / 3.14159f,
+             asinf(rc->light_dir[0][1]) * 180.0f / 3.14159f);
     const WorldState *w = p->world;
     snprintf(p->lines[i++], HUD_LINE_LEN, "MAP: %dx%d px = %.0fx%.0f m",
              w->tex_w, w->tex_h, w->world_w, w->world_d);

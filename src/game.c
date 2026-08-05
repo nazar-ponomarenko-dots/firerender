@@ -408,15 +408,17 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->spawn_yaw = g->cam->cam.yaw;
     g->spawn_pitch = g->cam->cam.pitch;
 
-    g->sky_node = sky_make_node(g->cam, sun_node->params);
-    g->terr_node = terrain_make_node(w, wt, g->cam, sun_node->params);
-    g->wheat_node = veg_make_node(w, g->cam, sun_node->params);
-    g->obj_node = objects_make_node(w, g->cam, sun_node->params);
-    g->field_node = field_make_node(w, g->field_pos, g->field_size, g->cam);
-    g->sel_node = selection_make_node(g->root, g->cam);
-    g->mm_node = minimap_make_node(w, wt->tex_base, g->cam, sun_node->params);
-    g->hud_node = hud_make_node(w, g->cam, sun_node->params);
-    g->fauna_node = fauna_make_node(g->cam);
+    // Узлы сцены получают единый рендер-контекст (renderer.c) вместо cam/sun
+    const RendererContext *rc = renderer_context();
+    g->sky_node = sky_make_node(rc);
+    g->terr_node = terrain_make_node(w, wt, rc);
+    g->wheat_node = veg_make_node(w, rc);
+    g->obj_node = objects_make_node(w, rc);
+    g->field_node = field_make_node(w, g->field_pos, g->field_size, rc);
+    g->sel_node = selection_make_node(g->root, rc);
+    g->mm_node = minimap_make_node(w, wt->tex_base, rc);
+    g->hud_node = hud_make_node(w, rc);
+    g->fauna_node = fauna_make_node(rc);
     if (!g->sky_node || !g->terr_node || !g->wheat_node || !g->field_node ||
         !g->sel_node || !g->mm_node || !g->hud_node) {
         SDL_Log("Failed to create a scene node (missing texture/shader?)");

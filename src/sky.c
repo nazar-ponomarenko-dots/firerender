@@ -19,13 +19,12 @@ typedef struct {
     GLuint tex;                    // панорама неба (img/skybox.png)
     GLint u_forward, u_right, u_up, u_tanfov, u_aspect;
     GLint u_sundir, u_suncolor;
-    CameraParams *cam;             // базис вида (узел Camera)
-    SunParams *sun;                // направление и цвет солнца (узел Sun)
+    const RendererContext *rc;     // базис камеры и солнце (renderer.c)
 } SkyParams;
 
 static float g_fog_rgb[3] = { 0.6f, 0.65f, 0.7f };   // до загрузки неба
 
-SceneNode *sky_make_node(CameraParams *cam, SunParams *sun)
+SceneNode *sky_make_node(const RendererContext *rc)
 {
     // Панорама и тон — из map/map.json (sky = { tex, tint })
     MapSky sc;
@@ -71,8 +70,7 @@ SceneNode *sky_make_node(CameraParams *cam, SunParams *sun)
     p->vao = vao;
     p->vbo = vbo;
     p->tex = tex;
-    p->cam = cam;
-    p->sun = sun;
+    p->rc = rc;
     p->u_forward = glGetUniformLocation(prog, "uForward");
     p->u_right   = glGetUniformLocation(prog, "uRight");
     p->u_up      = glGetUniformLocation(prog, "uUp");
@@ -97,22 +95,19 @@ void sky_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     SkyParams *p = n->params;
-    const Camera *cam = &p->cam->cam;
-    float fwd[3], right[3], up[3];
-    camera_dirs(cam, fwd, right);
-    vec3_cross(right, fwd, up);        // up = right x forward (как в lookAt)
-    vec3_normalize(up);
+    const RendererContext *rc = p->rc;
 
     glDisable(GL_DEPTH_TEST);          // небо рисуется первым, без глубины
     glDepthMask(GL_FALSE);             // и не пишет в буфер глубины
     glUseProgram(p->prog);
-    glUniform3f(p->u_forward, fwd[0], fwd[1], fwd[2]);
-    glUniform3f(p->u_right, right[0], right[1], right[2]);
-    glUniform3f(p->u_up, up[0], up[1], up[2]);
-    glUniform1f(p->u_tanfov, tanf(p->cam->fov_deg * 3.14159f / 360.0f));
-    glUniform1f(p->u_aspect, p->cam->aspect);
-    glUniform3f(p->u_sundir, p->sun->dir[0], p->sun->dir[1], p->sun->dir[2]);
-    glUniform3f(p->u_suncolor, p->sun->color[0], p->sun->color[1], p->sun->color[2]);
+    glUniform3f(p->u_forward, rc->cam_fwd[0], rc->cam_fwd[1], rc->cam_fwd[2]);
+    glUniform3f(p->u_right, rc->cam_right[0], rc->cam_right[1], rc->cam_right[2]);
+    glUniform3f(p->u_up, rc->cam_up[0], rc->cam_up[1], rc->cam_up[2]);
+    glUniform1f(p->u_tanfov, tanf(rc->cam_fov_deg * 3.14159f / 360.0f));
+    glUniform1f(p->u_aspect, rc->cam_aspect);
+    // Солнце — первый направленный источник (индекс 0)
+    glUniform3f(p->u_sundir, rc->light_dir[0][0], rc->light_dir[0][1], rc->light_dir[0][2]);
+    glUniform3f(p->u_suncolor, rc->light_color[0][0], rc->light_color[0][1], rc->light_color[0][2]);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex);
     glBindVertexArray(p->vao);

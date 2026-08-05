@@ -49,7 +49,7 @@ typedef struct {
     GLint u_tint, u_mode, u_time;
     FaunaGroup g[FAUNA_GROUPS_MAX];
     int n;
-    CameraParams *cam;
+    const RendererContext *rc;   // позиция камеры (биллборды)
 } FaunaParams;
 
 static float s_time = 0.0f;
@@ -77,13 +77,13 @@ static float group_height(int type, float base)
     return base + frand() * 2.5f;
 }
 
-SceneNode *fauna_make_node(CameraParams *cam)
+SceneNode *fauna_make_node(const RendererContext *rc)
 {
     int gn = mapdata_fauna_count();
     if (gn <= 0) return NULL;
     FaunaParams *p = calloc(1, sizeof *p);
     if (!p) return NULL;
-    p->cam = cam;
+    p->rc = rc;
     if (gn > FAUNA_GROUPS_MAX) gn = FAUNA_GROUPS_MAX;
 
     for (int i = 0; i < gn; i++) {
@@ -215,7 +215,7 @@ void fauna_node_render(SceneNode *n, float dt)
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
     glUseProgram(p->prog);
-    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->cam->viewproj);
+    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->rc->viewproj);
     glUniform1f(p->u_time, s_time);
     glBindVertexArray(p->vao);
 
@@ -235,8 +235,8 @@ void fauna_node_render(SceneNode *n, float dt)
         for (int k = 0; k < g->count; k++) {
             FaunaP *q = &g->p[k];
             // биллборд: ось ширины перпендикулярна камере
-            float dx = p->cam->cam.pos[0] - q->x;
-            float dz = p->cam->cam.pos[2] - q->z;
+            float dx = p->rc->cam_pos[0] - q->x;
+            float dz = p->rc->cam_pos[2] - q->z;
             float d = sqrtf(dx * dx + dz * dz);
             if (d < 0.001f) d = 1.0f;
             glUniform3f(p->u_objpos, q->x, q->y, q->z);
