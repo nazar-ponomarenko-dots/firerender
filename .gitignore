@@ -1,0 +1,13 @@
+# Сборки и бинарники
+build/
+firerender
+firerender-linux.zip
+
+# Локальные настройки/сохранения игрока
+config.cfg
+save.cfg
+screenshots/
+*.ppm
+
+# Вендоренный исходник SDL3 (скачивается/собирается отдельно)
+third_party/SDL/
