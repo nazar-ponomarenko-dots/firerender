@@ -43,6 +43,8 @@ typedef struct RendererContext {
     float cam_vy;                // вертикальная скорость (HUD, физика ходьбы)
     int cam_fly;                 // режим полёта (ветер, HUD)
     float znear, zfar;
+    // Окно: размер в пикселях (актуальный, обновляет input.c/renderer)
+    int vw, vh;
     // Свет: направленные источники (0 = солнце)
     float light_dir[SUN_MAX_LIGHTS][3];
     float light_color[SUN_MAX_LIGHTS][3];

@@ -81,7 +81,7 @@ void input_process(void)
             SDL_GetWindowSizeInPixels(s_win, &vw, &vh);
             if (vw > 0 && vh > 0) {
                 glViewport(0, 0, vw, vh);
-                g_vw = vw; g_vh = vh;
+                renderer_set_viewport(vw, vh);
                 if (s_game->cam) s_game->cam->aspect = (float)vw / vh;
                 if (s_game->mm) { s_game->mm->vw = vw; s_game->mm->vh = vh; }
                 if (s_game->hud) { s_game->hud->vw = vw; s_game->hud->vh = vh; }

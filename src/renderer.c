@@ -32,6 +32,15 @@
 static BloomParams s_bloom;
 static int s_active = 0;       // мир загружен: FBO существуют
 static int s_wire = 0;         // каркасный режим (cvar r_wireframe)
+static int s_vw = 1280, s_vh = 720;   // размер окна в пикселях
+
+int renderer_vw(void) { return s_vw; }
+int renderer_vh(void) { return s_vh; }
+
+void renderer_set_viewport(int vw, int vh)
+{
+    if (vw > 0 && vh > 0) { s_vw = vw; s_vh = vh; }
+}
 
 // --- Рендер-контекст: единое кадровое состояние сцены --------------------------
 static RendererContext s_rc;
@@ -48,6 +57,8 @@ static void renderer_ctx_fill(Game *g)
 {
     RendererContext *rc = &s_rc;
     memset(rc, 0, sizeof *rc);
+    rc->vw = s_vw;
+    rc->vh = s_vh;
 
     // Камера
     if (g->cam) {
@@ -343,7 +354,7 @@ void renderer_begin(void)
     float clear_rgb[3] = { 0.6f, 0.65f, 0.7f };
     if (s_active) sky_fog_color(clear_rgb);
     glBindFramebuffer(GL_FRAMEBUFFER, s_active ? bloom_scene_fbo(&s_bloom) : 0);
-    glViewport(0, 0, g_vw, g_vh);
+    glViewport(0, 0, s_vw, s_vh);
     glClearColor(clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
     glDepthMask(GL_TRUE);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -380,7 +391,7 @@ void renderer_frame(Game *g, float dt, int draw_3d)
     }
     if (did_3d) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, g_vw, g_vh);
+        glViewport(0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();
         if (voxfog_is_on()) {
             Uint64 t0 = SDL_GetPerformanceCounter();
@@ -391,7 +402,7 @@ void renderer_frame(Game *g, float dt, int draw_3d)
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
             t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_FOG);
-            voxfog_render(g_vw, g_vh, &s_rc,
+            voxfog_render(s_vw, s_vh, &s_rc,
                           voxfog_texture(), bloom_scene_depth(&s_bloom));
             prof_gpu_end(PROF_FOG);
             t1 = SDL_GetPerformanceCounter();
@@ -415,20 +426,20 @@ void renderer_end(Game *g, float dt)
 {
     // Прицел-крест в центре (HL-стиль) — в игре, без консоли
     if (g->world_loaded && app_state() == APP_PLAY && !console_active()) {
-        const float cx = g_vw * 0.5f, cy = g_vh * 0.5f;
+        const float cx = s_vw * 0.5f, cy = s_vh * 0.5f;
         const float cw4[4] = { 0.92f, 0.96f, 1.0f, 0.9f };
         const float sh[4] = { 0.0f, 0.0f, 0.0f, 0.5f };
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         // тень креста
-        hud_rect_draw(g_vw, g_vh, cx - 1.5f + 1.0f, cy - 1.0f + 1.0f, 3.0f, 2.0f, sh);
+        hud_rect_draw(s_vw, s_vh, cx - 1.5f + 1.0f, cy - 1.0f + 1.0f, 3.0f, 2.0f, sh);
         // горизонталь: два луча
-        hud_rect_draw(g_vw, g_vh, cx - 10.0f, cy - 1.0f, 7.0f, 2.0f, cw4);
-        hud_rect_draw(g_vw, g_vh, cx + 3.0f, cy - 1.0f, 7.0f, 2.0f, cw4);
+        hud_rect_draw(s_vw, s_vh, cx - 10.0f, cy - 1.0f, 7.0f, 2.0f, cw4);
+        hud_rect_draw(s_vw, s_vh, cx + 3.0f, cy - 1.0f, 7.0f, 2.0f, cw4);
         // вертикаль: два луча
-        hud_rect_draw(g_vw, g_vh, cx - 1.0f, cy - 10.0f, 2.0f, 7.0f, cw4);
-        hud_rect_draw(g_vw, g_vh, cx - 1.0f, cy + 3.0f, 2.0f, 7.0f, cw4);
+        hud_rect_draw(s_vw, s_vh, cx - 1.0f, cy - 10.0f, 2.0f, 7.0f, cw4);
+        hud_rect_draw(s_vw, s_vh, cx - 1.0f, cy + 3.0f, 2.0f, 7.0f, cw4);
     }
 
     // Сообщение карты (message из триггеров/use) — по центру экрана.
@@ -437,10 +448,10 @@ void renderer_end(Game *g, float dt)
         float mw = hud_text_width(g->ui_msg);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.55f };
         const float fg[4] = { 0.9f, 0.95f, 1.0f, 1.0f };
-        float my = g_vh * 0.62f;
-        hud_rect_draw(g_vw, g_vh, (g_vw - mw) * 0.5f - 16.0f, my - 2.0f,
+        float my = s_vh * 0.62f;
+        hud_rect_draw(s_vw, s_vh, (s_vw - mw) * 0.5f - 16.0f, my - 2.0f,
                       mw + 32.0f, hud_text_line_height() + 8.0f, bg);
-        hud_text_draw(g_vw, g_vh, (g_vw - mw) * 0.5f,
+        hud_text_draw(s_vw, s_vh, (s_vw - mw) * 0.5f,
                       my + hud_text_ascent(), g->ui_msg, fg);
     }
 
@@ -456,10 +467,10 @@ void renderer_end(Game *g, float dt)
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.75f };
-        hud_rect_draw(g_vw, g_vh, (float)g_vw - 470.0f, 8.0f, 462.0f, 26.0f, bg);
+        hud_rect_draw(s_vw, s_vh, (float)s_vw - 470.0f, 8.0f, 462.0f, 26.0f, bg);
         // Текст по центру окошка: базовая линия = top + ascent
         const float fg[4] = { 0.85f, 0.95f, 1.0f, 1.0f };
-        hud_text_draw_small(g_vw, g_vh, (float)g_vw - 458.0f,
+        hud_text_draw_small(s_vw, s_vh, (float)s_vw - 458.0f,
                             8.0f + hud_text_ascent_small(), line, fg);
     }
     // profiler: панель справа снизу — полигоны, вершины, draw calls и
@@ -477,16 +488,16 @@ void renderer_end(Game *g, float dt)
         const float dim[4] = { 0.62f, 0.66f, 0.74f, 1.0f };
         const float hot[4] = { 1.0f, 0.72f, 0.3f, 1.0f };
         float fh = hud_text_line_height_small();
-        float y = (float)g_vh - 8.0f - fh * 8.0f;
-        hud_rect_draw(g_vw, g_vh, (float)g_vw - 330.0f, y - 8.0f, 322.0f,
+        float y = (float)s_vh - 8.0f - fh * 8.0f;
+        hud_rect_draw(s_vw, s_vh, (float)s_vw - 330.0f, y - 8.0f, 322.0f,
                       fh * 8.0f + 16.0f, bg);
-        float x = (float)g_vw - 318.0f;
+        float x = (float)s_vw - 318.0f;
         snprintf(line, sizeof line, "Frame %.1f ms  (%.0f fps)", frame, fps);
-        hud_text_draw_small(g_vw, g_vh, x, y + hud_text_ascent_small(), line, fg);
+        hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
         y += fh;
         snprintf(line, sizeof line, "Tris %d | Verts %d | Draws %d",
                  g_prof_tris, g_prof_verts, g_prof_draws);
-        hud_text_draw_small(g_vw, g_vh, x, y + hud_text_ascent_small(), line, fg);
+        hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
         y += fh;
         // строки по модулям (только ненулевые, в порядке убывания GPU-времени)
         int order[PROF_N];
@@ -496,7 +507,7 @@ void renderer_end(Game *g, float dt)
                 if (prof_gpu_ms(order[b]) > prof_gpu_ms(order[a])) {
                     int t = order[a]; order[a] = order[b]; order[b] = t;
                 }
-        for (int k = 0; k < PROF_N && y < (float)g_vh - 8.0f - fh; k++) {
+        for (int k = 0; k < PROF_N && y < (float)s_vh - 8.0f - fh; k++) {
             int i = order[k];
             float cpu = prof_ms(i);
             float gpu = prof_gpu_ms(i);
@@ -506,7 +517,7 @@ void renderer_end(Game *g, float dt)
             snprintf(line, sizeof line, "%-10s CPU %5.2f | GPU %5.2f ms",
                      prof_name(i), cpu, gpu);
             const float *c = (pct >= 25.0f) ? hot : (pct >= 10.0f ? fg : dim);
-            hud_text_draw_small(g_vw, g_vh, x, y + hud_text_ascent_small(), line, c);
+            hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, c);
             y += fh;
         }
     }

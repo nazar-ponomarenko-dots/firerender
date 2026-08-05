@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>   // access()
 #include <time.h>
 
 // --- Пак карты (maps/*.zip) ----------------------------------------------------
@@ -82,7 +83,42 @@ static unsigned char *pak_read(const char *path, unsigned int *size)
 
 // --- Файлы: пак карты -> диск -> ../диск --------------------------------------
 // Игра подсасывает ресурсы из своей папки (или на уровень выше — при
-// запуске из build/). Вшитых данных нет: для запуска нужны папки рядом.
+// запуске с build/). Вшитых данных нет: для запуска нужны папки рядом.
+// Резолвит относительный путь в первый существующий файл по цепочке fallback
+// (единый источник правды для ВСЕХ модулей: audio, mapdata, lua, textures).
+int resources_resolve_path(const char *rel_path, char *out, size_t out_sz)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s", rel_path);
+    // Локальный файл (относительный путь уже абсолютный или есть в CWD)
+    if (access(path, F_OK) == 0) {
+        snprintf(out, out_sz, "%s", path);
+        return 1;
+    }
+    // Через базовую директорию
+    if (s_base_dir[0] && s_base_dir[0] != '.') {
+        char cand[512];
+        snprintf(cand, sizeof cand, "%s/%s", s_base_dir, path);
+        if (access(cand, F_OK) == 0) {
+            snprintf(out, out_sz, "%s", cand);
+            return 1;
+        }
+        snprintf(cand, sizeof cand, "%s/../%s", s_base_dir, path);
+        if (access(cand, F_OK) == 0) {
+            snprintf(out, out_sz, "%s", cand);
+            return 1;
+        }
+    }
+    // Родительская директория текущей
+    char up[512];
+    snprintf(up, sizeof up, "../%s", path);
+    if (access(up, F_OK) == 0) {
+        snprintf(out, out_sz, "%s", up);
+        return 1;
+    }
+    return 0;
+}
+
 unsigned char *resources_read_file(const char *path, unsigned int *size)
 {
     // Пак: miniz отдаёт ровно размер файла — добавляем завершающий \0
@@ -100,29 +136,23 @@ unsigned char *resources_read_file(const char *path, unsigned int *size)
         return buf;
     }
 
-    // Кандидаты: base_dir/path, base_dir/../path, path, ../path
-    char candidates[4][512];
-    int ncand = 0;
-    snprintf(candidates[ncand++], sizeof candidates[0], "%s/%s", s_base_dir, path);
-    snprintf(candidates[ncand++], sizeof candidates[0], "%s/../%s", s_base_dir, path);
-    snprintf(candidates[ncand++], sizeof candidates[0], "%s", path);
-    snprintf(candidates[ncand++], sizeof candidates[0], "../%s", path);
-
-    for (int i = 0; i < ncand; i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (!f) continue;
-        fseek(f, 0, SEEK_END);
-        long szl = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        unsigned char *buf = malloc((size_t)szl + 1);
-        if (buf && fread(buf, 1, (size_t)szl, f) == (size_t)szl) {
+    char resolved[512];
+    if (resources_resolve_path(path, resolved, sizeof resolved)) {
+        FILE *f = fopen(resolved, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long szl = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            unsigned char *buf = malloc((size_t)szl + 1);
+            if (buf && fread(buf, 1, (size_t)szl, f) == (size_t)szl) {
+                fclose(f);
+                buf[szl] = 0;
+                if (size) *size = (unsigned int)szl;
+                return buf;
+            }
+            free(buf);
             fclose(f);
-            buf[szl] = 0;
-            if (size) *size = (unsigned int)szl;
-            return buf;
         }
-        free(buf);
-        fclose(f);
     }
     return NULL;
 }
@@ -143,6 +173,10 @@ typedef struct ResEntry {
     // Шейдерная программа: пути и mtime файлов (для hot-reload, см. resources_shader_reload)
     char vs[128], fs[128];
     long vs_mt, fs_mt;
+    // Текстура: параметры создания и mtime файла (для hot-reload текстур)
+    char tex_path[128];
+    int tex_channels, tex_wrap, tex_linear;
+    long tex_mt;
     struct ResEntry *next;
 } ResEntry;
 
@@ -202,23 +236,48 @@ static void cache_purge_pak(void)
     }
 }
 
-// stat с fallback: base_dir/path -> base_dir/../path -> path -> ../path
-static int stat_with_fallback(const char *path, struct stat *st)
+// mtime файла через единый резолвер путей (как resources_read_file)
+static long file_mtime(const char *path)
 {
-    char candidates[4][512];
-    int ncand = 0;
-    snprintf(candidates[ncand++], sizeof candidates[0], "%s/%s", s_base_dir, path);
-    snprintf(candidates[ncand++], sizeof candidates[0], "%s/../%s", s_base_dir, path);
-    snprintf(candidates[ncand++], sizeof candidates[0], "%s", path);
-    snprintf(candidates[ncand++], sizeof candidates[0], "../%s", path);
-
-    for (int i = 0; i < ncand; i++)
-        if (stat(candidates[i], st) == 0)
-            return 1;
+    char resolved[512];
+    struct stat st;
+    if (resources_resolve_path(path, resolved, sizeof resolved) &&
+        stat(resolved, &st) == 0)
+        return (long)st.st_mtime;
     return 0;
 }
 
 // --- Картинки ----------------------------------------------------------------
+// Загружает пиксели БЕЗ кеша (пак карты -> диск через резолвер).
+// Возвращает malloc-буфер (stbi), который обязан освободить вызывающий
+// через stbi_image_free(). NULL — не загрузилась.
+static unsigned char *image_load_raw(const char *path, int *w, int *h,
+                                     int channels)
+{
+    int iw = 0, ih = 0, c = 0;
+    unsigned char *p = NULL;
+    {   // пак карты
+        unsigned int sz = 0;
+        unsigned char *pb = pak_read(path, &sz);
+        if (pb) {
+            p = stbi_load_from_memory(pb, (int)sz, &iw, &ih, &c, channels);
+            free(pb);
+        }
+        if (!p) {
+            char resolved[512];
+            if (resources_resolve_path(path, resolved, sizeof resolved))
+                p = stbi_load(resolved, &iw, &ih, &c, channels);
+        }
+    }
+    if (!p) {
+        SDL_Log("Cannot load %s: %s", path, stbi_failure_reason());
+        return NULL;
+    }
+    if (w) *w = iw;
+    if (h) *h = ih;
+    return p;
+}
+
 unsigned char *resources_image(const char *path, int *w, int *h, int channels)
 {
     char key[256];
@@ -230,32 +289,11 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
         return e->data;
     }
 
-    int iw = 0, ih = 0, c = 0;
-    unsigned char *p = NULL;
-    {   // пак карты -> диск -> ../диск
-        unsigned int sz = 0;
-        unsigned char *pb = pak_read(path, &sz);
-        if (pb) {
-            p = stbi_load_from_memory(pb, (int)sz, &iw, &ih, &c, channels);
-            free(pb);
-        }
-        if (!p) {
-            char alt[512];
-            snprintf(alt, sizeof alt, "../%s", path);
-            const char *candidates[] = { path, alt };
-            for (int i = 0; i < 2 && !p; i++)
-                p = stbi_load(candidates[i], &iw, &ih, &c, channels);
-        }
-    }
-    if (!p) {
-        SDL_Log("Cannot load %s: %s", path, stbi_failure_reason());
-        return NULL;
-    }
+    unsigned char *p = image_load_raw(path, w, h, channels);
+    if (!p) return NULL;
     ResEntry *ne = cache_add(key, p, 1);
-    ne->iw = iw;
-    ne->ih = ih;
-    if (w) *w = iw;
-    if (h) *h = ih;
+    ne->iw = *w;
+    ne->ih = *h;
     return p;
 }
 
@@ -277,7 +315,56 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)tex, 1);
     ne->iw = w;
     ne->ih = h;
+    // Для hot-reload текстур: путь и параметры + mtime (если не из пака)
+    snprintf(ne->tex_path, sizeof ne->tex_path, "%s", path);
+    ne->tex_channels = channels;
+    ne->tex_wrap = wrap;
+    ne->tex_linear = linear;
+    ne->tex_mt = ne->from_pak ? 0 : file_mtime(path);
     return tex;
+}
+
+// Hot-reload текстур: перезагружает изменённые на диске файлы
+int resources_texture_reload(void)
+{
+    int changed = 0;
+    for (ResEntry *e = s_cache; e; e = e->next) {
+        if (strncmp(e->key, "tex#", 4) != 0) continue;
+        if (e->from_pak || e->tex_path[0] == 0) continue;
+        long mt = file_mtime(e->tex_path);
+        if (mt == e->tex_mt) continue;
+        int w = 0, h = 0;
+        unsigned char *img = image_load_raw(e->tex_path, &w, &h,
+                                            e->tex_channels);
+        if (!img) continue;
+        GLuint tex = make_texture(w, h, img,
+                                  e->tex_channels == 4 ? GL_RGBA : GL_RGB,
+                                  e->tex_wrap, e->tex_linear);
+        GLuint old = (GLuint)(uintptr_t)e->data;
+        glDeleteTextures(1, &old);
+        e->data = (void *)(uintptr_t)tex;
+        e->iw = w;
+        e->ih = h;
+        e->tex_mt = mt;
+        // Обновляем и кеш картинки (img#...) — свежие пиксели для новых текстур
+        {
+            char ikey[256];
+            snprintf(ikey, sizeof ikey, "img#%s#%d", e->tex_path,
+                     e->tex_channels);
+            ResEntry *im = cache_find(ikey);
+            if (im) {
+                stbi_image_free(im->data);
+                im->data = img;
+                im->iw = w;
+                im->ih = h;
+            } else {
+                stbi_image_free(img);
+            }
+        }
+        SDL_Log("texture reloaded: %s", e->tex_path);
+        changed++;
+    }
+    return changed;
 }
 
 void resources_texture_release(GLuint tex)
@@ -346,9 +433,8 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     snprintf(ne->vs, sizeof ne->vs, "%s", vs_path);
     snprintf(ne->fs, sizeof ne->fs, "%s", fs_path);
     if (!ne->from_pak) {
-        struct stat st;
-        if (stat_with_fallback(vs_path, &st)) ne->vs_mt = (long)st.st_mtime;
-        if (stat_with_fallback(fs_path, &st)) ne->fs_mt = (long)st.st_mtime;
+        ne->vs_mt = file_mtime(vs_path);
+        ne->fs_mt = file_mtime(fs_path);
     }
     return prog;
 }
@@ -372,10 +458,8 @@ int resources_shader_reload(void)
     for (ResEntry *e = s_cache; e; e = e->next) {
         if (strncmp(e->key, "prog#", 5) != 0) continue;
         if (e->from_pak || e->vs[0] == 0) continue;
-        struct stat st;
-        long mt0 = 0, mt1 = 0;
-        if (stat_with_fallback(e->vs, &st)) mt0 = (long)st.st_mtime;
-        if (stat_with_fallback(e->fs, &st)) mt1 = (long)st.st_mtime;
+        long mt0 = file_mtime(e->vs);
+        long mt1 = file_mtime(e->fs);
         if (mt0 == e->vs_mt && mt1 == e->fs_mt) continue;
         // Перекомпиляция: новый id встаёт в кеш, старую программу удаляем
         GLuint prog = program_link(e->vs, e->fs);

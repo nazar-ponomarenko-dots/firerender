@@ -50,9 +50,6 @@ typedef struct {
 #define GRID_DIV 8
 #define GRID_MAX 2048
 
-// Размер окна в пикселях (обновляют главный цикл и input.c)
-extern int g_vw, g_vh;
-
 // Текстуры мира, созданные world_load (владеет world_free)
 typedef struct {
     GLuint tex_height;   // высоты рельефа (GL_R8, LINEAR)

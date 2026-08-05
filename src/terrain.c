@@ -337,7 +337,7 @@ void terrain_node_render(SceneNode *n, float dt)
     }
 
     // обычный проход
-    glViewport(0, 0, g_vw, g_vh);
+    glViewport(0, 0, p->rc->vw, p->rc->vh);
     glEnable(GL_DEPTH_TEST);   // 3D: ближние склоны закрывают дальние
     glDepthMask(GL_TRUE);      // (скайбокс её выключает)
     glUseProgram(p->prog);

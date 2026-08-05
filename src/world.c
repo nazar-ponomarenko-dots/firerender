@@ -14,9 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Размер окна в пикселях (обновляют главный цикл и input.c)
-int g_vw, g_vh;
-
 // Текстуры мира и средняя яркость карты (принадлежат этому модулю)
 static GLuint s_tex_height, s_tex_base, s_tex_norm;
 static float s_avg_lum;
