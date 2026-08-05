@@ -329,6 +329,40 @@ static int l_terrain_height(lua_State *ls)
     return 1;
 }
 
+// engine.teleport(x, y, z, yaw, pitch) — телепорт игрока
+static int l_teleport(lua_State *ls)
+{
+    Game *g = game_instance();
+    if (g) {
+        float pos[3] = { (float)luaL_optnumber(ls,1,0),
+                         (float)luaL_optnumber(ls,2,0),
+                         (float)luaL_optnumber(ls,3,0) };
+        float yaw = (float)luaL_optnumber(ls,4,0);
+        float pit = (float)luaL_optnumber(ls,5,0);
+        game_apply_spawn(g, pos, yaw, pit);
+    }
+    return 0;
+}
+
+// engine.msg(text) — сообщение карты по центру экрана (как у триггеров)
+static int l_msg(lua_State *ls)
+{
+    Game *g = game_instance();
+    const char *m = luaL_optstring(ls, 1, "");
+    if (g) {
+        snprintf(g->ui_msg, sizeof g->ui_msg, "%s", m);
+        g->ui_msg_t = 4.0f;
+    }
+    return 0;
+}
+
+// engine.time() -> секунды с запуска движка
+static int l_time(lua_State *ls)
+{
+    lua_pushnumber(ls, SDL_GetTicks() / 1000.0);
+    return 1;
+}
+
 // engine.world_loaded() -> bool (мир загружен)
 static int l_world_loaded(lua_State *ls)
 {
@@ -443,6 +477,9 @@ static const luaL_Reg engine_lib[] = {
     { "camera",        l_camera },
     { "terrain_height", l_terrain_height },
     { "after",         l_after },
+    { "teleport",      l_teleport },
+    { "msg",           l_msg },
+    { "time",          l_time },
     { NULL, NULL }
 };
 
