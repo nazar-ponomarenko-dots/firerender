@@ -43,20 +43,6 @@ void entity_register_class(const EntityClass *cls)
     s_classes[s_cls_n++] = *cls;
 }
 
-// Отвязывает узел от родителя (иначе node_free_tree(world) удалит его дважды)
-static void node_unlink(SceneNode *n)
-{
-    SceneNode *p = n->parent;
-    if (!p) return;
-    if (p->first_child == n) p->first_child = n->next;
-    SceneNode *prev = NULL;
-    for (SceneNode *c = p->first_child; c && c != n; c = c->next) prev = c;
-    if (prev) prev->next = n->next;
-    if (p->last_child == n) p->last_child = n->next ? n->next : prev;
-    n->parent = NULL;
-    n->next = NULL;
-}
-
 static Entity *entity_new(const char *classname, SceneNode *node, void *data,
                           int owns_node)
 {
@@ -107,7 +93,7 @@ void entity_kill(Entity *e)
     if (e->cls && e->cls->kill) e->cls->kill(e);
     events_emit(EV_ENTITY_KILL, e, NULL);
     if (e->owns_node && e->node) {
-        node_unlink(e->node);                    // из дерева — иначе двойной free
+        node_remove(e->node);                  // из дерева — иначе двойной free
         node_free_tree(e->node);                 // узел создавал entity_spawn
     }
     e->classname = NULL;

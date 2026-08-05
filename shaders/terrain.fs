@@ -66,6 +66,23 @@ uniform vec3 uLightDir[SUN_MAX_LIGHTS];
 uniform vec3 uLightColor[SUN_MAX_LIGHTS];
 uniform float uLightIntensity[SUN_MAX_LIGHTS];
 uniform int uLightCount;          // реальное число источников (1..4)
+#define SCENE_MAX_POINT 8
+#define SCENE_MAX_SPOT  4
+// Точечные источники (map.json lights[]: point) — локальный свет с
+// квадратичным затуханием по дистанции, в каскадную тень не гаснет.
+uniform vec3 uPointPos[SCENE_MAX_POINT];
+uniform vec3 uPointColor[SCENE_MAX_POINT];
+uniform float uPointIntensity[SCENE_MAX_POINT];
+uniform float uPointRange[SCENE_MAX_POINT];
+uniform int uPointCount;
+// Прожекторы (spot): как точечные, но в конусе направления (см. карта)
+uniform vec3 uSpotPos[SCENE_MAX_SPOT];
+uniform vec3 uSpotDir[SCENE_MAX_SPOT];
+uniform vec3 uSpotColor[SCENE_MAX_SPOT];
+uniform float uSpotIntensity[SCENE_MAX_SPOT];
+uniform float uSpotRange[SCENE_MAX_SPOT];
+uniform float uSpotAngle[SCENE_MAX_SPOT];
+uniform int uSpotCount;
 
 // границы каскадов — ПОЛОВИНЫ боксов: фрагмент на дистанции d гарантированно
 // в боксе каскада. На границах каскады СМЕШИВАЮТСЯ (зона ~20% от границы) —
@@ -179,6 +196,28 @@ void main() {
             light += uLightColor[0] * uLightIntensity[0]
                    * (rim * 0.35 + pow(diff, 8.0) * 0.18 * sh);
         }
+    }
+    // Точечные источники: затухание по дистанции, локальный свет
+    for (int i = 0; i < uPointCount; i++) {
+        vec3 Lp = uPointPos[i] - vWorldPos;
+        float dpl = length(Lp);
+        vec3 lip = Lp / max(dpl, 0.001);
+        float att = max(1.0 - dpl / uPointRange[i], 0.0);
+        att *= att;
+        float diff = max(dot(N, lip), 0.0);
+        light += uPointColor[i] * uPointIntensity[i] * (0.5 + 0.5 * diff) * att;
+    }
+    // Прожекторы: точечный + конус с смягчённым краем
+    for (int i = 0; i < uSpotCount; i++) {
+        vec3 Lp = uSpotPos[i] - vWorldPos;
+        float dpl = length(Lp);
+        vec3 lip = Lp / max(dpl, 0.001);
+        float att = max(1.0 - dpl / uSpotRange[i], 0.0);
+        att *= att;
+        float cone = max(dot(-lip, normalize(uSpotDir[i])), 0.0);
+        float edge = smoothstep(uSpotAngle[i] - 0.08, uSpotAngle[i], cone);
+        float diff = max(dot(N, lip), 0.0);
+        light += uSpotColor[i] * uSpotIntensity[i] * (0.5 + 0.5 * diff) * att * edge;
     }
     light = min(light, vec3(1.0));
     vec3 col = base * light;

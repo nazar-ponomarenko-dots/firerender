@@ -21,6 +21,10 @@
 #include "shadow.h"      // SHADOW_CASCADES
 #include "sun.h"         // SUN_MAX_LIGHTS
 
+// --- Точечные и прожекторные источники (лимиты uniform-массивов) ---------------
+#define SCENE_MAX_POINT 8
+#define SCENE_MAX_SPOT  4
+
 // --- Проход рендера ------------------------------------------------------------
 enum {
     RP_COLOR = 0,   // обычный проход (в FBO сцены)
@@ -44,6 +48,20 @@ typedef struct RendererContext {
     float light_color[SUN_MAX_LIGHTS][3];
     float light_intensity[SUN_MAX_LIGHTS];
     int light_count;
+    // Точечные источники (map.json lights[]: point)
+    float point_pos[SCENE_MAX_POINT][3];
+    float point_color[SCENE_MAX_POINT][3];
+    float point_intensity[SCENE_MAX_POINT];
+    float point_range[SCENE_MAX_POINT];
+    int point_count;
+    // Прожекторы (spot): позиция + направление + полуугол конуса
+    float spot_pos[SCENE_MAX_SPOT][3];
+    float spot_dir[SCENE_MAX_SPOT][3];
+    float spot_color[SCENE_MAX_SPOT][3];
+    float spot_intensity[SCENE_MAX_SPOT];
+    float spot_range[SCENE_MAX_SPOT];
+    float spot_angle[SCENE_MAX_SPOT];
+    int spot_count;
     // Цвета окружения (унифицированы для всех материалов сцены)
     float ambient[3], sky_color[3], ground_color[3];
     // Туман
@@ -73,6 +91,8 @@ typedef struct RendererContext {
 typedef struct {
     GLint u_viewproj, u_campos;
     GLint u_lightdir, u_lightcolor, u_lightint, u_lightcount;
+    GLint u_pointpos, u_pointcolor, u_pointint, u_pointrange, u_pointcount;
+    GLint u_spotpos, u_spotdir, u_spotcolor, u_spotint, u_spotrange, u_spotangle, u_spotcount;
     GLint u_ambient, u_skycolor, u_groundcolor;
     GLint u_fogcolor, u_fogstart, u_fogend, u_fogon;
     GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES];
