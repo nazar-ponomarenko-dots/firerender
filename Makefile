@@ -105,7 +105,7 @@ SDL3WIN_LIB  ?= $(SDL3WIN_ROOT)/lib/libSDL3.a
 win:
 	@mkdir -p build
 	x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -mwindows \
-		-Isrc -Ithird_party -Ithird_party/miniz -I$(SDL3WIN_INC) \
+		-Isrc -Ithird_party -Ithird_party/lua -Ithird_party/miniz -I$(SDL3WIN_INC) \
 		$(SRC) -o build/firerender.exe \
 		$(SDL3WIN_LIB) \
 		-lopengl32 -lwinmm -luser32 -lgdi32 -limm32 -lole32 -loleaut32 \

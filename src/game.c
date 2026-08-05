@@ -600,6 +600,7 @@ static void world_unload_geometry(Game *g)
 void game_unload_world(Game *g)
 {
     if (!g->world_loaded) return;
+    lua_engine_clear();          // сбросить таймеры/update скрипта карты
     audio_stop_map();            // фаза 4: звук карты
     scene_teardown(g);           // фаза 2: сцена
     world_unload_geometry(g);    // фаза 1: данные карты
