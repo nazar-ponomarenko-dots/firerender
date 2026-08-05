@@ -16,7 +16,9 @@
 
 #include "console.h"
 #include "cvars.h"
+#include "entity.h"
 #include "events.h"
+#include "game.h"
 #include "resources.h"
 
 #include <lua.h>
@@ -152,6 +154,162 @@ static int l_on(lua_State *ls)
     return 0;
 }
 
+// --- Скриптовые сущности (Lua-классы) -------------------------------------------
+// engine.entity_class("имя", { spawn=fn, think=fn, kill=fn }) регистрирует
+// класс сущности: C-колбэки (lua_cls_*) по e->classname находят Lua-рефы и
+// вызывают их с (Entity, dt). Никаких трамплинов — идентичность по имени.
+#define LUACLS_MAX 16
+typedef struct { char name[64]; int spawn, think, kill; } LuaCls;
+static LuaCls s_luacls[LUACLS_MAX];
+static int s_luacls_n = 0;
+
+static LuaCls *lua_cls_find(const char *name)
+{
+    if (!name) return NULL;
+    for (int i = 0; i < s_luacls_n; i++)
+        if (strcmp(s_luacls[i].name, name) == 0) return &s_luacls[i];
+    return NULL;
+}
+
+// Вызывает Lua-колбэк класса с (entity, dt)
+static void lua_cls_call(LuaCls *c, int ref, Entity *e, float dt)
+{
+    if (ref == LUA_NOREF) return;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+    lua_pushlightuserdata(L, e);
+    lua_pushnumber(L, dt);
+    if (lua_pcall(L, 2, 0, 0) != 0)
+        lua_engine_print(lua_tostring(L, -1));
+}
+
+static void lua_cls_spawn(Entity *e)
+{
+    LuaCls *c = lua_cls_find(e->classname);
+    if (c) lua_cls_call(c, c->spawn, e, 0.0f);
+}
+static void lua_cls_think(Entity *e, float dt)
+{
+    LuaCls *c = lua_cls_find(e->classname);
+    if (c) lua_cls_call(c, c->think, e, dt);
+}
+static void lua_cls_kill(Entity *e)
+{
+    LuaCls *c = lua_cls_find(e->classname);
+    if (c) lua_cls_call(c, c->kill, e, 0.0f);
+}
+
+// Вспомогательная: взять колбэк из таблицы в ref (или LUA_NOREF)
+static void lua_cls_take(lua_State *ls, int tblidx, const char *field, int *ref)
+{
+    lua_getfield(ls, tblidx, field);
+    if (lua_isfunction(ls, -1)) *ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+    else lua_pop(ls, 1);
+}
+
+static int l_entity_class(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    luaL_checktype(ls, 2, LUA_TTABLE);
+    if (s_luacls_n >= LUACLS_MAX) {
+        lua_engine_print("engine.entity_class: лимит Lua-классов");
+        return 0;
+    }
+    LuaCls *c = &s_luacls[s_luacls_n++];
+    snprintf(c->name, sizeof c->name, "%s", name);
+    c->spawn = c->think = c->kill = LUA_NOREF;
+    lua_cls_take(ls, 2, "spawn", &c->spawn);
+    lua_cls_take(ls, 2, "think", &c->think);
+    lua_cls_take(ls, 2, "kill",  &c->kill);
+    EntityClass cls = {
+        c->name,
+        c->spawn >= 0 ? lua_cls_spawn : NULL,
+        c->think >= 0 ? lua_cls_think : NULL,
+        c->kill  >= 0 ? lua_cls_kill  : NULL
+    };
+    entity_register_class(&cls);
+    return 0;
+}
+
+// engine.entity_spawn("класс", x, y, z) -> Entity (lightuserdata)
+static int l_entity_spawn(lua_State *ls)
+{
+    const char *cls = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    Entity *e = entity_spawn(cls, pos, NULL, NULL);
+    lua_pushlightuserdata(ls, e);
+    return 1;
+}
+
+// engine.entity_kill(entity)
+static int l_entity_kill(lua_State *ls)
+{
+    Entity *e = lua_touserdata(ls, 1);
+    if (e) entity_kill(e);
+    return 0;
+}
+
+// engine.entity_find("класс", n) -> Entity (n-я с нуля) или nil
+static int l_entity_find(lua_State *ls)
+{
+    const char *cls = luaL_checkstring(ls, 1);
+    int n = (int)luaL_optinteger(ls, 2, 0);
+    Entity *e = entity_find_class(cls, n);
+    if (e) lua_pushlightuserdata(ls, e);
+    else lua_pushnil(ls);
+    return 1;
+}
+
+// engine.entity_pos(e) -> x, y, z (позиция узла сущности)
+static int l_entity_pos(lua_State *ls)
+{
+    Entity *e = lua_touserdata(ls, 1);
+    float x = 0, y = 0, z = 0;
+    if (e && e->node) {
+        x = e->node->pos[0]; y = e->node->pos[1]; z = e->node->pos[2];
+    }
+    lua_pushnumber(ls, x);
+    lua_pushnumber(ls, y);
+    lua_pushnumber(ls, z);
+    return 3;
+}
+
+// engine.entity_set_pos(e, x, y, z)
+static int l_entity_set_pos(lua_State *ls)
+{
+    Entity *e = lua_touserdata(ls, 1);
+    if (e && e->node) {
+        e->node->pos[0] = (float)luaL_optnumber(ls, 2, 0);
+        e->node->pos[1] = (float)luaL_optnumber(ls, 3, 0);
+        e->node->pos[2] = (float)luaL_optnumber(ls, 4, 0);
+    }
+    return 0;
+}
+
+// engine.entity_classname(e) -> строка
+static int l_entity_classname(lua_State *ls)
+{
+    Entity *e = lua_touserdata(ls, 1);
+    lua_pushstring(ls, (e && e->classname) ? e->classname : "");
+    return 1;
+}
+
+// engine.world_loaded() -> bool (мир загружен)
+static int l_world_loaded(lua_State *ls)
+{
+    Game *g = game_instance();
+    lua_pushboolean(ls, g ? g->world_loaded : 0);
+    return 1;
+}
+
+// engine.entity_count() -> число сущностей
+static int l_entity_count(lua_State *ls)
+{
+    lua_pushinteger(ls, entity_count());
+    return 1;
+}
+
 // --- engine.update: per-frame колбэк -------------------------------------------
 static int s_update_ref = LUA_NOREF;
 
@@ -173,13 +331,22 @@ void lua_engine_update(float dt)
 
 // --- Инициализация -------------------------------------------------------------
 static const luaL_Reg engine_lib[] = {
-    { "log",      l_log },
-    { "cvar_get", l_cvar_get },
-    { "cvar_set", l_cvar_set },
-    { "exec",     l_exec },
-    { "cmd",      l_cmd },
-    { "on",       l_on },
-    { "update",   l_update },
+    { "log",           l_log },
+    { "cvar_get",      l_cvar_get },
+    { "cvar_set",      l_cvar_set },
+    { "exec",          l_exec },
+    { "cmd",           l_cmd },
+    { "on",            l_on },
+    { "update",        l_update },
+    { "entity_class",  l_entity_class },
+    { "entity_spawn",  l_entity_spawn },
+    { "entity_kill",   l_entity_kill },
+    { "entity_find",   l_entity_find },
+    { "entity_count",  l_entity_count },
+    { "entity_pos",    l_entity_pos },
+    { "entity_set_pos", l_entity_set_pos },
+    { "entity_classname", l_entity_classname },
+    { "world_loaded",  l_world_loaded },
     { NULL, NULL }
 };
 
