@@ -210,11 +210,19 @@ static int l_entity_class(lua_State *ls)
 {
     const char *name = luaL_checkstring(ls, 1);
     luaL_checktype(ls, 2, LUA_TTABLE);
-    if (s_luacls_n >= LUACLS_MAX) {
-        lua_engine_print("engine.entity_class: лимит Lua-классов");
-        return 0;
+    // Повторная регистрация (перезагрузка карты) — перезаписываем слот по имени
+    LuaCls *c = lua_cls_find(name);
+    if (c) {
+        luaL_unref(ls, LUA_REGISTRYINDEX, c->spawn);
+        luaL_unref(ls, LUA_REGISTRYINDEX, c->think);
+        luaL_unref(ls, LUA_REGISTRYINDEX, c->kill);
+    } else {
+        if (s_luacls_n >= LUACLS_MAX) {
+            lua_engine_print("engine.entity_class: лимит Lua-классов");
+            return 0;
+        }
+        c = &s_luacls[s_luacls_n++];
     }
-    LuaCls *c = &s_luacls[s_luacls_n++];
     snprintf(c->name, sizeof c->name, "%s", name);
     c->spawn = c->think = c->kill = LUA_NOREF;
     lua_cls_take(ls, 2, "spawn", &c->spawn);
@@ -295,6 +303,32 @@ static int l_entity_classname(lua_State *ls)
     return 1;
 }
 
+// engine.camera() -> x, y, z, yaw, pitch (позиция/взгляд игрока)
+static int l_camera(lua_State *ls)
+{
+    Game *g = game_instance();
+    float x = 0, y = 0, z = 0, yaw = 0, pit = 0;
+    if (g && g->cam) {
+        x = g->cam->cam.pos[0]; y = g->cam->cam.pos[1]; z = g->cam->cam.pos[2];
+        yaw = g->cam->cam.yaw; pit = g->cam->cam.pitch;
+    }
+    lua_pushnumber(ls, x); lua_pushnumber(ls, y); lua_pushnumber(ls, z);
+    lua_pushnumber(ls, yaw); lua_pushnumber(ls, pit);
+    return 5;
+}
+
+// engine.terrain_height(x, z) -> высота рельефа в точке
+static int l_terrain_height(lua_State *ls)
+{
+    Game *g = game_instance();
+    float h = 0;
+    if (g && g->world_loaded)
+        h = sample_height(&g->world, (float)luaL_checknumber(ls, 1),
+                          (float)luaL_checknumber(ls, 2));
+    lua_pushnumber(ls, h);
+    return 1;
+}
+
 // engine.world_loaded() -> bool (мир загружен)
 static int l_world_loaded(lua_State *ls)
 {
@@ -310,6 +344,39 @@ static int l_entity_count(lua_State *ls)
     return 1;
 }
 
+// --- Таймеры: engine.after(сек, fn) ---------------------------------------------
+#define LUA_TIMERS_MAX 32
+typedef struct { float remaining; int ref; } LuaTimer;
+static LuaTimer s_timers[LUA_TIMERS_MAX];
+static int s_timers_n = 0;
+
+static int l_after(lua_State *ls)
+{
+    float d = (float)luaL_checknumber(ls, 1);
+    luaL_checktype(ls, 2, LUA_TFUNCTION);
+    if (s_timers_n >= LUA_TIMERS_MAX) {
+        lua_engine_print("engine.after: лимит таймеров");
+        return 0;
+    }
+    s_timers[s_timers_n].remaining = d > 0.0f ? d : 0.0f;
+    s_timers[s_timers_n].ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+    s_timers_n++;
+    return 0;
+}
+
+static void lua_timers_tick(float dt)
+{
+    for (int i = 0; i < s_timers_n; ) {
+        s_timers[i].remaining -= dt;
+        if (s_timers[i].remaining > 0.0f) { i++; continue; }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, s_timers[i].ref);
+        if (lua_pcall(L, 0, 0, 0) != 0)
+            lua_engine_print(lua_tostring(L, -1));
+        luaL_unref(L, LUA_REGISTRYINDEX, s_timers[i].ref);
+        s_timers[i] = s_timers[--s_timers_n];   // порядок не важен
+    }
+}
+
 // --- engine.update: per-frame колбэк -------------------------------------------
 static int s_update_ref = LUA_NOREF;
 
@@ -322,11 +389,37 @@ static int l_update(lua_State *ls)
 
 void lua_engine_update(float dt)
 {
-    if (!L || s_update_ref == LUA_NOREF) return;
-    lua_rawgeti(L, LUA_REGISTRYINDEX, s_update_ref);
-    lua_pushnumber(L, dt);
-    if (lua_pcall(L, 1, 0, 0) != 0)
-        lua_engine_print(lua_tostring(L, -1));
+    if (!L) return;
+    lua_timers_tick(dt);
+    if (s_update_ref != LUA_NOREF) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, s_update_ref);
+        lua_pushnumber(L, dt);
+        if (lua_pcall(L, 1, 0, 0) != 0)
+            lua_engine_print(lua_tostring(L, -1));
+    }
+}
+
+// --- Скрипт карты: lua/maps/<карта>.lua ----------------------------------------
+// Вызывается ПОСЛЕ загрузки мира (в конце game_load_world): скрипт получает
+// доступ к движку (engine) и уже заспавненным сущностям. Отсутствие файла —
+// не ошибка.
+void lua_engine_map(const char *map_name)
+{
+    if (!L || !map_name || !map_name[0]) return;
+    char path[128];
+    snprintf(path, sizeof path, "lua/maps/%s.lua", map_name);
+    char *src = resources_read_text(path);
+    if (!src) return;
+    int rc = luaL_loadbuffer(L, src, strlen(src), path);
+    free(src);
+    if (rc != 0) {
+        SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
+        return;
+    }
+    if (lua_pcall(L, 0, 0, 0) != 0)
+        SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
+    else
+        SDL_Log("lua: карта %s: скрипт %s", map_name, path);
 }
 
 // --- Инициализация -------------------------------------------------------------
@@ -347,6 +440,9 @@ static const luaL_Reg engine_lib[] = {
     { "entity_set_pos", l_entity_set_pos },
     { "entity_classname", l_entity_classname },
     { "world_loaded",  l_world_loaded },
+    { "camera",        l_camera },
+    { "terrain_height", l_terrain_height },
+    { "after",         l_after },
     { NULL, NULL }
 };
 
@@ -357,7 +453,12 @@ void lua_engine_init(void)
         SDL_Log("lua: не удалось создать состояние");
         return;
     }
-    luaL_openlibs(L);
+    // Песочница: только безопасные библиотеки (без os/io/package/debug —
+    // скрипт не может читать файлы и запускать процессы). Строки/таблицы/математика.
+    luaL_requiref(L, "_G", luaopen_base, 1); lua_pop(L, 1);
+    luaL_requiref(L, "string", luaopen_string, 1); lua_pop(L, 1);
+    luaL_requiref(L, "table", luaopen_table, 1); lua_pop(L, 1);
+    luaL_requiref(L, "math", luaopen_math, 1); lua_pop(L, 1);
     luaL_newlib(L, engine_lib);
     lua_setglobal(L, "engine");
 

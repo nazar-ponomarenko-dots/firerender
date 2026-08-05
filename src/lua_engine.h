@@ -14,8 +14,11 @@
 // в фазе APP_BOOT, ПОСЛЕ console_init (нужен console_print).
 void lua_engine_init(void);
 
-// Каждый кадр: вызывает зарегистрированную скриптом функцию update(dt),
-// если она есть (engine.update).
+// Каждый кадр: таймеры (engine.after) и функция update(dt) скрипта.
 void lua_engine_update(float dt);
+
+// Скрипт карты: загружает lua/maps/<карта>.lua ПОСЛЕ загрузки мира.
+// Отсутствие файла — не ошибка. Вызывать в конце game_load_world.
+void lua_engine_map(const char *map_name);
 
 #endif
