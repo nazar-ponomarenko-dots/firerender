@@ -30,8 +30,10 @@ CC   := gcc
 #   -Wall -Wextra  — все основные предупреждения (очень полезно в C)
 #   -Isrc          — чтобы #include "camera.h" и т.п. находились в src/
 #   pkg-config     — флаги include/lib для SDL3 из системы
-CFLAGS := -O2 -Wall -Wextra -Ithird_party -Ithird_party/miniz -Isrc $(shell pkg-config --cflags sdl3)
-LIBS   := $(shell pkg-config --libs sdl3) -lm   # -lm: математика (sin/cos/sqrt)
+LUA_CFLAGS ?= $(shell pkg-config --cflags lua5.4)   # Lua: -I/usr/include/lua5.4
+LUA_LIBS   ?= $(shell pkg-config --libs lua5.4)      # -llua5.4
+CFLAGS := -O2 -Wall -Wextra -Ithird_party -Ithird_party/miniz -Isrc $(shell pkg-config --cflags sdl3) $(LUA_CFLAGS)
+LIBS   := $(shell pkg-config --libs sdl3) -lm $(LUA_LIBS)   # -lm: математика
 
 # Исходники и бинарник ---------------------------------------------------------
 SRC := $(wildcard src/*.c) \

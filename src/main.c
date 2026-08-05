@@ -29,6 +29,7 @@
 #include "commands.h"
 #include "renderer.h"
 #include "input.h"
+#include "lua_engine.h"
 #include "shader.h"   // shader_hot_reload (см. reload_shaders)
 #include "app.h"
 #include "console.h"
@@ -134,6 +135,7 @@ static void boot_init(Game *g)
     app_init();                  // фон img/menu.png
     console_autoload();          // config.cfg: cvar'ы и бинды пользователя
     game_map_config_load(g);     // + выбранная карта
+    lua_engine_init();           // скрипты Lua (после консоли и cvar'ов)
     app_set_state(APP_MENU);     // фаза закончена: меню
 }
 
@@ -284,6 +286,7 @@ int main(int argc, char *argv[])
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
         game_update(&game, dt);             // мир: узлы, триггеры/use, туман
         audio_update();                     // фоновые петли и 3D-источники
+        lua_engine_update(dt);              // per-frame колбэк скрипта
 
         sync_cvars(&game);
         input_sync_mode();

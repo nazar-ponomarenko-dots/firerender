@@ -24,6 +24,7 @@
 #include "entity.h"
 #include "fauna.h"
 #include "field.h"
+#include "lua_engine.h"
 #include "mapdata.h"
 #include "objects.h"
 #include "renderer.h"
@@ -545,6 +546,9 @@ int game_load_world(Game *g)
     if (cvar_get("r_shadows_mode") == 2.0f)
         terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
     SDL_Log("World loaded (%.0fx%.0f m)", g->world.world_w, g->world.world_d);
+
+    // Скрипт карты (lua/maps/<карта>.lua): после сцены и сущностей
+    lua_engine_map(g->map_name);
     return 0;
 }
 
