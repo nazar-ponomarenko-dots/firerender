@@ -140,7 +140,7 @@ static void shobjs_build(const WorldState *w)
 
 // Луч к солнцу: задевает ли крону дерева? Бинарный поиск по x отсекает
 // почти все объекты — мелкий шаг (4 м) не даёт "дырок" в тени.
-static int ray_hits_object(float x, float y, float z, float dz)
+static int ray_hits_object(float x, float y, float z)
 {
     if (s_shobjs_n == 0) return 0;
     // диапазон объектов с |ox| < 120 м (тень от дальних деревьев незаметна)
@@ -430,7 +430,7 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
                     float py = y + dy * tt;
                     if (px < 0 || pz < 0 || px > w->world_w || pz > w->world_d)
                         break;
-                    if (ray_hits_object(px, py, pz, dz)) { shadow = 1; break; }
+                    if (ray_hits_object(px, py, pz)) { shadow = 1; break; }
                 }
             }
             // В OpenGL первый ряд данных glTexImage2D — это v=0 (НИЗ текстуры).
