@@ -77,6 +77,27 @@ static void renderer_ctx_fill(Game *g)
         }
         rc->light_count = n;
     }
+    // Точечные и прожекторные источники (map.json lights[]: point/spot)
+    rc->point_count = rc->spot_count = 0;
+    for (int i = 0; i < mapdata_light_count(); i++) {
+        const MapLight *l = mapdata_light(i);
+        if (!l) continue;
+        if (l->type == LIGHT_POINT && rc->point_count < SCENE_MAX_POINT) {
+            int k = rc->point_count++;
+            memcpy(rc->point_pos[k], l->pos, 3 * sizeof(float));
+            memcpy(rc->point_color[k], l->color, 3 * sizeof(float));
+            rc->point_intensity[k] = l->intensity;
+            rc->point_range[k] = l->range > 0.1f ? l->range : 20.0f;
+        } else if (l->type == LIGHT_SPOT && rc->spot_count < SCENE_MAX_SPOT) {
+            int k = rc->spot_count++;
+            memcpy(rc->spot_pos[k], l->pos, 3 * sizeof(float));
+            memcpy(rc->spot_dir[k], l->dir, 3 * sizeof(float));
+            memcpy(rc->spot_color[k], l->color, 3 * sizeof(float));
+            rc->spot_intensity[k] = l->intensity;
+            rc->spot_range[k] = l->range > 0.1f ? l->range : 20.0f;
+            rc->spot_angle[k] = l->angle > 0.01f ? l->angle : 0.6f;
+        }
+    }
     // Окружение и туман — унифицированы для всех материалов сцены
     rc->ambient[0] = 0.75f; rc->ambient[1] = 0.80f; rc->ambient[2] = 0.90f;
     rc->ground_color[0] = 0.22f; rc->ground_color[1] = 0.30f; rc->ground_color[2] = 0.18f;
@@ -141,6 +162,18 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     su->u_lightcolor = glGetUniformLocation(prog, "uLightColor");
     su->u_lightint = glGetUniformLocation(prog, "uLightIntensity");
     su->u_lightcount = glGetUniformLocation(prog, "uLightCount");
+    su->u_pointpos = glGetUniformLocation(prog, "uPointPos");
+    su->u_pointcolor = glGetUniformLocation(prog, "uPointColor");
+    su->u_pointint = glGetUniformLocation(prog, "uPointIntensity");
+    su->u_pointrange = glGetUniformLocation(prog, "uPointRange");
+    su->u_pointcount = glGetUniformLocation(prog, "uPointCount");
+    su->u_spotpos = glGetUniformLocation(prog, "uSpotPos");
+    su->u_spotdir = glGetUniformLocation(prog, "uSpotDir");
+    su->u_spotcolor = glGetUniformLocation(prog, "uSpotColor");
+    su->u_spotint = glGetUniformLocation(prog, "uSpotIntensity");
+    su->u_spotrange = glGetUniformLocation(prog, "uSpotRange");
+    su->u_spotangle = glGetUniformLocation(prog, "uSpotAngle");
+    su->u_spotcount = glGetUniformLocation(prog, "uSpotCount");
     su->u_ambient  = glGetUniformLocation(prog, "uAmbient");
     su->u_skycolor = glGetUniformLocation(prog, "uSkyColor");
     su->u_groundcolor = glGetUniformLocation(prog, "uGroundColor");
@@ -182,6 +215,19 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     if (su->u_lightint >= 0)
         glUniform1fv(su->u_lightint, SUN_MAX_LIGHTS, rc->light_intensity);
     if (su->u_lightcount >= 0) glUniform1i(su->u_lightcount, rc->light_count);
+    // Точечные и прожекторные источники
+    if (su->u_pointpos >= 0) glUniform3fv(su->u_pointpos, SCENE_MAX_POINT, &rc->point_pos[0][0]);
+    if (su->u_pointcolor >= 0) glUniform3fv(su->u_pointcolor, SCENE_MAX_POINT, &rc->point_color[0][0]);
+    if (su->u_pointint >= 0) glUniform1fv(su->u_pointint, SCENE_MAX_POINT, rc->point_intensity);
+    if (su->u_pointrange >= 0) glUniform1fv(su->u_pointrange, SCENE_MAX_POINT, rc->point_range);
+    if (su->u_pointcount >= 0) glUniform1i(su->u_pointcount, rc->point_count);
+    if (su->u_spotpos >= 0) glUniform3fv(su->u_spotpos, SCENE_MAX_SPOT, &rc->spot_pos[0][0]);
+    if (su->u_spotdir >= 0) glUniform3fv(su->u_spotdir, SCENE_MAX_SPOT, &rc->spot_dir[0][0]);
+    if (su->u_spotcolor >= 0) glUniform3fv(su->u_spotcolor, SCENE_MAX_SPOT, &rc->spot_color[0][0]);
+    if (su->u_spotint >= 0) glUniform1fv(su->u_spotint, SCENE_MAX_SPOT, rc->spot_intensity);
+    if (su->u_spotrange >= 0) glUniform1fv(su->u_spotrange, SCENE_MAX_SPOT, rc->spot_range);
+    if (su->u_spotangle >= 0) glUniform1fv(su->u_spotangle, SCENE_MAX_SPOT, rc->spot_angle);
+    if (su->u_spotcount >= 0) glUniform1i(su->u_spotcount, rc->spot_count);
     if (su->u_ambient >= 0)
         glUniform3f(su->u_ambient, rc->ambient[0], rc->ambient[1], rc->ambient[2]);
     if (su->u_skycolor >= 0)

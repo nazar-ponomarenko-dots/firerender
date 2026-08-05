@@ -306,6 +306,8 @@ static void parse_light(const JsonNode *obj)
     parse_vec3(json_find(obj, "dir"), l->dir, 0.0f);
     parse_vec3(json_find(obj, "color"), l->color, 1.0f);
     l->intensity = (float)json_num(json_find(obj, "intensity"), 1.0);
+    l->range = (float)json_num(json_find(obj, "range"), 20.0);
+    l->angle = (float)json_num(json_find(obj, "angle"), 0.6);
     // Тени источника: shadow = { enabled, bias, bias_veg }. Значения по
     // умолчанию совпадают с прежними константами (4/2 латеральных текселя).
     const JsonNode *sh = json_find(obj, "shadow");

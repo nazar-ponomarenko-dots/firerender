@@ -27,6 +27,8 @@ typedef struct {
     float dir[3];        // направление (directional/spot)
     float color[3];      // цвет света
     float intensity;     // сила света
+    float range;         // радиус действия (point/spot), м
+    float angle;         // полуугол конуса (spot), рад
     int shadow_on;       // свет отбрасывает тени? (shadow/enabled)
     float shadow_bias;   // bias теней рельефа (shadow/bias, латеральных текселей)
     float shadow_bias_veg; // bias теней растительности (shadow/bias_veg)

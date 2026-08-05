@@ -29,6 +29,14 @@ SceneNode *node_new(const char *name, const char *type,
                     const float *pos, const float *size,
                     void *params, NodeFn update, NodeFn render);
 void node_add(SceneNode *parent, SceneNode *child);
+
+// Отвязать узел от родителя (сам узел и его params не освобождаются).
+// Удобно перед node_free_tree, чтобы не освобождать узел дважды.
+void node_remove(SceneNode *node);
+
+// Найти узел по имени в поддереве (DFS). NULL — не найден.
+SceneNode *node_find(SceneNode *root, const char *name);
+
 void node_update_tree(SceneNode *n, float dt);
 void node_render_tree(SceneNode *n, float dt);
 void node_free_tree(SceneNode *n);
