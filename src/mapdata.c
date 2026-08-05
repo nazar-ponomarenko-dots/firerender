@@ -113,18 +113,18 @@ static void parse_vec3(const JsonNode *arr, float out[3], float def)
 }
 
 // Блок render = { ... } — полная настройка отображения объекта
-static void parse_render(const JsonNode *obj, MapObjectRender *r)
+static void parse_render(const JsonNode *obj, Material *r)
 {
     const JsonNode *rd = json_find(obj, "render");
     if (!rd) return;
     r->set = 1;
     r->tint[0] = r->tint[1] = r->tint[2] = 1.0f;
     r->alpha = 1.0f;
-    r->blend = RENDER_BLEND_ALPHATEST;
-    r->cull = RENDER_CULL_NONE;
+    r->blend = MAT_BLEND_ALPHATEST;
+    r->cull = MAT_CULL_NONE;
     r->depth_write = 1;
-    r->wrap = TEX_WRAP_CLAMP;
-    r->filter = TEX_FILTER_LINEAR;
+    r->wrap = MAT_WRAP_CLAMP;
+    r->filter = MAT_FILTER_LINEAR;
     r->tile[0] = r->tile[1] = 1.0f;
     r->offset[0] = r->offset[1] = 0.0f;
     r->scroll[0] = r->scroll[1] = 0.0f;
@@ -135,15 +135,15 @@ static void parse_render(const JsonNode *obj, MapObjectRender *r)
     // blend: alphatest | alpha | additive | opaque
     const char *bl = json_str(json_find(rd, "blend"), "");
     if (bl[0]) {
-        if (strcmp(bl, "alpha") == 0) r->blend = RENDER_BLEND_ALPHA;
-        else if (strcmp(bl, "additive") == 0) r->blend = RENDER_BLEND_ADDITIVE;
-        else if (strcmp(bl, "opaque") == 0) r->blend = RENDER_BLEND_OPAQUE;
+        if (strcmp(bl, "alpha") == 0) r->blend = MAT_BLEND_ALPHA;
+        else if (strcmp(bl, "additive") == 0) r->blend = MAT_BLEND_ADDITIVE;
+        else if (strcmp(bl, "opaque") == 0) r->blend = MAT_BLEND_OPAQUE;
     }
     // cull: none | back | front
     const char *cu = json_str(json_find(rd, "cull"), "");
     if (cu[0]) {
-        if (strcmp(cu, "back") == 0) r->cull = RENDER_CULL_BACK;
-        else if (strcmp(cu, "front") == 0) r->cull = RENDER_CULL_FRONT;
+        if (strcmp(cu, "back") == 0) r->cull = MAT_CULL_BACK;
+        else if (strcmp(cu, "front") == 0) r->cull = MAT_CULL_FRONT;
     }
     r->depth_write = json_bool(json_find(rd, "depth_write"), r->depth_write);
     // Текстура: wrap | filter | tile | offset | scroll
@@ -151,13 +151,13 @@ static void parse_render(const JsonNode *obj, MapObjectRender *r)
     if (tx) {
         const char *wr = json_str(json_find(tx, "wrap"), "");
         if (wr[0]) {
-            if (strcmp(wr, "repeat") == 0) r->wrap = TEX_WRAP_REPEAT;
-            else if (strcmp(wr, "mirror") == 0) r->wrap = TEX_WRAP_MIRROR;
+            if (strcmp(wr, "repeat") == 0) r->wrap = MAT_WRAP_REPEAT;
+            else if (strcmp(wr, "mirror") == 0) r->wrap = MAT_WRAP_MIRROR;
         }
         const char *ft = json_str(json_find(tx, "filter"), "");
         if (ft[0]) {
-            if (strcmp(ft, "nearest") == 0) r->filter = TEX_FILTER_NEAREST;
-            else if (strcmp(ft, "mipmap") == 0) r->filter = TEX_FILTER_MIPMAP;
+            if (strcmp(ft, "nearest") == 0) r->filter = MAT_FILTER_NEAREST;
+            else if (strcmp(ft, "mipmap") == 0) r->filter = MAT_FILTER_MIPMAP;
         }
         const JsonNode *tile = json_find(tx, "tile");
         if (tile && json_array_len(tile) == 2) {

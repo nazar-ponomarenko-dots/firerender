@@ -21,10 +21,10 @@
 #include "gl_loader.h"
 #include "linalg.h"
 #include "mapdata.h"
+#include "material.h"
 #include "resources.h"
 #include "shader.h"
 #include "shadow.h"
-#include "sky.h"
 #include "world.h"
 
 #include "stb_image.h"
@@ -38,13 +38,11 @@
 #define OBJECT_BASE_H 9.0f     // высота квада при scale.y = 1
 
 // Uniform-локации шейдера объекта (общие для всех программ):
-// общий набор сцены (SceneUniforms) + свои uniform'ы объекта/материала.
+// общий набор сцены (SceneUniforms) + геометрия объекта + материал.
 typedef struct {
     SceneUniforms su;            // общий набор сцены (render_ctx.h)
     GLint u_objpos, u_objsize, u_objright, u_tex;
-    GLint u_tint;
-    GLint u_blend, u_alpha;
-    GLint u_uvtile, u_uvoffset, u_uvscroll, u_time;
+    MaterialLocs mat;            // материал (material.h)
 } ObjLocs;
 
 typedef struct {
@@ -57,7 +55,7 @@ typedef struct {
     float width, height;
     int collision;           // цилиндр непроходимости
     float radius;            // радиус коллизии, м
-    MapObjectRender r;       // полная настройка отображения
+    Material r;              // материал (material.h)
 } ObjectInst;
 
 typedef struct {
@@ -91,17 +89,11 @@ static ObjLocs obj_locs(GLenum prog)
     ObjLocs l;
     memset(&l, 0, sizeof l);
     scene_uniforms_init(&l.su, prog);      // общий набор сцены
+    material_locs_init(&l.mat, prog);      // материал (tint/blend/UV)
     l.u_objpos   = glGetUniformLocation(prog, "uObjPos");
     l.u_objsize  = glGetUniformLocation(prog, "uObjSize");
     l.u_objright = glGetUniformLocation(prog, "uObjRight");
     l.u_tex      = glGetUniformLocation(prog, "uTex");
-    l.u_tint     = glGetUniformLocation(prog, "uTint");
-    l.u_blend    = glGetUniformLocation(prog, "uBlend");
-    l.u_alpha    = glGetUniformLocation(prog, "uAlpha");
-    l.u_uvtile   = glGetUniformLocation(prog, "uUvTile");
-    l.u_uvoffset = glGetUniformLocation(prog, "uUvOffset");
-    l.u_uvscroll = glGetUniformLocation(prog, "uUvScroll");
-    l.u_time     = glGetUniformLocation(prog, "uTime");
     return l;
 }
 
@@ -119,13 +111,7 @@ static void set_per_frame(const ObjLocs *l, const ObjectsParams *p)
         if (l->su.u_shadowgrad[c] >= 0)
             glUniform1f(l->su.u_shadowgrad[c], 5.0f / rc->shadow_depth[c]);
     }
-    if (l->u_time >= 0) glUniform1f(l->u_time, s_time);
-    // Дефолты отображения (устанавливаются до per-instance uniform'ов)
-    if (l->u_blend >= 0) glUniform1i(l->u_blend, RENDER_BLEND_ALPHATEST);
-    if (l->u_alpha >= 0) glUniform1f(l->u_alpha, 1.0f);
-    if (l->u_uvtile >= 0) glUniform2f(l->u_uvtile, 1.0f, 1.0f);
-    if (l->u_uvoffset >= 0) glUniform2f(l->u_uvoffset, 0.0f, 0.0f);
-    if (l->u_uvscroll >= 0) glUniform2f(l->u_uvscroll, 0.0f, 0.0f);
+    // Материал (tint/blend/UV-анимация) применяет material_bind на инстанс
 }
 
 // Копия текстуры с другими параметрами (wrap/filter) — кеш движка не трогаем
@@ -136,10 +122,10 @@ static GLuint texture_custom(const unsigned char *img, int w, int h,
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     GLint wmode = GL_CLAMP_TO_EDGE, fmag = GL_LINEAR, fmin = GL_LINEAR;
-    if (wrap == TEX_WRAP_REPEAT) wmode = GL_REPEAT;
-    else if (wrap == TEX_WRAP_MIRROR) wmode = GL_MIRRORED_REPEAT;
-    if (filter == TEX_FILTER_NEAREST) fmag = fmin = GL_NEAREST;
-    else if (filter == TEX_FILTER_MIPMAP) fmin = GL_LINEAR_MIPMAP_LINEAR;
+    if (wrap == MAT_WRAP_REPEAT) wmode = GL_REPEAT;
+    else if (wrap == MAT_WRAP_MIRROR) wmode = GL_MIRRORED_REPEAT;
+    if (filter == MAT_FILTER_NEAREST) fmag = fmin = GL_NEAREST;
+    else if (filter == MAT_FILTER_MIPMAP) fmin = GL_LINEAR_MIPMAP_LINEAR;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wmode);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wmode);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, fmin);
@@ -147,7 +133,7 @@ static GLuint texture_custom(const unsigned char *img, int w, int h,
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, img);
-    if (filter == TEX_FILTER_MIPMAP) glGenerateMipmap(GL_TEXTURE_2D);
+    if (filter == MAT_FILTER_MIPMAP) glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, 0);
     return tex;
 }
@@ -177,10 +163,12 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
             SDL_Log("Object %s: cannot load texture %s", o->name, o->model);
             continue;
         }
-        it->r = o->render;
+        // Материал: дефолты + переопределения из блока render в JSON
+        material_defaults(&it->r);
+        if (o->render.set) it->r = o->render;
         // Своя текстура, если заданы нестандартные wrap/filter
         if (it->r.set &&
-            (it->r.wrap != TEX_WRAP_CLAMP || it->r.filter != TEX_FILTER_LINEAR)) {
+            (it->r.wrap != MAT_WRAP_CLAMP || it->r.filter != MAT_FILTER_LINEAR)) {
             it->tex_custom = texture_custom(img, w, h, it->r.wrap, it->r.filter);
             it->tex = it->tex_custom;
             SDL_Log("Object %s: custom texture (wrap=%d filter=%d)", o->name,
@@ -263,7 +251,6 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     if (p->flat_prog) p->flat_locs = obj_locs(p->flat_prog);
     glUseProgram(p->prog);
     glUniform1i(p->locs.u_tex, 0);
-    glUniform3f(p->locs.u_tint, 1.0f, 1.0f, 1.0f);
     // Каскады на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         if (p->locs.su.u_shadowmap[c] >= 0)
@@ -286,7 +273,6 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         it->locs = obj_locs(it->prog);
         glUseProgram(it->prog);
         if (it->locs.u_tex >= 0) glUniform1i(it->locs.u_tex, 0);
-        if (it->locs.u_tint >= 0) glUniform3f(it->locs.u_tint, 1.0f, 1.0f, 1.0f);
         for (int c = 0; c < SHADOW_CASCADES; c++) {
             if (it->locs.su.u_shadowmap[c] >= 0)
                 glUniform1i(it->locs.su.u_shadowmap[c], 3 + c);
@@ -452,46 +438,14 @@ void objects_node_render(SceneNode *n, float dt)
         }
         const ObjLocs *l = it->prog ? &it->locs : &p->locs;
 
-        // --- render: блендинг, отсечение граней, глубина ---
-        if (it->r.set) {
-            if (it->r.blend == RENDER_BLEND_ALPHA) {
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            } else if (it->r.blend == RENDER_BLEND_ADDITIVE) {
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            } else {
-                glDisable(GL_BLEND);
-            }
-            if (it->r.cull == RENDER_CULL_NONE) glDisable(GL_CULL_FACE);
-            else {
-                glEnable(GL_CULL_FACE);
-                glCullFace(it->r.cull == RENDER_CULL_BACK
-                               ? GL_BACK : GL_FRONT);
-            }
-            glDepthMask(it->r.depth_write ? GL_TRUE : GL_FALSE);
-        } else {
-            glDisable(GL_BLEND);
-            glDisable(GL_CULL_FACE);
-            glDepthMask(GL_TRUE);
-        }
+        // Материал: состояние GL (блендинг/отсечение/глубина) + uniform'ы
+        // (tint/alpha/blend/UV-анимация) — см. material.h
+        material_bind(&it->r, &l->mat, s_time);
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, it->tex);
         glUniform3f(l->u_objpos, it->pos[0], it->pos[1], it->pos[2]);
         glUniform2f(l->u_objsize, it->width, it->height);
-        // render: tint/alpha и настройки текстуры (UV)
-        if (it->r.set) {
-            if (l->u_tint >= 0)
-                glUniform3f(l->u_tint, it->r.tint[0], it->r.tint[1], it->r.tint[2]);
-            if (l->u_blend >= 0) glUniform1i(l->u_blend, it->r.blend);
-            if (l->u_alpha >= 0) glUniform1f(l->u_alpha, it->r.alpha);
-            if (l->u_uvtile >= 0) glUniform2f(l->u_uvtile, it->r.tile[0], it->r.tile[1]);
-            if (l->u_uvoffset >= 0)
-                glUniform2f(l->u_uvoffset, it->r.offset[0], it->r.offset[1]);
-            if (l->u_uvscroll >= 0)
-                glUniform2f(l->u_uvscroll, it->r.scroll[0], it->r.scroll[1]);
-        }
         // Ось ширины квада:
         //  - биллборд: перпендикуляр к направлению на камеру (квад к ней);
         //  - крест: статичный выбор грани по углу обзора.
