@@ -99,6 +99,46 @@ static int g_veg_shadow_cnt[4];
 static GLuint s_shadowveg_prog = 0;
 static GLint u_veg_viewproj, u_veg_veg, u_veg_thin, u_veg_time;
 static GLint u_veg_campos, u_veg_dyn, u_veg_walk;
+static VegParams *s_veg = NULL;   // для hot-reload (shader_on_reshade)
+
+// Пересоздаёт программы, ищет uniform'ы и статичные uniform'ы (для hot-reload)
+static void veg_prog_init(VegParams *p)
+{
+    GLuint prog = p->prog;
+    // Теневой шейдер (глубина): прореживание уже сделано на CPU
+    s_shadowveg_prog = make_program("shaders/shadowveg.vs", "shaders/shadowveg.fs");
+    u_veg_viewproj = glGetUniformLocation(s_shadowveg_prog, "uViewProj");
+    u_veg_veg      = glGetUniformLocation(s_shadowveg_prog, "uVeg");
+    u_veg_thin     = glGetUniformLocation(s_shadowveg_prog, "uThin");
+    u_veg_time     = glGetUniformLocation(s_shadowveg_prog, "uTime");
+    u_veg_campos   = glGetUniformLocation(s_shadowveg_prog, "uCamPos");
+    u_veg_dyn      = glGetUniformLocation(s_shadowveg_prog, "uDyn");
+    u_veg_walk     = glGetUniformLocation(s_shadowveg_prog, "uWalk");
+
+    scene_uniforms_init(&p->su, prog);    // общий набор сцены
+    p->u_dyn      = glGetUniformLocation(prog, "uDyn");
+    p->u_time     = glGetUniformLocation(prog, "uTime");   // ветер
+    p->u_walk     = glGetUniformLocation(prog, "uWalk");
+
+    // Статичные uniform'ы растительности
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "uVeg"), 0);
+    // Каскады на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d)
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (p->su.u_shadowmap[c] >= 0)
+            glUniform1i(p->su.u_shadowmap[c], 3 + c);
+        if (p->su.u_shadowdepth[c] >= 0)
+            glUniform1i(p->su.u_shadowdepth[c], 3 + c);
+    }
+    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
+    glUseProgram(0);
+}
+
+// Hot-reload: пересоздать программы и uniform'ы текущего узла
+static void veg_reshade(void)
+{
+    if (s_veg) veg_prog_init(s_veg);
+}
 static float g_veg_time;         // время симуляции (ветер)
 static int g_veg_visible = 1;    // тестовый тумблер отрисовки (perf-харнесс)
 static int g_draw_static_main = 1, g_draw_dyn_main = 1;   // FR_TEST: e/f
@@ -814,15 +854,6 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
                 s_wheat_density, s_grass_density, s_dyn_r, s_vis_r);
     }
     GLuint prog = make_program("shaders/wheat.vs", "shaders/wheat.fs");
-    // Теневой шейдер (глубина): прореживание уже сделано на CPU
-    s_shadowveg_prog = make_program("shaders/shadowveg.vs", "shaders/shadowveg.fs");
-    u_veg_viewproj = glGetUniformLocation(s_shadowveg_prog, "uViewProj");
-    u_veg_veg      = glGetUniformLocation(s_shadowveg_prog, "uVeg");
-    u_veg_thin     = glGetUniformLocation(s_shadowveg_prog, "uThin");
-    u_veg_time     = glGetUniformLocation(s_shadowveg_prog, "uTime");
-    u_veg_campos   = glGetUniformLocation(s_shadowveg_prog, "uCamPos");
-    u_veg_dyn      = glGetUniformLocation(s_shadowveg_prog, "uDyn");
-    u_veg_walk     = glGetUniformLocation(s_shadowveg_prog, "uWalk");
     // LOD пшеницы: 0 — старая текстура, 1 — склейка 3-4 старых,
     // 2 — склейка 16+ старых. Все слои уложены в один 2D-массив
     // 256x178 (самый большой слой задаёт холст, остальные слева сверху).
@@ -904,25 +935,9 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     p->vbo_dg = g_veg_vb[2];
     p->vbo_dw = g_veg_vb[3];
     p->tex = tex;
-    scene_uniforms_init(&p->su, prog);    // общий набор сцены
-    p->u_dyn      = glGetUniformLocation(prog, "uDyn");
-    p->u_time     = glGetUniformLocation(prog, "uTime");   // ветер
-    p->u_walk     = glGetUniformLocation(prog, "uWalk");
-
-    // Статичные uniform'ы растительности
-    float fog[3];
-    sky_fog_color(fog);
-    glUseProgram(prog);
-    glUniform1i(glGetUniformLocation(prog, "uVeg"), 0);
-    // Каскады на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d)
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        if (p->su.u_shadowmap[c] >= 0)
-            glUniform1i(p->su.u_shadowmap[c], 3 + c);
-        if (p->su.u_shadowdepth[c] >= 0)
-            glUniform1i(p->su.u_shadowdepth[c], 3 + c);
-    }
-    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
-    glUseProgram(0);
+    veg_prog_init(p);              // uniform'ы + статичные + теневая программа
+    s_veg = p;                     // для hot-reload
+    shader_on_reshade(veg_reshade);
 
     // Чанки динамического слоя (вокруг камеры)
     g_map_w = (int)(w->world_w / VEG_CHUNK) + 1;
@@ -984,5 +999,6 @@ void veg_cleanup(SceneNode *n)
     glDeleteTextures(1, &p->tex);
     resources_program_release(s_shadowveg_prog);
     s_shadowveg_prog = 0;
+    if (s_veg == p) s_veg = NULL;
     resources_program_release(p->prog);
 }

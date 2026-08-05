@@ -21,6 +21,8 @@ typedef struct {
     GLint u_sundir, u_suncolor;
     const RendererContext *rc;     // базис камеры и солнце (renderer.c)
 } SkyParams;
+static SkyParams *s_sky = NULL;   // для hot-reload (shader_on_reshade)
+static void sky_reshade(void);
 
 static float g_fog_rgb[3] = { 0.6f, 0.65f, 0.7f };   // до загрузки неба
 
@@ -86,9 +88,35 @@ SceneNode *sky_make_node(const RendererContext *rc)
     glUniform3f(glGetUniformLocation(prog, "uTint"),
                 sc.tint[0], sc.tint[1], sc.tint[2]);
     glUseProgram(0);
+    s_sky = p;                     // для hot-reload
+    shader_on_reshade(sky_reshade);
 
     const float size[3] = { 0, 0, 0 };
     return node_new("Sky", "Skybox3D", NULL, size, p, NULL, sky_node_render);
+}
+
+// Hot-reload: пересоздать программу и uniform'ы неба
+static void sky_reshade(void)
+{
+    SkyParams *p = s_sky;
+    if (!p) return;
+    p->prog = make_program("shaders/sky.vs", "shaders/sky.fs");
+    p->u_forward = glGetUniformLocation(p->prog, "uForward");
+    p->u_right   = glGetUniformLocation(p->prog, "uRight");
+    p->u_up      = glGetUniformLocation(p->prog, "uUp");
+    p->u_tanfov  = glGetUniformLocation(p->prog, "uTanFov");
+    p->u_aspect  = glGetUniformLocation(p->prog, "uAspect");
+    p->u_sundir  = glGetUniformLocation(p->prog, "uSunDir");
+    p->u_suncolor = glGetUniformLocation(p->prog, "uSunColor");
+    glUseProgram(p->prog);
+    glUniform1i(glGetUniformLocation(p->prog, "uSky"), 0);
+    glUniform3f(glGetUniformLocation(p->prog, "uFogColor"),
+                g_fog_rgb[0], g_fog_rgb[1], g_fog_rgb[2]);
+    MapSky sc;
+    mapdata_sky(&sc);
+    glUniform3f(glGetUniformLocation(p->prog, "uTint"),
+                sc.tint[0], sc.tint[1], sc.tint[2]);
+    glUseProgram(0);
 }
 
 void sky_node_render(SceneNode *n, float dt)

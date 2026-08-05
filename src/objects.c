@@ -80,6 +80,7 @@ static int s_col_n = 0;
 // Квадраты коллизий из collisions[] (XZ-прямоугольники)
 static struct { float x, z, hw, hz; } s_box[OBJECT_MAX];
 static int s_box_n = 0;
+static ObjectsParams *s_objs = NULL;   // для hot-reload (shader_on_reshade)
 // Время (для анимации UV)
 static float s_time = 0.0f;
 
@@ -95,6 +96,43 @@ static ObjLocs obj_locs(GLenum prog)
     l.u_objright = glGetUniformLocation(prog, "uObjRight");
     l.u_tex      = glGetUniformLocation(prog, "uTex");
     return l;
+}
+
+// Пересоздаёт программы объектов и переищет uniform'ы (для hot-reload).
+static void objects_reshade(void)
+{
+    ObjectsParams *p = s_objs;
+    if (!p) return;
+    p->prog = make_program("shaders/object.vs", "shaders/object.fs");
+    p->locs = obj_locs(p->prog);
+    if (p->flat_prog) p->flat_locs = obj_locs(p->flat_prog);
+    glUseProgram(p->prog);
+    glUniform1i(p->locs.u_tex, 0);
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (p->locs.su.u_shadowmap[c] >= 0)
+            glUniform1i(p->locs.su.u_shadowmap[c], 3 + c);
+        if (p->locs.su.u_shadowdepth[c] >= 0)
+            glUniform1i(p->locs.su.u_shadowdepth[c], 3 + c);
+    }
+    glUseProgram(0);
+    for (int i = 0; i < p->count; i++) {
+        ObjectInst *it = &p->inst[i];
+        if (!it->prog) continue;
+        it->locs = obj_locs(it->prog);
+        glUseProgram(it->prog);
+        if (it->locs.u_tex >= 0) glUniform1i(it->locs.u_tex, 0);
+        for (int c = 0; c < SHADOW_CASCADES; c++) {
+            if (it->locs.su.u_shadowmap[c] >= 0)
+                glUniform1i(it->locs.su.u_shadowmap[c], 3 + c);
+            if (it->locs.su.u_shadowdepth[c] >= 0)
+                glUniform1i(it->locs.su.u_shadowdepth[c], 3 + c);
+        }
+        glUseProgram(0);
+    }
+    p->s_viewproj = glGetUniformLocation(p->shadow_prog, "uViewProj");
+    p->s_objpos   = glGetUniformLocation(p->shadow_prog, "uObjPos");
+    p->s_objsize  = glGetUniformLocation(p->shadow_prog, "uObjSize");
+    p->s_objright = glGetUniformLocation(p->shadow_prog, "uObjRight");
 }
 
 // Кадровые uniform'ы (виды, свет, тени, туман) — при переключении программы
@@ -334,6 +372,9 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         glUseProgram(0);
     }
 
+    s_objs = p;                   // для hot-reload
+    shader_on_reshade(objects_reshade);
+
     const float size[3] = { 100.0f, OBJECT_BASE_H * 4.0f, 100.0f };
     return node_new("Objects", "MeshInstance3D", NULL, size, p,
                     NULL, objects_node_render);
@@ -509,6 +550,7 @@ void objects_cleanup(SceneNode *n)
 {
     ObjectsParams *p = n->params;
     if (!p) return;
+    if (s_objs == p) s_objs = NULL;
     s_col_n = 0;
     s_box_n = 0;
     for (int i = 0; i < p->count; i++) {

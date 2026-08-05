@@ -106,31 +106,9 @@ static void vf_rebuild(int c)
     free(buf);
 }
 
-void voxfog_init(const WorldState *w, int vw, int vh)
+// Пересоздаёт программу тумана и переищет uniform'ы (для hot-reload).
+static void voxfog_prog_init(void)
 {
-    s_world = w;
-    mapdata_fog(&s_cfg);
-    // Режим — из cvar'а r_fog_mode (config.cfg/меню/консоль), а НЕ дефолт
-    // карты: sync_cvars в main.c срабатывает только на ИЗМЕНЕНИЕ cvar'а,
-    // поэтому при старте с r_fog_mode 0 из config.cfg туман иначе остался
-    // бы включённым до первого ручного переключения.
-    int mode = (int)cvar_get("r_fog_mode");
-    if (mode < 0 || mode > 2) mode = s_cfg.enabled ? 1 : 0;   // запасной вариант
-    s_mode = mode;
-    s_on = mode > 0;
-    for (int c = 0; c < VF_CASCADES; c++) {
-        glGenTextures(1, &s_tex3d[c]);
-        glBindTexture(GL_TEXTURE_3D, s_tex3d[c]);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, s_res[c], s_res[c], s_res[c],
-                     0, GL_RED, GL_UNSIGNED_BYTE, NULL);
-        memset(s_center[c], 0, sizeof s_center[c]);
-    }
-
     s_prog = make_program("shaders/postfx.vs", "shaders/volumetric.fs");
     if (!s_prog) return;
     u_scene      = glGetUniformLocation(s_prog, "uScene");
@@ -178,6 +156,83 @@ void voxfog_init(const WorldState *w, int vw, int vh)
     for (int c = 0; c < SHADOW_CASCADES; c++)
         glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
     glUseProgram(0);
+}
+
+static void voxfog_reshade(void) { voxfog_prog_init(); }
+
+void voxfog_init(const WorldState *w, int vw, int vh)
+{
+    s_world = w;
+    mapdata_fog(&s_cfg);
+    // Режим — из cvar'а r_fog_mode (config.cfg/меню/консоль), а НЕ дефолт
+    // карты: sync_cvars в main.c срабатывает только на ИЗМЕНЕНИЕ cvar'а,
+    // поэтому при старте с r_fog_mode 0 из config.cfg туман иначе остался
+    // бы включённым до первого ручного переключения.
+    int mode = (int)cvar_get("r_fog_mode");
+    if (mode < 0 || mode > 2) mode = s_cfg.enabled ? 1 : 0;   // запасной вариант
+    s_mode = mode;
+    s_on = mode > 0;
+    for (int c = 0; c < VF_CASCADES; c++) {
+        glGenTextures(1, &s_tex3d[c]);
+        glBindTexture(GL_TEXTURE_3D, s_tex3d[c]);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, s_res[c], s_res[c], s_res[c],
+                     0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+        memset(s_center[c], 0, sizeof s_center[c]);
+    }
+
+    voxfog_prog_init();    // программа + uniform'ы (для hot-reload)
+    if (!s_prog) return;
+    u_scenedepth = glGetUniformLocation(s_prog, "uSceneDepth");
+    u_invviewproj = glGetUniformLocation(s_prog, "uInvViewProj");
+    u_campos     = glGetUniformLocation(s_prog, "uCamPos");
+    u_znear      = glGetUniformLocation(s_prog, "uZNear");
+    u_zfar       = glGetUniformLocation(s_prog, "uZFar");
+    u_sundir     = glGetUniformLocation(s_prog, "uSunDir");
+    u_strength   = glGetUniformLocation(s_prog, "uStrength");
+    u_fogmode    = glGetUniformLocation(s_prog, "uFogMode");
+    u_fogcol     = glGetUniformLocation(s_prog, "uFogColor");
+    u_fogcolsun  = glGetUniformLocation(s_prog, "uFogColorSun");
+    u_glare      = glGetUniformLocation(s_prog, "uGlare");
+    u_raystr     = glGetUniformLocation(s_prog, "uRayStrength");
+    for (int c = 0; c < VF_CASCADES; c++) {
+        char name[64];
+        snprintf(name, sizeof name, "uFogTex%d", c);
+        u_tex3d[c] = glGetUniformLocation(s_prog, name);
+        snprintf(name, sizeof name, "uFogCenter%d", c);
+        u_center[c] = glGetUniformLocation(s_prog, name);
+        snprintf(name, sizeof name, "uFogBox%d", c);
+        u_box[c] = glGetUniformLocation(s_prog, name);
+        snprintf(name, sizeof name, "uFogRes%d", c);
+        u_res[c] = glGetUniformLocation(s_prog, name);
+    }
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        char name[64];
+        snprintf(name, sizeof name, "uShadowMap%d", c);
+        u_shadowmap[c] = glGetUniformLocation(s_prog, name);
+        snprintf(name, sizeof name, "uShadowMatrix[%d]", c);
+        u_shadowmatrix[c] = glGetUniformLocation(s_prog, name);
+        snprintf(name, sizeof name, "uShadowBias[%d]", c);
+        u_shadowbias[c] = glGetUniformLocation(s_prog, name);
+        snprintf(name, sizeof name, "uShadowGrad[%d]", c);
+        u_shadowgrad[c] = glGetUniformLocation(s_prog, name);
+    }
+    u_shadowon   = glGetUniformLocation(s_prog, "uShadowOn");
+    glUseProgram(s_prog);
+    glUniform1i(u_scene, 0);
+    glUniform1i(u_scenedepth, 1);
+    glUniform1i(u_tex3d[0], 2);
+    glUniform1i(u_tex3d[1], 3);
+    glUniform1i(u_tex3d[2], 4);
+    for (int c = 0; c < SHADOW_CASCADES; c++)
+        glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
+    glUseProgram(0);
+
+    shader_on_reshade(voxfog_reshade);
 
     // Полноэкранный треугольник
     glGenVertexArrays(1, &s_vao);

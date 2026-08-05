@@ -25,6 +25,73 @@
 // Программа раньше жила в shadow.c — теперь принадлежит рельефу.
 static GLuint s_shadow_prog = 0;
 static GLint u_sh_viewproj, u_sh_heightmap, u_sh_hmin, u_sh_hmax;
+static TerrainParams *s_terr = NULL;   // для hot-reload (shader_on_reshade)
+
+// Пересоздаёт программы, ищет uniform'ы и статичные uniform'ы. Вызывается
+// при создании узла и при hot-reload шейдеров (shader_hot_reload).
+static void terrain_prog_init(TerrainParams *p, const WorldState *w)
+{
+    GLuint prog = p->prog;
+    // Теневая программа (глубина рельефа)
+    s_shadow_prog = make_program("shaders/shadow.vs", "shaders/shadow.fs");
+    u_sh_viewproj = glGetUniformLocation(s_shadow_prog, "uViewProj");
+    u_sh_heightmap = glGetUniformLocation(s_shadow_prog, "uHeightmap");
+    u_sh_hmin = glGetUniformLocation(s_shadow_prog, "uHeightMin");
+    u_sh_hmax = glGetUniformLocation(s_shadow_prog, "uHeightMax");
+
+    scene_uniforms_init(&p->su, prog);    // общий набор сцены
+    p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
+    p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
+    p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
+    p->u_heightmax = glGetUniformLocation(prog, "uHeightMax");
+    p->u_texscale  = glGetUniformLocation(prog, "uTexScale");
+    p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
+    p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
+    p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
+
+    // Материал рельефа: статичные параметры шейдера
+    MapTerrain tc;
+    mapdata_terrain(&tc);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "uBasemap"), 0);   // земля
+    glUniform1i(glGetUniformLocation(prog, "uNormalmap"), 1); // нормали
+    glUniform1i(glGetUniformLocation(prog, "uHeightmap"), 2); // высоты
+    // Каскады теней на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d —
+    // ТЕ ЖЕ текстуры: при выборке через sampler2D режим сравнения
+    // игнорируется, читается глубина).
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (p->su.u_shadowmap[c] >= 0)
+            glUniform1i(p->su.u_shadowmap[c], 3 + c);
+        if (p->su.u_shadowdepth[c] >= 0)
+            glUniform1i(p->su.u_shadowdepth[c], 3 + c);
+    }
+    glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
+    glUniform1i(p->u_static_on, 0);
+    glUniform2f(p->u_worldsize, w->world_w, w->world_d);
+    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
+    glUniform1f(p->u_specpow, 40.0f);
+    glUniform1f(p->u_specint, 0.0f);   // земля матовая — без отражения солнца
+    glUniform1f(p->u_heightmin, w->min_height);
+    glUniform1f(p->u_heightmax, w->max_height);
+    // Тайл земли: текстура на tex_scale метров (из map.json)
+    glUniform2f(glGetUniformLocation(prog, "uTexScale"),
+                w->world_w / tc.tex_scale, w->world_d / tc.tex_scale);
+    // Поле пшеницы: тон почвы внутри прямоугольника (вместо травы)
+    glUniform4f(glGetUniformLocation(prog, "uField"),
+                w->field_x0, w->field_x0 + w->field_w,
+                w->field_z0, w->field_z0 + w->field_d);
+    glUniform3f(glGetUniformLocation(prog, "uFieldColor"),
+                tc.field_color[0], tc.field_color[1], tc.field_color[2]);
+    glUniform1f(glGetUniformLocation(prog, "uFieldBlend"), tc.field_blend);
+    // Туман (uFogStart/uFogEnd) шлёт scene_uniforms_bind из rc
+    glUseProgram(0);
+}
+
+// Hot-reload: пересоздать программы и uniform'ы текущего узла
+static void terrain_reshade(void)
+{
+    if (s_terr) terrain_prog_init(s_terr, s_terr->world);
+}
 
 // --- Статические тени (режим r_shadows_mode 2) ---------------------------------
 // Разрешение карты теней: ~1 тексель на 1 м (2000x1125 -> 2048x1152).
@@ -226,13 +293,6 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     int vert_count;
     terrain_geometry_create(w, &vao, &vbo, &ibo, &vert_count);
 
-    // Программа теневого прохода (глубина из карты высот)
-    s_shadow_prog = make_program("shaders/shadow.vs", "shaders/shadow.fs");
-    u_sh_viewproj = glGetUniformLocation(s_shadow_prog, "uViewProj");
-    u_sh_heightmap = glGetUniformLocation(s_shadow_prog, "uHeightmap");
-    u_sh_hmin = glGetUniformLocation(s_shadow_prog, "uHeightMin");
-    u_sh_hmax = glGetUniformLocation(s_shadow_prog, "uHeightMax");
-
     TerrainParams *p = calloc(1, sizeof *p);
     p->world = w;
     p->rc = rc;                           // кадровые данные (renderer.c)
@@ -243,52 +303,9 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     p->tex_norm = wt->tex_norm;           // нормали (unit 1)
     p->tex_height = wt->tex_height;       // высоты (unit 2)
     p->vert_count = vert_count;
-    scene_uniforms_init(&p->su, prog);    // общий набор сцены
-    p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
-    p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
-    p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
-    p->u_heightmax = glGetUniformLocation(prog, "uHeightMax");
-    p->u_texscale  = glGetUniformLocation(prog, "uTexScale");
-    p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
-    p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
-    p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
-
-    // Материал рельефа: статичные параметры шейдера
-    float fog[3];
-    sky_fog_color(fog);
-    glUseProgram(prog);
-    glUniform1i(glGetUniformLocation(prog, "uBasemap"), 0);   // земля
-    glUniform1i(glGetUniformLocation(prog, "uNormalmap"), 1); // нормали
-    glUniform1i(glGetUniformLocation(prog, "uHeightmap"), 2); // высоты
-    // Каскады теней на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d —
-    // ТЕ ЖЕ текстуры: при выборке через sampler2D режим сравнения
-    // игнорируется, читается глубина).
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        if (p->su.u_shadowmap[c] >= 0)
-            glUniform1i(p->su.u_shadowmap[c], 3 + c);
-        if (p->su.u_shadowdepth[c] >= 0)
-            glUniform1i(p->su.u_shadowdepth[c], 3 + c);
-    }
-    glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
-    glUniform1i(p->u_static_on, 0);
-    glUniform2f(p->u_worldsize, w->world_w, w->world_d);
-    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
-    glUniform1f(p->u_specpow, 40.0f);
-    glUniform1f(p->u_specint, 0.0f);   // земля матовая — без отражения солнца
-    glUniform1f(p->u_heightmin, w->min_height);
-    glUniform1f(p->u_heightmax, w->max_height);
-    // Тайл земли: текстура на tex_scale метров (из map.json)
-    glUniform2f(glGetUniformLocation(prog, "uTexScale"),
-                w->world_w / tc.tex_scale, w->world_d / tc.tex_scale);
-    // Поле пшеницы: тон почвы внутри прямоугольника (вместо травы)
-    glUniform4f(glGetUniformLocation(prog, "uField"),
-                w->field_x0, w->field_x0 + w->field_w,
-                w->field_z0, w->field_z0 + w->field_d);
-    glUniform3f(glGetUniformLocation(prog, "uFieldColor"),
-                tc.field_color[0], tc.field_color[1], tc.field_color[2]);
-    glUniform1f(glGetUniformLocation(prog, "uFieldBlend"), tc.field_blend);
-    // Туман (uFogStart/uFogEnd) шлёт scene_uniforms_bind из rc
-    glUseProgram(0);
+    terrain_prog_init(p, w);              // uniform'ы + статичные + теневая программа
+    s_terr = p;                           // для hot-reload
+    shader_on_reshade(terrain_reshade);
 
     const float size[3] = { w->world_w, w->max_height - w->min_height,
                             w->world_d };
@@ -353,6 +370,7 @@ void terrain_cleanup(SceneNode *n)
     TerrainParams *p = n->params;
     resources_program_release(s_shadow_prog);
     s_shadow_prog = 0;
+    if (s_terr == p) s_terr = NULL;
     resources_program_release(p->prog);
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->ibo);

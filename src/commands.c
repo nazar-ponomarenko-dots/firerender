@@ -17,6 +17,7 @@
 #include "gl_loader.h"
 #include "png.h"
 #include "selection.h"
+#include "shader.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
@@ -317,6 +318,14 @@ void cmd_snd_test(const char *args)
         }
         SDL_Delay(200);
     }
+}
+
+// --- Hot-reload шейдеров ----------------------------------------------------------
+void cmd_reload_shaders(const char *args)
+{
+    (void)args;
+    int n = shader_hot_reload();
+    console_print("reload_shaders: %d", n);
 }
 
 // --- Save/Load (F5/F9): позиция игрока + карта в save.cfg ------------------------

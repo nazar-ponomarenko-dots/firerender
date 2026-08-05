@@ -29,6 +29,7 @@
 #include "commands.h"
 #include "renderer.h"
 #include "input.h"
+#include "shader.h"   // shader_hot_reload (см. reload_shaders)
 #include "app.h"
 #include "console.h"
 #include "cvars.h"
@@ -128,6 +129,7 @@ static void boot_init(Game *g)
     console_add_command("save", "сохранить позицию игрока (F5)", cmd_save);
     console_add_command("load", "загрузить сохранение (F9)", cmd_load);
     console_add_command("setpos", "setpos x y z [yaw] [pitch] — телепорт", cmd_setpos);
+    console_add_command("reload_shaders", "перекомпилировать изменённые шейдеры", cmd_reload_shaders);
     hud_shared_init();           // шрифт/атласы + рендер текста для меню и консоли
     app_init();                  // фон img/menu.png
     console_autoload();          // config.cfg: cvar'ы и бинды пользователя
@@ -248,6 +250,7 @@ int main(int argc, char *argv[])
     console_add_command("save", "сохранить позицию игрока (F5)", cmd_save);
     console_add_command("load", "загрузить сохранение (F9)", cmd_load);
     console_add_command("setpos", "setpos x y z [yaw] [pitch] — телепорт", cmd_setpos);
+    console_add_command("reload_shaders", "перекомпилировать изменённые шейдеры", cmd_reload_shaders);
     hud_shared_init();           // шрифт/атласы + рендер текста для меню и консоли
     app_init();                  // фон img/menu.png
     console_autoload();          // config.cfg: cvar'ы и бинды пользователя
@@ -303,6 +306,12 @@ int main(int argc, char *argv[])
             // Полноэкран/VSync/каркас применит первый sync_cvars из config.cfg.
             s_sync_shadows = cvar_get("r_shadows_mode");
             s_sync_fog = cvar_get("r_fog_mode");
+        }
+
+        // Hot-reload шейдеров: раз в ~30 кадров проверяем mtime файлов
+        {
+            static int s_reload = 0;
+            if (++s_reload >= 30) { s_reload = 0; shader_hot_reload(); }
         }
 
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS

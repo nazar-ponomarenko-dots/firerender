@@ -12,6 +12,12 @@
 #include "resources.h"
 #include "shader.h"
 
+#include <stddef.h>
+
+static BloomParams *s_bloom_p = NULL;   // для hot-reload (shader_on_reshade)
+static void bloom_prog_init(BloomParams *b);
+static void bloom_reshade(void) { if (s_bloom_p) bloom_prog_init(s_bloom_p); }
+
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 
@@ -56,20 +62,9 @@ static void make_fbo(GLuint *fbo, GLuint *tex, GLuint *depth,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void bloom_init(BloomParams *b, int vw, int vh)
+// Пересоздаёт программы постобработки и переищет uniform'ы (для hot-reload)
+static void bloom_prog_init(BloomParams *b)
 {
-    // Параметры постобработки — из map/map.json (bloom = { ... }), как
-    // значения по умолчанию cvar'ов: меню «Графика» и консоль правят ими
-    // вживую (применяются в bloom_render каждый кадр).
-    MapBloom bc;
-    mapdata_bloom(&bc);
-    cvar_register("r_bloom", 1.0f, "свечение (bloom) вкл/выкл");
-    cvar_register("r_bloom_threshold", bc.threshold, "порог яркости bloom");
-    cvar_register("r_bloom_intensity", bc.intensity, "сила ярких пикселей");
-    cvar_register("r_bloom_strength", bc.strength, "сила свечения в композите");
-    b->threshold = bc.threshold;
-    b->intensity = bc.intensity;
-    b->strength  = bc.strength;
     b->prog_bright = make_program("shaders/postfx.vs", "shaders/bright.fs");
     b->prog_blur    = make_program("shaders/postfx.vs", "shaders/blur.fs");
     b->prog_composite = make_program("shaders/postfx.vs", "shaders/composite.fs");
@@ -82,6 +77,26 @@ void bloom_init(BloomParams *b, int vw, int vh)
     b->u_ctex      = glGetUniformLocation(b->prog_composite, "uScene");
     b->u_glowtex   = glGetUniformLocation(b->prog_composite, "uGlow");
     b->u_strength  = glGetUniformLocation(b->prog_composite, "uStrength");
+}
+
+void bloom_init(BloomParams *b, int vw, int vh)
+{
+    s_bloom_p = b;
+    // Параметры постобработки — из map/map.json (bloom = { ... }), как
+    // значения по умолчанию cvar'ов: меню «Графика» и консоль правят ими
+    // вживую (применяются в bloom_render каждый кадр).
+    MapBloom bc;
+    mapdata_bloom(&bc);
+    cvar_register("r_bloom", 1.0f, "свечение (bloom) вкл/выкл");
+    cvar_register("r_bloom_threshold", bc.threshold, "порог яркости bloom");
+    cvar_register("r_bloom_intensity", bc.intensity, "сила ярких пикселей");
+    cvar_register("r_bloom_strength", bc.strength, "сила свечения в композите");
+    b->threshold = bc.threshold;
+    b->intensity = bc.intensity;
+    b->strength  = bc.strength;
+    bloom_prog_init(b);    // программы + uniform'ы (для hot-reload)
+
+    shader_on_reshade(bloom_reshade);
 
     // Полноэкранный треугольник: 3 вершины покрывают весь экран
     glGenVertexArrays(1, &b->vao);
@@ -201,6 +216,7 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
 
 void bloom_cleanup(BloomParams *b)
 {
+    if (s_bloom_p == b) s_bloom_p = NULL;
     resources_program_release(b->prog_bright);
     resources_program_release(b->prog_blur);
     resources_program_release(b->prog_composite);

@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 // --- Пак карты (maps/*.zip) ----------------------------------------------------
 static mz_zip_archive s_pak;
@@ -119,6 +121,9 @@ typedef struct ResEntry {
     int refs;            // счётчик ссылок (текстуры/программы)
     int from_pak;        // 1 = ресурс пришёл из zip карты (удаляется со сменой карты)
     int iw, ih;          // размеры (картинки)
+    // Шейдерная программа: пути и mtime файлов (для hot-reload, см. resources_shader_reload)
+    char vs[128], fs[128];
+    long vs_mt, fs_mt;
     struct ResEntry *next;
 } ResEntry;
 
@@ -257,15 +262,9 @@ void resources_texture_release(GLuint tex)
 }
 
 // --- Шейдерные программы ------------------------------------------------------
-GLuint resources_program(const char *vs_path, const char *fs_path)
+// Линкует vs+fs в программу (общая для создания и hot-reload'а)
+static GLuint program_link(const char *vs_path, const char *fs_path)
 {
-    char key[256];
-    snprintf(key, sizeof key, "prog#%s#%s", vs_path, fs_path);
-    ResEntry *e = cache_find(key);
-    if (e) {
-        e->refs++;
-        return (GLuint)(uintptr_t)e->data;
-    }
     GLuint vs = compile_shader_file(GL_VERTEX_SHADER, vs_path);
     GLuint fs = compile_shader_file(GL_FRAGMENT_SHADER, fs_path);
     if (!vs || !fs) {
@@ -288,9 +287,77 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
         glDeleteProgram(prog);
         return 0;
     }
-    ResEntry *ne = cache_add(key, (void *)(uintptr_t)prog, 1);
-    (void)ne;
     return prog;
+}
+
+GLuint resources_program(const char *vs_path, const char *fs_path)
+{
+    char key[256];
+    snprintf(key, sizeof key, "prog#%s#%s", vs_path, fs_path);
+    ResEntry *e = cache_find(key);
+    if (e) {
+        e->refs++;
+        return (GLuint)(uintptr_t)e->data;
+    }
+    GLuint prog = program_link(vs_path, fs_path);
+    if (!prog) return 0;
+    ResEntry *ne = cache_add(key, (void *)(uintptr_t)prog, 1);
+    // Для hot-reload: пути и mtime файлов. cache_add ставит from_pak = "пак
+    // открыт", но шейдер может лежать на ДИСКЕ (пак содержит только свои
+    // шейдеры карты). Уточняем по факту наличия файла в архиве.
+    if (s_pak_open)
+        ne->from_pak = (mz_zip_reader_locate_file(&s_pak, vs_path, NULL, 0) >= 0 ||
+                        mz_zip_reader_locate_file(&s_pak, fs_path, NULL, 0) >= 0);
+    else
+        ne->from_pak = 0;
+    snprintf(ne->vs, sizeof ne->vs, "%s", vs_path);
+    snprintf(ne->fs, sizeof ne->fs, "%s", fs_path);
+    if (!ne->from_pak) {
+        struct stat st;
+        if (stat(vs_path, &st) == 0) ne->vs_mt = (long)st.st_mtime;
+        if (stat(fs_path, &st) == 0) ne->fs_mt = (long)st.st_mtime;
+    }
+    return prog;
+}
+
+// --- Hot-reload шейдеров --------------------------------------------------------
+#define RESHADE_MAX 8
+static ReshadeFn s_reshade[RESHADE_MAX];
+static int s_reshade_n = 0;
+
+void resources_on_reshade(ReshadeFn fn)
+{
+    if (!fn || s_reshade_n >= RESHADE_MAX) return;
+    for (int i = 0; i < s_reshade_n; i++)
+        if (s_reshade[i] == fn) return;
+    s_reshade[s_reshade_n++] = fn;
+}
+
+int resources_shader_reload(void)
+{
+    int changed = 0;
+    for (ResEntry *e = s_cache; e; e = e->next) {
+        if (strncmp(e->key, "prog#", 5) != 0) continue;
+        if (e->from_pak || e->vs[0] == 0) continue;
+        struct stat st;
+        long mt0 = 0, mt1 = 0;
+        if (stat(e->vs, &st) == 0) mt0 = (long)st.st_mtime;
+        if (stat(e->fs, &st) == 0) mt1 = (long)st.st_mtime;
+        if (mt0 == e->vs_mt && mt1 == e->fs_mt) continue;
+        // Перекомпиляция: новый id встаёт в кеш, старую программу удаляем
+        GLuint prog = program_link(e->vs, e->fs);
+        if (!prog) continue;
+        glDeleteProgram((GLuint)(uintptr_t)e->data);
+        e->data = (void *)(uintptr_t)prog;
+        e->vs_mt = mt0;
+        e->fs_mt = mt1;
+        SDL_Log("shader reloaded: %s + %s", e->vs, e->fs);
+        changed++;
+    }
+    if (changed)
+        for (int i = 0; i < s_reshade_n; i++)
+            s_reshade[i]();
+    return changed;
 }
 
 void resources_program_release(GLuint prog)

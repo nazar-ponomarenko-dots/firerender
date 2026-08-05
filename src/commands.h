@@ -45,6 +45,9 @@ void cmd_load(const char *args);
 // Телепорт игрока: setpos x y z [yaw] [pitch]
 void cmd_setpos(const char *args);
 
+// Hot-reload шейдеров: перекомпилирует изменённые (по mtime) файлы.
+void cmd_reload_shaders(const char *args);
+
 // Вызывается из главного цикла каждый кадр: сохраняет кадр в PNG, если
 // была запрошена команда screenshot (F12).
 void commands_shot_take(int vw, int vh);

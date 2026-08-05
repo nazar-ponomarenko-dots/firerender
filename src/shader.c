@@ -64,3 +64,13 @@ GLuint make_program(const char *vs_path, const char *fs_path)
     // Кеш в resources.c: одна программа на пару файлов, ссылки считаются.
     return resources_program(vs_path, fs_path);
 }
+
+void shader_on_reshade(ReshadeFn fn)
+{
+    resources_on_reshade(fn);
+}
+
+int shader_hot_reload(void)
+{
+    return resources_shader_reload();
+}
