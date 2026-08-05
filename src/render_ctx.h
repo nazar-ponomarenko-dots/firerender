@@ -28,7 +28,8 @@ enum {
 };
 
 // --- Кадровое состояние сцены (заполняет renderer.c каждый кадр) --------------
-typedef struct {
+// Имя структуры совпадает с форвард-объявлением в shadow.h.
+typedef struct RendererContext {
     // Камера
     float viewproj[16];      // вид * проекция (считает узел Camera)
     float cam_pos[3];        // позиция игрока

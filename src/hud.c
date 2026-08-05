@@ -696,6 +696,7 @@ void hud_node_render(SceneNode *n, float dt)
     (void)dt;
     HudParams *p = n->params;
     if (!p->visible) return;       // панель скрыта (клавиша G)
+    if (p->rc->pass == RP_SHADOW) return;   // в карты теней HUD не пишет
     int vw = p->vw, vh = p->vh;
     if (vw <= 0 || vh <= 0) return;
     glDisable(GL_DEPTH_TEST);   // HUD — поверх всего

@@ -67,6 +67,7 @@ void minimap_node_render(SceneNode *n, float dt)
     MinimapParams *p = n->params;
     if (!p->visible) return;        // клавиша G — карта скрыта
     const RendererContext *rc = p->rc;
+    if (rc->pass == RP_SHADOW) return;      // в карты теней 2D не пишет
     int vw = p->vw, vh = p->vh;
     if (vw <= 0 || vh <= 0) return;
     glDisable(GL_DEPTH_TEST);   // 2D поверх 3D-сцены

@@ -20,10 +20,6 @@ SceneNode *objects_make_node(const WorldState *w, const RendererContext *rc);
 
 void objects_node_render(SceneNode *n, float dt);
 
-// Теневой проход (shadow.c): рисует объекты в карту глубины каскада.
-// box — сторона каскада (деревья вне бокса не рисуются).
-void objects_shadow_render(const float vp[16], float box);
-
 // Коллизии объектов (collision=1): выталкивает точку (x,z) из цилиндров
 // radius+pr вокруг баз объектов. Вызывать после движения игрока (не в полёте).
 void objects_collide(float *x, float *z, float pr);

@@ -284,7 +284,8 @@ void camera_node_update(SceneNode *n, float dt)
     if (fov > 0.0f && fov <= 180.0f) p->fov_deg = fov;
     if (!s_demo && !s_input_lock) {              // в демо/консоли камеру не трогаем
         float mx = 0, my = 0;
-        SDL_GetRelativeMouseState(&mx, &my);      // мышь — обзор
+        if (!getenv("FR_NOMOUSE"))                // детерминированные тесты
+            SDL_GetRelativeMouseState(&mx, &my);  // мышь — обзор
         camera_update(&p->cam, p->world, mx, my, dt);
     }
 

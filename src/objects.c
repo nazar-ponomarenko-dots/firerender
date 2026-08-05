@@ -76,8 +76,6 @@ typedef struct {
     ObjLocs flat_locs;
 } ObjectsParams;
 
-static ObjectsParams *g_objs;   // для теневого прохода (shadow.c)
-
 // Цилиндры коллизий объектов (для camera.c — выталкивание игрока)
 static struct { float x, z, r; } s_col[OBJECT_MAX];
 static int s_col_n = 0;
@@ -350,17 +348,58 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         glUseProgram(0);
     }
 
-    g_objs = p;
-
     const float size[3] = { 100.0f, OBJECT_BASE_H * 4.0f, 100.0f };
     return node_new("Objects", "MeshInstance3D", NULL, size, p,
                     NULL, objects_node_render);
+}
+
+// Теневой проход (RP_SHADOW): та же геометрия и выбор грани, что в цветном
+// проходе, но программа object_shadow (глубина с альфа-тестом). Только
+// объекты внутри бокса каскада. Раньше это была копипаста objects_shadow_render.
+static void objects_shadow_draw(ObjectsParams *p, const RendererContext *rc)
+{
+    if (p->count <= 0) return;
+    float r = rc->shadow_box_cur * 0.7071f + 40.0f;   // бокс + диагональ+запас
+    float r2 = r * r;
+    glDisable(GL_CULL_FACE);   // биллборды — с двух сторон
+    glUseProgram(p->shadow_prog);
+    glUniformMatrix4fv(p->s_viewproj, 1, GL_FALSE, rc->shadow_vp);
+    glBindVertexArray(p->vao);
+    for (int i = 0; i < p->count; i++) {
+        ObjectInst *it = &p->inst[i];
+        // отсечение по боксу каскада (от камеры)
+        float dx = rc->cam_pos[0] - it->pos[0];
+        float dz = rc->cam_pos[2] - it->pos[2];
+        if (dx * dx + dz * dz > r2) continue;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, it->tex);
+        glUniform3f(p->s_objpos, it->pos[0], it->pos[1], it->pos[2]);
+        glUniform2f(p->s_objsize, it->width, it->height);
+        // тот же выбор грани, что в objects_node_render
+        if (it->billboard) {
+            float d = sqrtf(dx * dx + dz * dz);
+            if (d < 0.001f) d = 1.0f;
+            glUniform3f(p->s_objright, -dz / d, 0.0f, dx / d);
+        } else {
+            if (fabsf(dx) >= fabsf(dz))
+                glUniform3f(p->s_objright, 0.0f, 0.0f, 1.0f);
+            else
+                glUniform3f(p->s_objright, 1.0f, 0.0f, 0.0f);
+        }
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
+    }
 }
 
 void objects_node_render(SceneNode *n, float dt)
 {
     ObjectsParams *p = n->params;
     if (p->count <= 0) return;
+    const RendererContext *rc = p->rc;
+    // Теневой проход (RP_SHADOW): глубина с альфа-тестом
+    if (rc->pass == RP_SHADOW) {
+        if (g_shadow_obj) objects_shadow_draw(p, rc);
+        return;
+    }
     s_time += dt;
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);   // по умолчанию — двусторонний (cull: none)
@@ -511,51 +550,11 @@ void objects_collide(float *x, float *z, float pr)
     }
 }
 
-// Рисует объекты в карту теней (вызывает shadow.c из каждого каскада):
-// тот же крест/квад, альфа-тест отбрасывает прозрачный фон.
-// ВАЖНО: рисуется ТОЛЬКО та грань, что видна игроку (тот же выбор по углу,
-// что и в основном проходе) — иначе скрытый квад отбрасывает "тень из
-// ниоткуда". box — сторона каскада: деревья вне бокса не рисуются.
-void objects_shadow_render(const float vp[16], float box)
-{
-    ObjectsParams *p = g_objs;
-    if (!p || p->count <= 0) return;
-    float r = box * 0.7071f + 40.0f;   // бокс + диагональ+запас
-    float r2 = r * r;
-    glDisable(GL_CULL_FACE);   // биллборды — с двух сторон
-    glUseProgram(p->shadow_prog);
-    glUniformMatrix4fv(p->s_viewproj, 1, GL_FALSE, vp);
-    glBindVertexArray(p->vao);
-    for (int i = 0; i < p->count; i++) {
-        ObjectInst *it = &p->inst[i];
-        // отсечение по боксу каскада (от камеры)
-        float dx = p->rc->cam_pos[0] - it->pos[0];
-        float dz = p->rc->cam_pos[2] - it->pos[2];
-        if (dx * dx + dz * dz > r2) continue;
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, it->tex);
-        glUniform3f(p->s_objpos, it->pos[0], it->pos[1], it->pos[2]);
-        glUniform2f(p->s_objsize, it->width, it->height);
-        // тот же выбор грани, что в objects_node_render
-        if (it->billboard) {
-            float d = sqrtf(dx * dx + dz * dz);
-            if (d < 0.001f) d = 1.0f;
-            glUniform3f(p->s_objright, -dz / d, 0.0f, dx / d);
-        } else {
-            if (fabsf(dx) >= fabsf(dz))
-                glUniform3f(p->s_objright, 0.0f, 0.0f, 1.0f);
-            else
-                glUniform3f(p->s_objright, 1.0f, 0.0f, 0.0f);
-        }
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
-    }
-}
 
 void objects_cleanup(SceneNode *n)
 {
     ObjectsParams *p = n->params;
     if (!p) return;
-    if (g_objs == p) g_objs = NULL;
     s_col_n = 0;
     s_box_n = 0;
     for (int i = 0; i < p->count; i++) {

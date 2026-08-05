@@ -41,22 +41,10 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc);
 
 void veg_node_render(SceneNode *n, float dt);
 
-// Для теневого прохода (shadow.c) и HUD: доступ к слоям растительности.
+// Для HUD: количество растений в слоях.
 // q: 0=статика трава, 1=статика пшеница, 2=динамика трава, 3=динамика пшеница.
-GLuint veg_vao(int q);
 int veg_count(int q);
 void veg_set_visible_test(int v);
-GLuint veg_texture(void);
-
-// Теневой проход: вся растительность приходит предпрореженной на CPU
-// (статика — каждый 2-й экземпляр, динамика — правило uThin из
-// shadowveg.vs) — карты теней идентичны прореживанию в шейдере, но
-// вершинный этап обрабатывает вдвое меньше экземпляров.
-GLuint veg_shadow_vao(int q);
-int veg_shadow_count(int q);
-
-// Текущее время симуляции (для ветра в теневом шейдере).
-float veg_time(void);
 
 // Освобождает CPU-массивы чанков и GL-ресурсы узла.
 void veg_cleanup(SceneNode *n);
@@ -66,17 +54,3 @@ void veg_cleanup(SceneNode *n);
 // Тестовые тумблеры замеров производительности (FR_TEST в main.c)
 void veg_set_static_main(int v);
 void veg_set_dyn_main(int v);
-
-// Теневой проход: выборочная отрисовка статики по супер-чанкам и динамики
-// по чанкам (только внутри бокса каскада) — без прогона всего буфера через
-// вершинный шейдер. Диапазоны — в предпрореженных теневых буферах.
-int veg_has_base_instance(void);
-int veg_shadow_super_n(void);
-int veg_shadow_super_cnt(int q, int s);
-GLuint veg_shadow_super_base(int q, int s);
-float veg_shadow_super_cx(int s);
-float veg_shadow_super_cz(int s);
-int veg_dyn_shadow_chunks(void);
-void veg_dyn_shadow_chunk(int k, float *x, float *z,
-                          GLuint *gbase, int *gcnt,
-                          GLuint *wbase, int *wcnt);

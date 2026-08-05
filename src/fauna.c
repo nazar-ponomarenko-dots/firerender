@@ -211,6 +211,7 @@ void fauna_node_render(SceneNode *n, float dt)
     (void)dt;
     FaunaParams *p = n->params;
     if (!p->n) return;
+    if (p->rc->pass == RP_SHADOW) return;   // в карты теней фауна не пишет
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);

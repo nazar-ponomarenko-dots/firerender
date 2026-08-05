@@ -96,6 +96,7 @@ void sky_node_render(SceneNode *n, float dt)
     (void)dt;
     SkyParams *p = n->params;
     const RendererContext *rc = p->rc;
+    if (rc->pass == RP_SHADOW) return; // в карты теней небо не пишет
 
     glDisable(GL_DEPTH_TEST);          // небо рисуется первым, без глубины
     glDepthMask(GL_FALSE);             // и не пишет в буфер глубины

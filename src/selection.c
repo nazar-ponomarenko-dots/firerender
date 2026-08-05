@@ -67,6 +67,7 @@ void selection_node_render(SceneNode *n, float dt)
     (void)dt;
     if (!s_on) return;
     SelParams *p = n->params;
+    if (p->rc->pass == RP_SHADOW) return;   // в карты теней рамки не пишут
 
     // Собираем углы боксов всех 3D-узлов (пропускаем 2D и нулевые размеры)
     float v[SEL_MAX_NODES * 24 * 3];
