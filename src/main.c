@@ -29,6 +29,7 @@
 #include "commands.h"
 #include "renderer.h"
 #include "input.h"
+#include "lua_engine.h"
 #include "shader.h"   // shader_hot_reload (см. reload_shaders)
 #include "app.h"
 #include "console.h"
@@ -134,6 +135,7 @@ static void boot_init(Game *g)
     app_init();                  // фон img/menu.png
     console_autoload();          // config.cfg: cvar'ы и бинды пользователя
     game_map_config_load(g);     // + выбранная карта
+    lua_engine_init();           // скрипты Lua (после консоли и cvar'ов)
     app_set_state(APP_MENU);     // фаза закончена: меню
 }
 
@@ -219,42 +221,10 @@ int main(int argc, char *argv[])
     }
     SDL_GL_SetSwapInterval(0);
 
-    // 5) Ресурсы, консоль, шрифт (меню работает БЕЗ загрузки мира) -------------
+    // 5) Состояние мира: системы (консоль/звук/шрифт/команды) поднимает
+    //    фаза APP_BOOT — boot_init() в главном цикле ---------------------------
     Game game;
     game_init(&game);            // единственный экземпляр состояния мира
-    resources_init();
-    console_init();              // cvar'ы, команды, вывод SDL_Log в консоль
-    audio_init();                // звук: устройство + каналы
-    binds_init();                // дефолтные привязки клавиш (HL-стиль)
-    actions_register_commands(); // +forward/-forward и прочие +/-команды
-    // Команды-действия (см. commands.c) — доступны СРАЗУ, в т.ч. в меню
-    console_add_command("toggle_map", "показать/скрыть мини-карту", cmd_toggle_map);
-    console_add_command("toggle_hud", "показать/скрыть HUD", cmd_toggle_hud);
-    console_add_command("toggle_shadows", "вкл/выкл тени", cmd_toggle_shadows);
-    console_add_command("toggle_fog", "вкл/выкл объёмный туман", cmd_toggle_fog);
-    console_add_command("demo", "демо-сцена (автополёт, замер FPS)", cmd_demo);
-    console_add_command("pause", "пауза / назад в меню", cmd_pause);
-    console_add_command("map", "map <имя> — выбрать и запустить карту", cmd_map_select);
-    console_add_command("maps", "список карт", cmd_maps_list);
-    console_add_command("noclip", "полёт сквозь мир (чит)", cmd_noclip);
-    console_add_command("restart", "перезапустить текущую карту", cmd_restart);
-    console_add_command("changelevel", "changelevel <карта>", cmd_changelevel);
-    console_add_command("r_drawhud", "r_drawhud [0/1] — HUD", cmd_r_drawhud);
-    console_add_command("mat_wireframe", "mat_wireframe [0/1]", cmd_mat_wireframe);
-    console_add_command("thirdperson", "вид от третьего лица", cmd_thirdperson);
-    console_add_command("firstperson", "вид от первого лица", cmd_firstperson);
-    console_add_command("ent_create", "ent_create <класс> [x y z]", cmd_ent_create);
-    console_add_command("ent_list", "список сущностей", cmd_ent_list);
-    console_add_command("snd_test", "проиграть все звуки подряд", cmd_snd_test);
-    console_add_command("screenshot", "сохранить кадр в PNG (F12)", cmd_screenshot);
-    console_add_command("save", "сохранить позицию игрока (F5)", cmd_save);
-    console_add_command("load", "загрузить сохранение (F9)", cmd_load);
-    console_add_command("setpos", "setpos x y z [yaw] [pitch] — телепорт", cmd_setpos);
-    console_add_command("reload_shaders", "перекомпилировать изменённые шейдеры", cmd_reload_shaders);
-    hud_shared_init();           // шрифт/атласы + рендер текста для меню и консоли
-    app_init();                  // фон img/menu.png
-    console_autoload();          // config.cfg: cvar'ы и бинды пользователя
-    game_map_config_load(&game); // + выбранная карта
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
     SDL_Log("OpenGL: %s", glGetString(GL_VERSION));
@@ -272,10 +242,9 @@ int main(int argc, char *argv[])
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // 8) Ввод и cvar-синки (меню — курсор виден) -------------------------------
+    // 8) Ввод: привязка мыши/клавиш к окну. Режим мыши и cvar-синки
+    //    применяет главный цикл (после boot_init). ------------------------------
     input_init(g_win, &game);
-    sync_cvars(&game);
-    input_sync_mode();
 
     // 9) Главный цикл: фаза APP_BOOT (boot_init) -> MENU/PLAY/PAUSE -------------
     Uint64 last = SDL_GetPerformanceCounter();
@@ -317,6 +286,7 @@ int main(int argc, char *argv[])
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
         game_update(&game, dt);             // мир: узлы, триггеры/use, туман
         audio_update();                     // фоновые петли и 3D-источники
+        lua_engine_update(dt);              // per-frame колбэк скрипта
 
         sync_cvars(&game);
         input_sync_mode();

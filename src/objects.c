@@ -276,7 +276,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         s_box[s_box_n].hw = c->size[0] * 0.5f;
         s_box[s_box_n].hz = c->size[1] * 0.5f;
         s_box_n++;
-        SDL_Log("Collision: box at %.0f,%.0f size %.0fx%.0f%s", x, z,
+        SDL_Log("Collision: box at %.0f,%.0f size %.0fx%.0f%s%s", x, z,
                 c->size[0], c->size[1],
                 c->object[0] ? " -> " : "", c->object[0] ? c->object : "");
     }

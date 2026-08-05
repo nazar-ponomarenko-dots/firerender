@@ -30,11 +30,15 @@ CC   := gcc
 #   -Wall -Wextra  — все основные предупреждения (очень полезно в C)
 #   -Isrc          — чтобы #include "camera.h" и т.п. находились в src/
 #   pkg-config     — флаги include/lib для SDL3 из системы
-CFLAGS := -O2 -Wall -Wextra -Ithird_party -Ithird_party/miniz -Isrc $(shell pkg-config --cflags sdl3)
-LIBS   := $(shell pkg-config --libs sdl3) -lm   # -lm: математика (sin/cos/sqrt)
+# Lua вендорен (third_party/lua): амальгамация lua.c + заголовки 5.4.8 —
+# сборка самодостаточна и не зависит от установленного lua в системе
+# (важно для кросс-сборок linux/win).
+CFLAGS := -O2 -Wall -Wextra -Ithird_party -Ithird_party/lua -Ithird_party/miniz -Isrc $(shell pkg-config --cflags sdl3)
+LIBS   := $(shell pkg-config --libs sdl3) -lm   # -lm: математика
 
 # Исходники и бинарник ---------------------------------------------------------
 SRC := $(wildcard src/*.c) \
+       third_party/lua/lua.c \
        third_party/miniz/miniz.c third_party/miniz/miniz_zip.c \
        third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_tdef.c
 BIN := build/firerender
@@ -79,8 +83,8 @@ $(SDL3_G28_PREFIX)/lib/libSDL3.a:
 
 linux: $(SDL3_G28_PREFIX)/lib/libSDL3.a
 	$(ZIG_DIR)/zig cc -target x86_64-linux-gnu.2.28 -O2 \
-	  -Ithird_party -Ithird_party/miniz -Isrc -I$(SDL3_G28_PREFIX)/include -isystem /usr/include \
-	  src/*.c third_party/miniz/miniz.c third_party/miniz/miniz_zip.c \
+	  -Ithird_party -Ithird_party/lua -Ithird_party/miniz -Isrc -I$(SDL3_G28_PREFIX)/include -isystem /usr/include \
+	  src/*.c third_party/lua/lua.c third_party/miniz/miniz.c third_party/miniz/miniz_zip.c \
 	  third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_tdef.c \
 	  -o build/firerender-linux -L$(SDL3_G28_PREFIX)/lib \
 	  -lSDL3 -lm -lpthread -ldl
@@ -101,7 +105,7 @@ SDL3WIN_LIB  ?= $(SDL3WIN_ROOT)/lib/libSDL3.a
 win:
 	@mkdir -p build
 	x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -mwindows \
-		-Isrc -Ithird_party -Ithird_party/miniz -I$(SDL3WIN_INC) \
+		-Isrc -Ithird_party -Ithird_party/lua -Ithird_party/miniz -I$(SDL3WIN_INC) \
 		$(SRC) -o build/firerender.exe \
 		$(SDL3WIN_LIB) \
 		-lopengl32 -lwinmm -luser32 -lgdi32 -limm32 -lole32 -loleaut32 \
