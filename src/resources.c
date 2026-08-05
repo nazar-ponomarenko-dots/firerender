@@ -226,8 +226,12 @@ static void cache_purge_pak(void)
     while (*pp) {
         ResEntry *e = *pp;
         if (e->from_pak) {
-            // GL-ресурсы уже удалены через refcount в scene_teardown.
-            // Здесь только освобождаем структуру кеша.
+            // GL-ресурсы уже удалены через refcount в scene_teardown,
+            // поэтому tex#/prog# удаляются без glDelete* (и мог случиться
+            // double-free, т.к. GL id были переиспользованы). А вот данные
+            // img# (stbi-пиксели) принадлежат кешу — их освобождаем.
+            if (strncmp(e->key, "img#", 4) == 0)
+                stbi_image_free(e->data);
             *pp = e->next;
             free(e);
         } else {
@@ -337,12 +341,21 @@ int resources_texture_reload(void)
         unsigned char *img = image_load_raw(e->tex_path, &w, &h,
                                             e->tex_channels);
         if (!img) continue;
-        GLuint tex = make_texture(w, h, img,
-                                  e->tex_channels == 4 ? GL_RGBA : GL_RGB,
-                                  e->tex_wrap, e->tex_linear);
-        GLuint old = (GLuint)(uintptr_t)e->data;
-        glDeleteTextures(1, &old);
-        e->data = (void *)(uintptr_t)tex;
+        GLuint tex = (GLuint)(uintptr_t)e->data;
+        GLenum fmt = e->tex_channels == 4 ? GL_RGBA : GL_RGB;
+        GLint internal = fmt == GL_RGBA ? GL_RGBA8
+                       : fmt == GL_RED ? GL_R8
+                       : GL_RGB8;
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                        e->tex_linear ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                        e->tex_linear ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, e->tex_wrap);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, e->tex_wrap);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, fmt,
+                     GL_UNSIGNED_BYTE, img);
         e->iw = w;
         e->ih = h;
         e->tex_mt = mt;
