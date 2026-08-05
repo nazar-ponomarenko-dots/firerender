@@ -11,6 +11,7 @@
 // ============================================================================
 #ifndef MAPDATA_H
 #define MAPDATA_H
+#include "material.h"
 
 // Типы источников света (для будущих точечных/прожекторов)
 typedef enum {
@@ -32,48 +33,8 @@ typedef struct {
     int attached;        // 1 = следует за игроком каждый кадр (point-свет)
 } MapLight;
 
-// --- Режимы рендера объекта (MapObjectRender) ---------------------------------
-typedef enum {
-    RENDER_BLEND_ALPHATEST,  // альфа-тест: прозрачный фон отбрасывается (по умолч.)
-    RENDER_BLEND_ALPHA,      // обычный блендинг (полупрозрачность)
-    RENDER_BLEND_ADDITIVE,   // аддитивный (свечение, огонь)
-    RENDER_BLEND_OPAQUE      // непрозрачный (альфа игнорируется)
-} MapBlendMode;
-
-typedef enum {
-    RENDER_CULL_NONE,        // двусторонний (по умолчанию)
-    RENDER_CULL_BACK,        // отсекать заднюю сторону
-    RENDER_CULL_FRONT        // отсекать переднюю
-} MapCullMode;
-
-typedef enum {
-    TEX_WRAP_CLAMP,          // по краям — цвет края (по умолчанию)
-    TEX_WRAP_REPEAT,         // повторение
-    TEX_WRAP_MIRROR          // зеркальное повторение
-} MapTexWrap;
-
-typedef enum {
-    TEX_FILTER_LINEAR,       // сглаживание (по умолчанию)
-    TEX_FILTER_NEAREST,      // пиксельный (ретро, спрайты)
-    TEX_FILTER_MIPMAP        // мип-уровни (дальние объекты чёткие)
-} MapTexFilter;
-
-typedef struct {
-    float tint[3];       // цветовой тон (1 = без изменений)
-    float alpha;         // прозрачность 0..1 (для alpha/additive)
-    int blend;           // MapBlendMode
-    int cull;            // MapCullMode
-    int depth_write;     // 1 — писать в буфер глубины
-    int wrap;            // MapTexWrap (требует свою текстуру)
-    int filter;          // MapTexFilter
-    float tile[2];       // повтор UV (1 = один тайл текстуры)
-    float offset[2];     // сдвиг UV в тайлах
-    float scroll[2];     // анимация UV: тайлов в секунду
-    int fixed_size;      // 1 — ширина/высота в метрах (не из текстуры)
-    float width, height; // размер квада, м (если fixed_size)
-    int set;             // блок render был в JSON
-} MapObjectRender;
-
+// Материал объекта — единый тип (см. material.h): blend/cull/wrap/filter/
+// tint/alpha/UV-анимация. Парсится из блока "render" в map.json.
 // --- Коллизии карты: collisions[] — произвольные квадраты ----------------------
 typedef struct {
     char object[64];     // имя объекта, к которому привязан ("tree1") или ""
@@ -143,7 +104,7 @@ typedef struct {
     MapObjectShader shader_kind; // встроенный шейдер
     char shader_vs[256]; // свой вершинный шейдер (если custom)
     char shader_fs[256]; // свой фрагментный шейдер (если custom)
-    MapObjectRender render;  // полная настройка отображения (render = { ... })
+    Material render;         // материал (render = { ... }, см. material.h)
     MapUse use;              // взаимодействие по E (use = { ... })
 } MapObject;
 
