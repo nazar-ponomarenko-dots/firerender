@@ -17,36 +17,27 @@
 #ifndef VEGETATION_H
 #define VEGETATION_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
-#include "sun.h"
-#include "shadow.h"
+#include "world.h"
 
 typedef struct {
     const WorldState *world;            // данные мира: размеры, высоты, поле
+    const RendererContext *rc;          // кадровые данные (renderer.c)
+    SceneUniforms su;                   // общий uniform-набор сцены
     GLuint prog;                        // общая программа растительности
     GLuint vao_sg, vao_sw, vao_dg, vao_dw;   // статик/динамик x трава/пшеница
     GLuint vbo_sg, vbo_sw, vbo_dg, vbo_dw;
     GLuint tex;                         // массив спрайтов (0=трава, 1=пшеница)
-    GLint u_viewproj, u_campos, u_fogcolor, u_fogstart, u_fogend, u_fogon;
-    GLint u_lightdir, u_lightcolor, u_lightint, u_lightcount;
     GLint u_time;                       // время (ветер)
     GLint u_walk;                       // 1 = ходьба (малый ветер)
     GLint u_dyn;                        // 1 = динамический слой (только lod0/lod1)
-    GLint u_shadowmap[SHADOW_CASCADES]; // каскады теней (растения принимают тени)
-    GLint u_shadowmatrix[SHADOW_CASCADES];
-    GLint u_shadowbias[SHADOW_CASCADES];
-    GLint u_shadowdepth[SHADOW_CASCADES]; // сырая глубина (градиент тени)
-    GLint u_shadowgrad[SHADOW_CASCADES];
-    GLint u_shadow_on;
-    CameraParams *cam;                  // матрицы вида/проекции
-    SunParams *sun;                     // свет от узла Sun
 } VegParams;
 
 // Создаёт узел Vegetation: компилирует шейдер, грузит спрайты в 2D-массив,
 // строит 4 VAO инстансинга, генерирует статичный слой на всю карту.
 // NULL при ошибке. Прямоугольник поля (g_field_*) должен быть задан заранее.
-SceneNode *veg_make_node(const WorldState *w, CameraParams *cam, SunParams *sun);
+SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc);
 
 void veg_node_render(SceneNode *n, float dt);
 

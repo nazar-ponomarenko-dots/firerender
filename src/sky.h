@@ -8,12 +8,11 @@
 // ============================================================================
 #ifndef SKY_H
 #define SKY_H
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
-#include "sun.h"
 
 // Создаёт узел Sky (компилирует шейдеры, грузит панораму). NULL при ошибке.
-SceneNode *sky_make_node(CameraParams *cam, SunParams *sun);
+SceneNode *sky_make_node(const RendererContext *rc);
 
 void sky_node_render(SceneNode *n, float dt);
 

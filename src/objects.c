@@ -37,19 +37,14 @@
 #define OBJECT_MAX 256
 #define OBJECT_BASE_H 9.0f     // высота квада при scale.y = 1
 
-// Uniform-локации шейдера объекта (общие для всех программ)
+// Uniform-локации шейдера объекта (общие для всех программ):
+// общий набор сцены (SceneUniforms) + свои uniform'ы объекта/материала.
 typedef struct {
-    GLint u_viewproj, u_campos, u_objpos, u_objsize, u_objright, u_tex;
+    SceneUniforms su;            // общий набор сцены (render_ctx.h)
+    GLint u_objpos, u_objsize, u_objright, u_tex;
     GLint u_tint;
     GLint u_blend, u_alpha;
     GLint u_uvtile, u_uvoffset, u_uvscroll, u_time;
-    GLint u_lightdir, u_lightcolor, u_lightint, u_lightcount;
-    GLint u_ambient, u_skycolor, u_groundcolor;
-    GLint u_fogcolor, u_fogstart, u_fogend, u_fogon;
-    GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES];
-    GLint u_shadowbias[SHADOW_CASCADES];
-    GLint u_shadowdepth[SHADOW_CASCADES], u_shadowgrad[SHADOW_CASCADES];
-    GLint u_shadow_on;
 } ObjLocs;
 
 typedef struct {
@@ -67,6 +62,7 @@ typedef struct {
 
 typedef struct {
     const WorldState *world; // данные мира: высоты (посадка на рельеф)
+    const RendererContext *rc;   // кадровые данные (renderer.c)
     GLuint prog, vao, vbo, ibo;
     GLuint flat_prog;        // встроенный "flat" (без освещения)
     GLuint shadow_prog;      // глубина в карты теней
@@ -78,8 +74,6 @@ typedef struct {
     ObjectInst inst[OBJECT_MAX];
     ObjLocs locs;            // локации общих программ (p->prog)
     ObjLocs flat_locs;
-    CameraParams *cam;
-    SunParams *sun;
 } ObjectsParams;
 
 static ObjectsParams *g_objs;   // для теневого прохода (shadow.c)
@@ -98,8 +92,7 @@ static ObjLocs obj_locs(GLenum prog)
 {
     ObjLocs l;
     memset(&l, 0, sizeof l);
-    l.u_viewproj = glGetUniformLocation(prog, "uViewProj");
-    l.u_campos   = glGetUniformLocation(prog, "uCamPos");
+    scene_uniforms_init(&l.su, prog);      // общий набор сцены
     l.u_objpos   = glGetUniformLocation(prog, "uObjPos");
     l.u_objsize  = glGetUniformLocation(prog, "uObjSize");
     l.u_objright = glGetUniformLocation(prog, "uObjRight");
@@ -111,42 +104,23 @@ static ObjLocs obj_locs(GLenum prog)
     l.u_uvoffset = glGetUniformLocation(prog, "uUvOffset");
     l.u_uvscroll = glGetUniformLocation(prog, "uUvScroll");
     l.u_time     = glGetUniformLocation(prog, "uTime");
-    l.u_lightdir = glGetUniformLocation(prog, "uLightDir");
-    l.u_lightcolor = glGetUniformLocation(prog, "uLightColor");
-    l.u_lightint = glGetUniformLocation(prog, "uLightIntensity");
-    l.u_lightcount = glGetUniformLocation(prog, "uLightCount");
-    l.u_ambient  = glGetUniformLocation(prog, "uAmbient");
-    l.u_skycolor = glGetUniformLocation(prog, "uSkyColor");
-    l.u_groundcolor = glGetUniformLocation(prog, "uGroundColor");
-    l.u_fogcolor = glGetUniformLocation(prog, "uFogColor");
-    l.u_fogstart = glGetUniformLocation(prog, "uFogStart");
-    l.u_fogend   = glGetUniformLocation(prog, "uFogEnd");
-    l.u_fogon    = glGetUniformLocation(prog, "uFogOn");
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        char name[64];
-        snprintf(name, sizeof name, "uShadowMap%d", c);
-        l.u_shadowmap[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowMatrix[%d]", c);
-        l.u_shadowmatrix[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowBias[%d]", c);
-        l.u_shadowbias[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowDepth%d", c);
-        l.u_shadowdepth[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowGrad[%d]", c);
-        l.u_shadowgrad[c] = glGetUniformLocation(prog, name);
-    }
-    l.u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
     return l;
 }
 
 // Кадровые uniform'ы (виды, свет, тени, туман) — при переключении программы
 static void set_per_frame(const ObjLocs *l, const ObjectsParams *p)
 {
-    if (l->u_viewproj >= 0)
-        glUniformMatrix4fv(l->u_viewproj, 1, GL_FALSE, p->cam->viewproj);
-    if (l->u_campos >= 0)
-        glUniform3f(l->u_campos, p->cam->cam.pos[0], p->cam->cam.pos[1],
-                    p->cam->cam.pos[2]);
+    const RendererContext *rc = p->rc;
+    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
+    scene_uniforms_bind(&l->su, rc);
+    // Объекты: bias как у растительности (shadow_bias_veg из map.json),
+    // градиент ~5 м вглубь тени
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (l->su.u_shadowbias[c] >= 0)
+            glUniform1f(l->su.u_shadowbias[c], rc->shadow_bias_veg[c]);
+        if (l->su.u_shadowgrad[c] >= 0)
+            glUniform1f(l->su.u_shadowgrad[c], 5.0f / rc->shadow_depth[c]);
+    }
     if (l->u_time >= 0) glUniform1f(l->u_time, s_time);
     // Дефолты отображения (устанавливаются до per-instance uniform'ов)
     if (l->u_blend >= 0) glUniform1i(l->u_blend, RENDER_BLEND_ALPHATEST);
@@ -154,59 +128,6 @@ static void set_per_frame(const ObjLocs *l, const ObjectsParams *p)
     if (l->u_uvtile >= 0) glUniform2f(l->u_uvtile, 1.0f, 1.0f);
     if (l->u_uvoffset >= 0) glUniform2f(l->u_uvoffset, 0.0f, 0.0f);
     if (l->u_uvscroll >= 0) glUniform2f(l->u_uvscroll, 0.0f, 0.0f);
-    // Все направленные источники массивом (индекс 0 — солнце, у него тени)
-    if (l->u_lightdir >= 0) {
-        float dirs[SUN_MAX_LIGHTS * 3], cols[SUN_MAX_LIGHTS * 3];
-        float ints[SUN_MAX_LIGHTS];
-        memset(dirs, 0, sizeof dirs);
-        memset(cols, 0, sizeof cols);
-        memset(ints, 0, sizeof ints);
-        int nl = p->sun->light_count > SUN_MAX_LIGHTS
-                     ? SUN_MAX_LIGHTS : p->sun->light_count;
-        for (int i = 0; i < nl; i++) {
-            memcpy(&dirs[i * 3], p->sun->light_dir[i], 3 * sizeof(float));
-            memcpy(&cols[i * 3], p->sun->light_color[i], 3 * sizeof(float));
-            ints[i] = p->sun->light_intensity[i];
-        }
-        glUniform3fv(l->u_lightdir, SUN_MAX_LIGHTS, dirs);
-        glUniform3fv(l->u_lightcolor, SUN_MAX_LIGHTS, cols);
-        glUniform1fv(l->u_lightint, SUN_MAX_LIGHTS, ints);
-        if (l->u_lightcount >= 0) glUniform1i(l->u_lightcount, nl);
-    }
-    // Каскады теней: матрицы, bias, градиент — как у растительности
-    if (l->u_shadow_on >= 0 && l->u_shadowmatrix[0] >= 0) {
-        const float boxes[SHADOW_CASCADES] = { SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3 };
-        const int sizes[SHADOW_CASCADES] = { g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3] };
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
-            float depth = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
-            float bias_world = p->sun->shadow_bias_veg * boxes[c] / sizes[c];
-            glUniformMatrix4fv(l->u_shadowmatrix[c], 1, GL_FALSE,
-                               shadow_matrix(c));
-            glUniform1f(l->u_shadowbias[c], bias_world / depth);
-            glUniform1f(l->u_shadowgrad[c], 5.0f / depth);
-        }
-        glUniform1f(l->u_shadow_on,
-                    (shadow_is_on() && p->sun->shadow_on) ? 1.0f : 0.0f);
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
-            glActiveTexture(GL_TEXTURE3 + c);
-            glBindTexture(GL_TEXTURE_2D, shadow_texture(c));
-        }
-    }
-    if (l->u_ambient >= 0) glUniform3f(l->u_ambient, 0.70f, 0.74f, 0.80f);
-    if (l->u_skycolor >= 0 || l->u_fogcolor >= 0) {
-        float fog[3];
-        sky_fog_color(fog);
-        if (l->u_skycolor >= 0) glUniform3f(l->u_skycolor, fog[0], fog[1], fog[2]);
-        if (l->u_fogcolor >= 0) glUniform3f(l->u_fogcolor, fog[0], fog[1], fog[2]);
-    }
-    if (l->u_groundcolor >= 0)
-        glUniform3f(l->u_groundcolor, 0.24f, 0.34f, 0.20f);
-    if (l->u_fogstart >= 0) glUniform1f(l->u_fogstart, p->world->world_w * 0.75f);
-    if (l->u_fogend >= 0)   glUniform1f(l->u_fogend, p->world->world_w * 1.60f);
-    // Классический туман в шейдере: выкл при r_fog_mode 0 (меню «Туман»)
-    if (l->u_fogon >= 0)
-        glUniform1f(l->u_fogon, cvar_get("r_fog_mode") > 0.5f ? 1.0f : 0.0f);
-    glActiveTexture(GL_TEXTURE0);
 }
 
 // Копия текстуры с другими параметрами (wrap/filter) — кеш движка не трогаем
@@ -233,13 +154,12 @@ static GLuint texture_custom(const unsigned char *img, int w, int h,
     return tex;
 }
 
-SceneNode *objects_make_node(const WorldState *ws, CameraParams *cam, SunParams *sun)
+SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
 {
     ObjectsParams *p = calloc(1, sizeof *p);
     if (!p) return NULL;
     p->world = ws;
-    p->cam = cam;
-    p->sun = sun;
+    p->rc = rc;
 
     // Объекты из map.json: путь к PNG — model, позиция — pos,
     // масштаб — scale. y <= 0 — высота из рельефа.
@@ -346,9 +266,12 @@ SceneNode *objects_make_node(const WorldState *ws, CameraParams *cam, SunParams 
     glUseProgram(p->prog);
     glUniform1i(p->locs.u_tex, 0);
     glUniform3f(p->locs.u_tint, 1.0f, 1.0f, 1.0f);
+    // Каскады на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
-        glUniform1i(p->locs.u_shadowmap[c], 3 + c);
-        glUniform1i(p->locs.u_shadowdepth[c], 3 + c);
+        if (p->locs.su.u_shadowmap[c] >= 0)
+            glUniform1i(p->locs.su.u_shadowmap[c], 3 + c);
+        if (p->locs.su.u_shadowdepth[c] >= 0)
+            glUniform1i(p->locs.su.u_shadowdepth[c], 3 + c);
     }
     glUseProgram(0);
     // Свои шейдеры объектов (custom): отдельная программа на объект
@@ -367,10 +290,10 @@ SceneNode *objects_make_node(const WorldState *ws, CameraParams *cam, SunParams 
         if (it->locs.u_tex >= 0) glUniform1i(it->locs.u_tex, 0);
         if (it->locs.u_tint >= 0) glUniform3f(it->locs.u_tint, 1.0f, 1.0f, 1.0f);
         for (int c = 0; c < SHADOW_CASCADES; c++) {
-            if (it->locs.u_shadowmap[c] >= 0)
-                glUniform1i(it->locs.u_shadowmap[c], 3 + c);
-            if (it->locs.u_shadowdepth[c] >= 0)
-                glUniform1i(it->locs.u_shadowdepth[c], 3 + c);
+            if (it->locs.su.u_shadowmap[c] >= 0)
+                glUniform1i(it->locs.su.u_shadowmap[c], 3 + c);
+            if (it->locs.su.u_shadowdepth[c] >= 0)
+                glUniform1i(it->locs.su.u_shadowdepth[c], 3 + c);
         }
         glUseProgram(0);
     }
@@ -446,7 +369,7 @@ void objects_node_render(SceneNode *n, float dt)
     // --- Blob-тени (режим 3): мягкое пятно на земле под каждым объектом -----
     // Смещение пятна от солнца: тень падает по направлению света.
     if (cvar_get("r_shadows_mode") == 3.0f && p->blob_prog) {
-        const float *ld = p->sun->light_dir[0];
+        const float *ld = p->rc->light_dir[0];
         float ll = sqrtf(ld[0] * ld[0] + ld[2] * ld[2]);
         float sdx = ll > 0.001f ? ld[0] / ll : 0.0f;   // горизонталь к солнцу
         float sdz = ll > 0.001f ? ld[2] / ll : 0.0f;
@@ -456,7 +379,7 @@ void objects_node_render(SceneNode *n, float dt)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(GL_TRUE);
         glUseProgram(p->blob_prog);
-        glUniformMatrix4fv(p->b_viewproj, 1, GL_FALSE, p->cam->viewproj);
+        glUniformMatrix4fv(p->b_viewproj, 1, GL_FALSE, p->rc->viewproj);
         glUniform4f(p->b_color, col[0], col[1], col[2], col[3]);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, p->blob_tex);
@@ -533,8 +456,8 @@ void objects_node_render(SceneNode *n, float dt)
         // Ось ширины квада:
         //  - биллборд: перпендикуляр к направлению на камеру (квад к ней);
         //  - крест: статичный выбор грани по углу обзора.
-        float dx = p->cam->cam.pos[0] - it->pos[0];
-        float dz = p->cam->cam.pos[2] - it->pos[2];
+        float dx = p->rc->cam_pos[0] - it->pos[0];
+        float dz = p->rc->cam_pos[2] - it->pos[2];
         if (it->billboard) {
             float d = sqrtf(dx * dx + dz * dz);
             if (d < 0.001f) d = 1.0f;
@@ -606,8 +529,8 @@ void objects_shadow_render(const float vp[16], float box)
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
         // отсечение по боксу каскада (от камеры)
-        float dx = p->cam->cam.pos[0] - it->pos[0];
-        float dz = p->cam->cam.pos[2] - it->pos[2];
+        float dx = p->rc->cam_pos[0] - it->pos[0];
+        float dz = p->rc->cam_pos[2] - it->pos[2];
         if (dx * dx + dz * dz > r2) continue;
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, it->tex);

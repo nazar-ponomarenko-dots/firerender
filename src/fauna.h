@@ -4,11 +4,11 @@
 #ifndef FAUNA_H
 #define FAUNA_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
 
 // Создаёт узел фауны из map.json (fauna[]). NULL, если в карте нет фауны.
-SceneNode *fauna_make_node(CameraParams *cam);
+SceneNode *fauna_make_node(const RendererContext *rc);
 
 void fauna_node_update(SceneNode *n, float dt);
 void fauna_node_render(SceneNode *n, float dt);

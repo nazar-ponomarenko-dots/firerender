@@ -400,10 +400,10 @@ static void veg_shadow_build(void)
 // Динамический слой: при переходе камеры пересоздаёт только те чанки,
 // чья плотность заметно изменилась, и заливает их в VBO.
 static void veg_dyn_thin_build(int need[][2], int nn, VegParams *p);
-static void veg_update(const Camera *cam, VegParams *p)
+static void veg_update(const float cam_pos[3], VegParams *p)
 {
-    int cx = (int)floorf(cam->pos[0] / VEG_CHUNK);
-    int cy = (int)floorf(cam->pos[2] / VEG_CHUNK);
+    int cx = (int)floorf(cam_pos[0] / VEG_CHUNK);
+    int cy = (int)floorf(cam_pos[2] / VEG_CHUNK);
     if (cx == g_chunk_cam[0] && cy == g_chunk_cam[1]) return;
     g_chunk_cam[0] = cx;
     g_chunk_cam[1] = cy;
@@ -413,8 +413,8 @@ static void veg_update(const Camera *cam, VegParams *p)
     int need[512][2], nn = 0;
     for (int j = 0; j < g_map_d && nn < 512; j++)
         for (int i = 0; i < g_map_w && nn < 512; i++) {
-            float dx = (float)(i * 16 + 8) - cam->pos[0];
-            float dz = (float)(j * 16 + 8) - cam->pos[2];
+            float dx = (float)(i * 16 + 8) - cam_pos[0];
+            float dz = (float)(j * 16 + 8) - cam_pos[2];
             if (dx*dx + dz*dz <= dr2) { need[nn][0] = i; need[nn][1] = j; nn++; }
         }
     // выгружаем чанки, вышедшие из радиуса
@@ -434,8 +434,8 @@ static void veg_update(const Camera *cam, VegParams *p)
     for (int k = 0; k < nn; k++) {
         int i = need[k][0], j = need[k][1];
         VegChunk *c = &g_veg_chunks[j * g_map_w + i];
-        float dx = (float)(i * 16 + 8) - cam->pos[0];
-        float dz = (float)(j * 16 + 8) - cam->pos[2];
+        float dx = (float)(i * 16 + 8) - cam_pos[0];
+        float dz = (float)(j * 16 + 8) - cam_pos[2];
         float r = sqrtf(dx*dx + dz*dz);
         float tgd = veg_density(r, s_grass_density, s_grass_floor);  // целевая плотность
         float twd = veg_density(r, s_wheat_density, s_wheat_floor);
@@ -447,7 +447,7 @@ static void veg_update(const Camera *cam, VegParams *p)
             float *gb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
             float *wb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
             int gn = 0, wn = 0;
-            veg_gen_chunk(p->world, i, j, cam->pos[0], cam->pos[2], false,
+            veg_gen_chunk(p->world, i, j, cam_pos[0], cam_pos[2], false,
                           gb, wb, &gn, &wn, &c->dg_d, &c->dw_d);
             if (gn == 0) { free(gb); gb = NULL; }
             if (wn == 0) { free(wb); wb = NULL; }
@@ -564,7 +564,7 @@ void veg_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     VegParams *p = n->params;
-    const Camera *cam = &p->cam->cam;
+    const RendererContext *rc = p->rc;
     g_veg_time += dt;                // время для ветра
     // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
     // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
@@ -579,66 +579,27 @@ void veg_node_render(SceneNode *n, float dt)
             SDL_Log("Veg density changed: wheat %.0f, grass %.1f", w, g);
         }
     }
-    veg_update(cam, p);
+    veg_update(rc->cam_pos, p);
     if (g_static_gc + g_static_wc + g_dyn_gc + g_dyn_wc <= 0) return;
     if (!g_veg_visible) return;
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);             // биллборды видны с обеих сторон
     glUseProgram(p->prog);
-    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->cam->viewproj);
-    glUniform3f(p->u_campos, cam->pos[0], cam->pos[1], cam->pos[2]);
-    // Frustum-отсечение статики: 6 плоскостей конуса из viewproj (метод
-    // Gribb-Hartmann, матрицы column-major — строки m[c*4+r]).
-    frustum_extract(p->cam->viewproj);    // Все направленные источники массивом (индекс 0 — солнце, у него тени)
-    {
-        float dirs[SUN_MAX_LIGHTS * 3], cols[SUN_MAX_LIGHTS * 3];
-        float ints[SUN_MAX_LIGHTS];
-        memset(dirs, 0, sizeof dirs);
-        memset(cols, 0, sizeof cols);
-        memset(ints, 0, sizeof ints);
-        int n = p->sun->light_count > SUN_MAX_LIGHTS ? SUN_MAX_LIGHTS : p->sun->light_count;
-        for (int i = 0; i < n; i++) {
-            memcpy(&dirs[i * 3], p->sun->light_dir[i], 3 * sizeof(float));
-            memcpy(&cols[i * 3], p->sun->light_color[i], 3 * sizeof(float));
-            ints[i] = p->sun->light_intensity[i];
-        }
-        glUniform3fv(p->u_lightdir, SUN_MAX_LIGHTS, dirs);
-        glUniform3fv(p->u_lightcolor, SUN_MAX_LIGHTS, cols);
-        glUniform1fv(p->u_lightint, SUN_MAX_LIGHTS, ints);
-        glUniform1i(p->u_lightcount, n);
+    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
+    scene_uniforms_bind(&p->su, rc);
+    // Растения: свои bias/градиент (shadow_bias_veg из map.json — тени
+    // вплотную к растениям, без слан-терма: нормаль биллборда бессмысленна)
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (p->su.u_shadowbias[c] >= 0)
+            glUniform1f(p->su.u_shadowbias[c], rc->shadow_bias_veg[c]);
+        if (p->su.u_shadowgrad[c] >= 0)
+            glUniform1f(p->su.u_shadowgrad[c], rc->shadow_grad_veg[c]);
     }
     glUniform1f(p->u_time, g_veg_time);
-    glUniform1f(p->u_walk, cam->fly ? 0.0f : 1.0f);
-    // Классический туман в шейдере: выкл при r_fog_mode 0 (меню «Туман»)
-    glUniform1f(p->u_fogon, cvar_get("r_fog_mode") > 0.5f ? 1.0f : 0.0f);
-    // Растения принимают тени: каскады, как у рельефа (матрицы — свежие,
-    // terrain отрисовал их первым). PCF ~1.5 текселя, bias 2 боковых текселя.
-    {
-        const float boxes[SHADOW_CASCADES] = { SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3 };
-        const int sizes[SHADOW_CASCADES] = { g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3] };
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
-            float depth = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
-            // bias — shadow_bias_veg латеральных текселей (из map/map.json,
-            // по умолчанию 2): тени ложатся вплотную к растениям (4 текселя
-            // давали сдвиг "на пару см"), константа без слан-терма — нормаль
-            // биллборда бессмысленна
-            float bias_world = p->sun->shadow_bias_veg * boxes[c] / sizes[c];
-            glUniformMatrix4fv(p->u_shadowmatrix[c], 1, GL_FALSE,
-                               shadow_matrix(c));
-            glUniform1f(p->u_shadowbias[c], bias_world / depth);
-            // Градиент тени растений: полная темнота после ~4.5 м вглубь
-            // (≈ длина тени пшеницы при низком солнце) — на всей тени
-            // виден переход от светлого края к тёмному основанию.
-            glUniform1f(p->u_shadowgrad[c], 4.5f / depth);
-        }
-        glUniform1f(p->u_shadow_on,
-                    (shadow_is_on() && p->sun->shadow_on) ? 1.0f : 0.0f);
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
-            glActiveTexture(GL_TEXTURE3 + c);
-            glBindTexture(GL_TEXTURE_2D, shadow_texture(c));
-        }
-        glActiveTexture(GL_TEXTURE0);
-    }
+    glUniform1f(p->u_walk, rc->cam_fly ? 0.0f : 1.0f);
+    // Frustum-отсечение статики: 6 плоскостей конуса из viewproj (метод
+    // Gribb-Hartmann, матрицы column-major — строки m[c*4+r]).
+    frustum_extract(rc->viewproj);
     glBindTexture(GL_TEXTURE_2D_ARRAY, p->tex);
     // Статика: только супер-чанки в радиусе видимости (вместо всей карты).
     // Дальше спрайты меньше пикселя — их вид несёт текстура земли. При
@@ -647,7 +608,8 @@ void veg_node_render(SceneNode *n, float dt)
     if (g_draw_static_main) {
         if (g_has_base_instance) {
         float vis = s_vis_r;
-        if (cam->pos[1] > VEG_VIS_H) vis += (cam->pos[1] - VEG_VIS_H) * VEG_VIS_F;
+        if (rc->cam_pos[1] > VEG_VIS_H)
+            vis += (rc->cam_pos[1] - VEG_VIS_H) * VEG_VIS_F;
         float vr2 = vis * vis;
         float half = VEG_SUPER * VEG_CHUNK * 0.5f;   // полусторона супер-чанка
         for (int pass = 0; pass < 2; pass++) {
@@ -658,8 +620,8 @@ void veg_node_render(SceneNode *n, float dt)
                 // frustum: супер-чанк 64 м — ящик на всю высоту рельефа
                 if (!frustum_box(p->world, g_sc_cx[s] - half, g_sc_cz[s] - half,
                                  g_sc_cx[s] + half, g_sc_cz[s] + half)) continue;
-                float dx = g_sc_cx[s] - cam->pos[0];
-                float dz = g_sc_cz[s] - cam->pos[2];
+                float dx = g_sc_cx[s] - rc->cam_pos[0];
+                float dz = g_sc_cz[s] - rc->cam_pos[2];
                 if (dx*dx + dz*dz > vr2) continue;
                 glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
                         GL_UNSIGNED_INT, NULL, cnt,
@@ -802,7 +764,7 @@ static void veg_setup_vao(GLuint vao, GLuint inst_vbo)
     glBindVertexArray(0);
 }
 
-SceneNode *veg_make_node(const WorldState *w, CameraParams *cam, SunParams *sun)
+SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
 {
     // Плотности и радиусы — из map/map.json (veg = { ... })
     {
@@ -893,6 +855,7 @@ SceneNode *veg_make_node(const WorldState *w, CameraParams *cam, SunParams *sun)
 
     VegParams *p = calloc(1, sizeof *p);
     p->world = w;
+    p->rc = rc;
     p->prog = prog;
     p->vao_sg = g_veg_vao[0];
     p->vao_sw = g_veg_vao[1];
@@ -903,51 +866,24 @@ SceneNode *veg_make_node(const WorldState *w, CameraParams *cam, SunParams *sun)
     p->vbo_dg = g_veg_vb[2];
     p->vbo_dw = g_veg_vb[3];
     p->tex = tex;
-    p->cam = cam;
-    p->sun = sun;
-    p->u_viewproj = glGetUniformLocation(prog, "uViewProj");
-    p->u_campos   = glGetUniformLocation(prog, "uCamPos");
-    p->u_fogcolor = glGetUniformLocation(prog, "uFogColor");
-    p->u_fogstart = glGetUniformLocation(prog, "uFogStart");
-    p->u_fogend   = glGetUniformLocation(prog, "uFogEnd");
-    p->u_fogon    = glGetUniformLocation(prog, "uFogOn");
-    p->u_lightdir = glGetUniformLocation(prog, "uLightDir");
-    p->u_lightcolor = glGetUniformLocation(prog, "uLightColor");
-    p->u_lightint = glGetUniformLocation(prog, "uLightIntensity");
-    p->u_lightcount = glGetUniformLocation(prog, "uLightCount");
+    scene_uniforms_init(&p->su, prog);    // общий набор сцены
     p->u_dyn      = glGetUniformLocation(prog, "uDyn");
     p->u_time     = glGetUniformLocation(prog, "uTime");   // ветер
     p->u_walk     = glGetUniformLocation(prog, "uWalk");
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        char name[64];
-        snprintf(name, sizeof name, "uShadowMap%d", c);
-        p->u_shadowmap[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowMatrix[%d]", c);
-        p->u_shadowmatrix[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowBias[%d]", c);
-        p->u_shadowbias[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowDepth%d", c);
-        p->u_shadowdepth[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowGrad[%d]", c);
-        p->u_shadowgrad[c] = glGetUniformLocation(prog, name);
-    }
-    p->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
 
     // Статичные uniform'ы растительности
     float fog[3];
     sky_fog_color(fog);
     glUseProgram(prog);
     glUniform1i(glGetUniformLocation(prog, "uVeg"), 0);
-    glUniform3f(glGetUniformLocation(prog, "uAmbient"), 0.70f, 0.74f, 0.80f);
-    glUniform3f(glGetUniformLocation(prog, "uSkyColor"), fog[0], fog[1], fog[2]);
-    glUniform3f(glGetUniformLocation(prog, "uGroundColor"), 0.24f, 0.34f, 0.20f);
+    // Каскады на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
-        glUniform1i(p->u_shadowmap[c], 3 + c);   // каскады на юнитах 3-5
-        glUniform1i(p->u_shadowdepth[c], 3 + c); // сырая глубина — те же текстуры
+        if (p->su.u_shadowmap[c] >= 0)
+            glUniform1i(p->su.u_shadowmap[c], 3 + c);
+        if (p->su.u_shadowdepth[c] >= 0)
+            glUniform1i(p->su.u_shadowdepth[c], 3 + c);
     }
-    glUniform3f(p->u_fogcolor, fog[0], fog[1], fog[2]);
-    glUniform1f(p->u_fogstart, w->world_w * 0.75f);
-    glUniform1f(p->u_fogend, w->world_w * 1.60f);
+    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
     glUseProgram(0);
 
     // Чанки динамического слоя (вокруг камеры)

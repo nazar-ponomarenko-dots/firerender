@@ -9,17 +9,15 @@
 #ifndef HUD_H
 #define HUD_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
-#include "sun.h"
 #include "world.h"
 
 typedef struct {
     GLuint prog, vao, vbo;         // программа и буфер вершин (каждый кадр)
     GLuint tex_font;               // атлас шрифта
     GLint u_font, u_color, u_usetex;
-    CameraParams *cam;             // позиция игрока (узел Camera)
-    SunParams *sun;                // направление солнца (узел Sun)
+    const RendererContext *rc;     // позиция/взгляд игрока, солнце (renderer.c)
     const WorldState *world;       // данные мира (GRND/ALT, размеры, сетка)
     int vw, vh;                    // окно в пикселях
     float fps;                     // обновляет главный цикл (EMA)
@@ -38,7 +36,7 @@ typedef struct {
 } HudParams;
 
 // Создаёт узел DebugHUD (компилирует шейдер, строит атлас шрифта и VAO).
-SceneNode *hud_make_node(const WorldState *w, CameraParams *cam, SunParams *sun);
+SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc);
 
 void hud_node_update(SceneNode *n, float dt);
 void hud_node_render(SceneNode *n, float dt);

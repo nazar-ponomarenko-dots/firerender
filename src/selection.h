@@ -10,18 +10,18 @@
 #ifndef SELECTION_H
 #define SELECTION_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
 
 typedef struct {
     GLuint prog, vao, vbo;         // программа и буфер рёбер (каждый кадр)
     GLint u_viewproj, u_color;
-    CameraParams *cam;             // матрицы вида/проекции
+    const RendererContext *rc;     // матрицы вида/проекции
     SceneNode *root;               // корень дерева: по нему ищем 3D-узлы
 } SelParams;
 
 // Создаёт узел Selection (CanvasItem2D-стиля нет: рисует в мире).
-SceneNode *selection_make_node(SceneNode *root, CameraParams *cam);
+SceneNode *selection_make_node(SceneNode *root, const RendererContext *rc);
 
 void selection_node_render(SceneNode *n, float dt);
 

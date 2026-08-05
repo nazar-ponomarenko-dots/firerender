@@ -19,6 +19,7 @@
 #include "linalg.h"
 #include "mapdata.h"
 #include "objects.h"
+#include "renderer.h"
 #include "resources.h"
 #include "shader.h"
 #include "terrain.h"
@@ -207,10 +208,10 @@ static void shadow_render_into(GLuint fbo, int size, float box,
     glUniformMatrix4fv(u_veg_viewproj, 1, GL_FALSE, vp);
     glUniform1i(u_veg_veg, 0);
     glUniform1f(u_veg_time, veg_time());
-    glUniform3f(u_veg_campos, p->cam->cam.pos[0], p->cam->cam.pos[1],
-                p->cam->cam.pos[2]);
+    const RendererContext *rc = renderer_context();
+    glUniform3f(u_veg_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
     glUniform1f(glGetUniformLocation(g_shadowveg_prog, "uWalk"),
-                p->cam->cam.fly ? 0.0f : 1.0f);
+                rc->cam_fly ? 0.0f : 1.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, veg_texture());
     glUniform1i(u_veg_thin, 0);
@@ -222,7 +223,7 @@ static void shadow_render_into(GLuint fbo, int size, float box,
             // супер-чанка (64 м: 32*1.414 ≈ 45.3) — остальные вне бокса всё
             // равно отсекались бы аппаратным клипом
             float r2 = (45.3f + box * 0.7071f) * (45.3f + box * 0.7071f);
-            float pcx = p->cam->cam.pos[0], pcz = p->cam->cam.pos[2];
+            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
             for (int s = 0; s < veg_shadow_super_n(); s++) {
                 int cnt = veg_shadow_super_cnt(0, s);
                 if (cnt <= 0) continue;
@@ -240,7 +241,7 @@ static void shadow_render_into(GLuint fbo, int size, float box,
         glBindVertexArray(veg_shadow_vao(1));
         if (cull_mode && veg_has_base_instance()) {
             float r2 = (45.3f + box * 0.7071f) * (45.3f + box * 0.7071f);
-            float pcx = p->cam->cam.pos[0], pcz = p->cam->cam.pos[2];
+            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
             for (int s = 0; s < veg_shadow_super_n(); s++) {
                 int cnt = veg_shadow_super_cnt(1, s);
                 if (cnt <= 0) continue;
@@ -261,7 +262,7 @@ static void shadow_render_into(GLuint fbo, int size, float box,
         if (cull_mode && veg_has_base_instance()) {
             // чанки внутри бокса: бокс + полудиагональ чанка (16 м: 11.3)
             float r2 = (11.3f + box * 0.7071f) * (11.3f + box * 0.7071f);
-            float pcx = p->cam->cam.pos[0], pcz = p->cam->cam.pos[2];
+            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
             for (int k = 0; k < veg_dyn_shadow_chunks(); k++) {
                 float cx, cz;
                 GLuint gbase, wbase;
@@ -301,17 +302,22 @@ void shadow_render(TerrainParams *p)
 {
     // Тени рисуем, только если включены глобально (клавиша [) и сам
     // источник света отбрасывает тени (shadow.enabled из map/map.json).
-    if (!g_shadow_on || !p->sun->shadow_on) return;
-    const float *sd = p->sun->dir;
+    // Всё состояние — из единого рендер-контекста (renderer.c).
+    const RendererContext *rc = renderer_context();
+    if (!rc->shadow_on) return;
+    const float *sd = rc->light_dir[0];
     const float boxes[SHADOW_CASCADES] = { SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3 };
     const int sizes[SHADOW_CASCADES] = { g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3] };
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         float box = boxes[c];
         float depth = box * SHADOW_DEPTH_MUL + 400.0f;
-        float vp[16];
-        shadow_matrix_for(p->cam->cam.pos, sd, box, depth,
-                          2.0f / sizes[c], p->shadow_mvp[c], vp);
-        memcpy(g_last_mvp[c], p->shadow_mvp[c], sizeof g_last_mvp[c]);
+        float vp[16], mvp[16];
+        shadow_matrix_for(rc->cam_pos, sd, box, depth,
+                          2.0f / sizes[c], mvp, vp);
+        // Свежие матрицы — в контекст (их читают vegetation/objects/voxfog
+        // в этом же кадре) и в g_last_mvp (для совместимости)
+        memcpy((float *)rc->shadow_matrix[c], mvp, sizeof mvp);
+        memcpy(g_last_mvp[c], mvp, sizeof mvp);
         // Каскады 0-1 (8/16 м): статика + динамика (детальные тени у ног).
         // Каскад 2 (96 м): только статика — динамика там (~200 тыс.
         // инстансов) даёт неразличимую на текселе 4.7 см тень.

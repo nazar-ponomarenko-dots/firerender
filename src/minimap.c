@@ -17,7 +17,7 @@
 #include <SDL3/SDL.h>
 
 SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
-                             CameraParams *cam, SunParams *sun)
+                             const RendererContext *rc)
 {
     GLuint prog = make_program("shaders/minimap.vs", "shaders/minimap.fs");
     if (!prog) return NULL;
@@ -41,8 +41,7 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
     p->vbo = vbo;
     p->tex_base = tex_base;                 // цвет карты (для мини-карты)
     p->world = w;
-    p->cam = cam;
-    p->sun = sun;
+    p->rc = rc;
     p->u_basemap = glGetUniformLocation(prog, "uBasemap");
     p->u_color   = glGetUniformLocation(prog, "uColor");
     p->u_usetex  = glGetUniformLocation(prog, "uUseTex");
@@ -67,7 +66,7 @@ void minimap_node_render(SceneNode *n, float dt)
     (void)dt;
     MinimapParams *p = n->params;
     if (!p->visible) return;        // клавиша G — карта скрыта
-    const Camera *cam = &p->cam->cam;
+    const RendererContext *rc = p->rc;
     int vw = p->vw, vh = p->vh;
     if (vw <= 0 || vh <= 0) return;
     glDisable(GL_DEPTH_TEST);   // 2D поверх 3D-сцены
@@ -84,8 +83,8 @@ void minimap_node_render(SceneNode *n, float dt)
 
     // Позиция игрока в uv карты (x/WORLD_W, z/WORLD_D), прижата к краям
     const WorldState *w = p->world;
-    float u = cam->pos[0] / w->world_w;
-    float v = cam->pos[2] / w->world_d;
+    float u = rc->cam_pos[0] / w->world_w;
+    float v = rc->cam_pos[2] / w->world_d;
     if (u < 0) u = 0;
     if (u > 1) u = 1;
     if (v < 0) v = 0;
@@ -95,21 +94,21 @@ void minimap_node_render(SceneNode *n, float dt)
 
     // Штрих направления взгляда (12 м вперёд) + жёлтая линия направления
     // на солнце (от игрока, 60 м).
-    float lx = sinf(cam->yaw) * 12.0f / w->world_w * (nx1 - nx0);
-    float ly = -cosf(cam->yaw) * 12.0f / w->world_d * (ny1 - ny0);
-    const SunParams *sun = p->sun;
-    float sx = sinf(atan2f(sun->dir[0], sun->dir[2])) * 60.0f / w->world_w * (nx1 - nx0);
-    float sy = -cosf(atan2f(sun->dir[0], sun->dir[2])) * 60.0f / w->world_d * (ny1 - ny0);
+    float lx = sinf(rc->cam_yaw) * 12.0f / w->world_w * (nx1 - nx0);
+    float ly = -cosf(rc->cam_yaw) * 12.0f / w->world_d * (ny1 - ny0);
+    // Направление на солнце (первый направленный источник)
+    float sx = sinf(atan2f(rc->light_dir[0][0], rc->light_dir[0][2])) * 60.0f / w->world_w * (nx1 - nx0);
+    float sy = -cosf(atan2f(rc->light_dir[0][0], rc->light_dir[0][2])) * 60.0f / w->world_d * (ny1 - ny0);
 
     // Маркер игрока: img/player.png, повёрнут на yaw — стрелка смотрит
     // туда, куда смотрит игрок. forward = (sin yaw, 0, cos yaw); на карте
     // +x вправо, +z вниз -> направление взгляда на экране (sin yaw, -cos yaw),
     // угол поворота текстуры θ = yaw + π (текстура смотрит "на север").
     float rh = 11.0f;                       // полмаркера, px
-    float ux = sinf(cam->yaw) * 2.0f * rh / vw;
-    float uy = -cosf(cam->yaw) * 2.0f * rh / vh;
-    float px2 = cosf(cam->yaw) * 2.0f * rh / vw;
-    float py2 = sinf(cam->yaw) * 2.0f * rh / vh;
+    float ux = sinf(rc->cam_yaw) * 2.0f * rh / vw;
+    float uy = -cosf(rc->cam_yaw) * 2.0f * rh / vh;
+    float px2 = cosf(rc->cam_yaw) * 2.0f * rh / vw;
+    float py2 = sinf(rc->cam_yaw) * 2.0f * rh / vh;
     // Вершины: 0-5 карта, 6-11 маркер, 12-13 линия взгляда, 14-15 солнце
     float verts[16][4] = {
         {nx0, ny0, 0, 1}, {nx1, ny0, 1, 1}, {nx0, ny1, 0, 0},

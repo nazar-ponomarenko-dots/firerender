@@ -11,8 +11,7 @@
 #ifndef VOXFOG_H
 #define VOXFOG_H
 #include "gl_loader.h"
-#include "camera.h"
-#include "sun.h"
+#include "render_ctx.h"
 #include "world.h"
 
 #define VF_CASCADES 3
@@ -41,9 +40,9 @@ GLuint voxfog_fbo(void);            // куда bloom пишет компози�
 GLuint voxfog_texture(void);        // этот композит (текстура)
 
 // Полноэкранный проход: композит bloom'а (цвет) + глубина сцены + марш
-// по каскадам -> экран. ПОЛНОЕ разрешение.
-void voxfog_render(int vw, int vh, const CameraParams *cam,
-                   const SunParams *sun, GLuint bloomed_tex, GLuint scene_depth);
+// по каскадам -> экран. ПОЛНОЕ разрешение. Камера/солнце/тени — из rc.
+void voxfog_render(int vw, int vh, const RendererContext *rc,
+                   GLuint bloomed_tex, GLuint scene_depth);
 
 int  voxfog_is_on(void);
 void voxfog_toggle(void);

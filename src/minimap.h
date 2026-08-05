@@ -7,9 +7,8 @@
 #ifndef MINIMAP_H
 #define MINIMAP_H
 #include "gl_loader.h"
+#include "render_ctx.h"
 #include "scene.h"
-#include "camera.h"
-#include "sun.h"
 #include "world.h"
 
 typedef struct {
@@ -18,15 +17,14 @@ typedef struct {
     GLuint tex_base;               // текстура карты
     GLuint tex_marker;             // маркер игрока (img/player.png)
     const WorldState *world;       // размеры мира (позиция игрока в uv)
-    CameraParams *cam;             // ссылка на узел Camera (позиция игрока)
-    SunParams *sun;                // направление на солнце (маркер)
+    const RendererContext *rc;     // позиция/взгляд игрока, солнце
     int vw, vh;                    // размер окна в пикселях
     int visible;                   // клавиша G: показать/скрыть карту
 } MinimapParams;
 
 // Создаёт узел Minimap (компилирует шейдер, строит VAO). NULL при ошибке.
 SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
-                             CameraParams *cam, SunParams *sun);
+                             const RendererContext *rc);
 
 void minimap_node_render(SceneNode *n, float dt);
 

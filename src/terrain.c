@@ -200,7 +200,7 @@ static GLuint terrain_ground_texture(const unsigned char *ground_img,
 }
 
 SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
-                             CameraParams *cam, SunParams *sun)
+                             const RendererContext *rc)
 {
     // Материал земли: текстура из map.json (terrain.ground_tex), трава —
     // всегда img/grass.png (штампуется в землю)
@@ -222,6 +222,7 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
 
     TerrainParams *p = calloc(1, sizeof *p);
     p->world = w;
+    p->rc = rc;                           // кадровые данные (renderer.c)
     p->prog = prog;
     p->vao = vao;    p->vbo = vbo;
     p->ibo = ibo;
@@ -229,40 +230,12 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     p->tex_norm = wt->tex_norm;           // нормали (unit 1)
     p->tex_height = wt->tex_height;       // высоты (unit 2)
     p->vert_count = vert_count;
-    p->cam = cam;                         // берём матрицы у Camera
-    p->sun = sun;                         // и свет у Sun
-    p->u_viewproj = glGetUniformLocation(prog, "uViewProj");
-    p->u_campos   = glGetUniformLocation(prog, "uCamPos");
-    p->u_lightdir = glGetUniformLocation(prog, "uLightDir");
-    p->u_lightcolor = glGetUniformLocation(prog, "uLightColor");
-    p->u_lightint = glGetUniformLocation(prog, "uLightIntensity");
-    p->u_lightcount = glGetUniformLocation(prog, "uLightCount");
-    p->u_ambient  = glGetUniformLocation(prog, "uAmbient");
-    p->u_skycolor = glGetUniformLocation(prog, "uSkyColor");
-    p->u_groundcolor = glGetUniformLocation(prog, "uGroundColor");
-    p->u_fogcolor = glGetUniformLocation(prog, "uFogColor");
-    p->u_fogstart = glGetUniformLocation(prog, "uFogStart");
-    p->u_fogend   = glGetUniformLocation(prog, "uFogEnd");
-    p->u_fogon    = glGetUniformLocation(prog, "uFogOn");
+    scene_uniforms_init(&p->su, prog);    // общий набор сцены
     p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
     p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
     p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
     p->u_heightmax = glGetUniformLocation(prog, "uHeightMax");
     p->u_texscale  = glGetUniformLocation(prog, "uTexScale");
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        char name[64];
-        snprintf(name, sizeof name, "uShadowMap%d", c);
-        p->u_shadowmap[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowMatrix%d", c);
-        p->u_shadowmatrix[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowBias%d", c);
-        p->u_shadowbias[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowDepth%d", c);
-        p->u_shadowdepth[c] = glGetUniformLocation(prog, name);
-        snprintf(name, sizeof name, "uShadowGrad%d", c);
-        p->u_shadowgrad[c] = glGetUniformLocation(prog, name);
-    }
-    p->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
     p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
     p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
     p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
@@ -274,21 +247,19 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     glUniform1i(glGetUniformLocation(prog, "uBasemap"), 0);   // земля
     glUniform1i(glGetUniformLocation(prog, "uNormalmap"), 1); // нормали
     glUniform1i(glGetUniformLocation(prog, "uHeightmap"), 2); // высоты
-    glUniform1i(glGetUniformLocation(prog, "uShadowMap0"), 3);   // тени
-    glUniform1i(glGetUniformLocation(prog, "uShadowMap1"), 4);
-    glUniform1i(glGetUniformLocation(prog, "uShadowMap2"), 5);
-    glUniform1i(glGetUniformLocation(prog, "uShadowMap3"), 6);
-    // Сырая глубина каскадов — ТЕ ЖЕ текстуры (юниты 3-6): при выборке
-    // через sampler2D режим сравнения игнорируется, читается глубина.
-    for (int c = 0; c < SHADOW_CASCADES; c++)
-        glUniform1i(p->u_shadowdepth[c], 3 + c);
+    // Каскады теней на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d —
+    // ТЕ ЖЕ текстуры: при выборке через sampler2D режим сравнения
+    // игнорируется, читается глубина).
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (p->su.u_shadowmap[c] >= 0)
+            glUniform1i(p->su.u_shadowmap[c], 3 + c);
+        if (p->su.u_shadowdepth[c] >= 0)
+            glUniform1i(p->su.u_shadowdepth[c], 3 + c);
+    }
     glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
     glUniform1i(p->u_static_on, 0);
     glUniform2f(p->u_worldsize, w->world_w, w->world_d);
-    glUniform3f(p->u_ambient, 0.75f, 0.8f, 0.9f);      // сила полусферы
-    glUniform3f(p->u_skycolor, fog[0], fog[1], fog[2]);
-    glUniform3f(p->u_groundcolor, 0.22f, 0.30f, 0.18f); // отражение от травы
-    glUniform3f(p->u_fogcolor, fog[0], fog[1], fog[2]);
+    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
     glUniform1f(p->u_specpow, 40.0f);
     glUniform1f(p->u_specint, 0.0f);   // земля матовая — без отражения солнца
     glUniform1f(p->u_heightmin, w->min_height);
@@ -303,9 +274,7 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     glUniform3f(glGetUniformLocation(prog, "uFieldColor"),
                 tc.field_color[0], tc.field_color[1], tc.field_color[2]);
     glUniform1f(glGetUniformLocation(prog, "uFieldBlend"), tc.field_blend);
-    // Туман — за пределами карты: видна вся карта целиком
-    glUniform1f(p->u_fogstart, w->world_w * tc.fog_start);
-    glUniform1f(p->u_fogend, w->world_w * tc.fog_end);
+    // Туман (uFogStart/uFogEnd) шлёт scene_uniforms_bind из rc
     glUseProgram(0);
 
     const float size[3] = { w->world_w, w->max_height - w->min_height,
@@ -338,53 +307,8 @@ void terrain_node_render(SceneNode *n, float dt)
     glEnable(GL_DEPTH_TEST);   // 3D: ближние склоны закрывают дальние
     glDepthMask(GL_TRUE);      // (скайбокс её выключает)
     glUseProgram(p->prog);
-    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->cam->viewproj);
-    glUniform3f(p->u_campos, p->cam->cam.pos[0], p->cam->cam.pos[1], p->cam->cam.pos[2]);
-    // Все направленные источники: массивом в шейдер.
-    // Индекс 0 — солнце (единственный с каскадными тенями).
-    {
-        float dirs[SUN_MAX_LIGHTS * 3], cols[SUN_MAX_LIGHTS * 3];
-        float ints[SUN_MAX_LIGHTS];
-        memset(dirs, 0, sizeof dirs);
-        memset(cols, 0, sizeof cols);
-        memset(ints, 0, sizeof ints);
-        int n = p->sun->light_count > SUN_MAX_LIGHTS ? SUN_MAX_LIGHTS : p->sun->light_count;
-        for (int i = 0; i < n; i++) {
-            memcpy(&dirs[i * 3], p->sun->light_dir[i], 3 * sizeof(float));
-            memcpy(&cols[i * 3], p->sun->light_color[i], 3 * sizeof(float));
-            ints[i] = p->sun->light_intensity[i];
-        }
-        glUniform3fv(p->u_lightdir, SUN_MAX_LIGHTS, dirs);
-        glUniform3fv(p->u_lightcolor, SUN_MAX_LIGHTS, cols);
-        glUniform1fv(p->u_lightint, SUN_MAX_LIGHTS, ints);
-        glUniform1i(p->u_lightcount, n);
-    }
-    {
-        // bias по каскадам — 3 латеральных текселя (PCF теперь аппаратный,
-        // шаг задаёт GL_LINEAR, поэтому uShadowTexel больше не нужен).
-        const float boxes[SHADOW_CASCADES] = { SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3 };
-        const int sizes[SHADOW_CASCADES] = { g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3] };
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
-            float depth = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
-            // bias против acne: shadow_bias латеральных текселей (из
-            // map/map.json, по умолчанию 4) на ближних каскадах; на дальнем
-            // (бокс 2048, тексель 2 м) — всего 1/4 (иначе тень отрывается
-            // от гор на метры; там acne и так не виден). В NDC: бокс
-            // глубины 2*depth занимает ровно 2 единицы NDC, поэтому
-            // метры -> NDC делятся на depth.
-            float bias_world = (c == 3 ? 0.5f : 1.0f) * p->sun->shadow_bias
-                               * boxes[c] / sizes[c];
-            glUniformMatrix4fv(p->u_shadowmatrix[c], 1, GL_FALSE, p->shadow_mvp[c]);
-            glUniform1f(p->u_shadowbias[c], bias_world / depth);
-            // Градиент тени рельефа: полная темнота после ~10 м вглубь
-            // тени — длинный плавный переход от края (в NDC: метры/depth).
-            glUniform1f(p->u_shadowgrad[c], 10.0f / depth);
-        }
-    }
-    glUniform1f(p->u_shadow_on,
-                (shadow_is_on() && p->sun->shadow_on) ? 1.0f : 0.0f);
-    // Классический туман в шейдере: выкл при r_fog_mode 0 (меню «Туман»)
-    glUniform1f(p->u_fogon, cvar_get("r_fog_mode") > 0.5f ? 1.0f : 0.0f);
+    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
+    scene_uniforms_bind(&p->su, p->rc);
     // Статические тени (режим 2): множитель вместо CSM
     {
         float on = 0.0f;
@@ -402,10 +326,6 @@ void terrain_node_render(SceneNode *n, float dt)
     glBindTexture(GL_TEXTURE_2D, p->tex_norm);     // нормали (unit 1)
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, p->tex_height);   // высоты (unit 2)
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        glActiveTexture(GL_TEXTURE3 + c);
-        glBindTexture(GL_TEXTURE_2D, shadow_texture(c));   // каскады (unit 3-6)
-    }
     glActiveTexture(GL_TEXTURE0);
     glBindVertexArray(p->vao);
     glDrawElements(GL_TRIANGLES, p->vert_count, GL_UNSIGNED_INT, NULL);
