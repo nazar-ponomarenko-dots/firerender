@@ -21,4 +21,8 @@ void lua_engine_update(float dt);
 // Отсутствие файла — не ошибка. Вызывать в конце game_load_world.
 void lua_engine_map(const char *map_name);
 
+// Выгрузка карты: убирает update-колбэки и таймеры скрипта карты
+// (движковые скрипты main.lua остаются). Вызывать при game_unload_world.
+void lua_engine_clear(void);
+
 #endif

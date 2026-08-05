@@ -172,7 +172,7 @@ static LuaCls *lua_cls_find(const char *name)
 }
 
 // Вызывает Lua-колбэк класса с (entity, dt)
-static void lua_cls_call(LuaCls *c, int ref, Entity *e, float dt)
+static void lua_cls_call(int ref, Entity *e, float dt)
 {
     if (ref == LUA_NOREF) return;
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
@@ -185,17 +185,17 @@ static void lua_cls_call(LuaCls *c, int ref, Entity *e, float dt)
 static void lua_cls_spawn(Entity *e)
 {
     LuaCls *c = lua_cls_find(e->classname);
-    if (c) lua_cls_call(c, c->spawn, e, 0.0f);
+    if (c) lua_cls_call(c->spawn, e, 0.0f);
 }
 static void lua_cls_think(Entity *e, float dt)
 {
     LuaCls *c = lua_cls_find(e->classname);
-    if (c) lua_cls_call(c, c->think, e, dt);
+    if (c) lua_cls_call(c->think, e, dt);
 }
 static void lua_cls_kill(Entity *e)
 {
     LuaCls *c = lua_cls_find(e->classname);
-    if (c) lua_cls_call(c, c->kill, e, 0.0f);
+    if (c) lua_cls_call(c->kill, e, 0.0f);
 }
 
 // Вспомогательная: взять колбэк из таблицы в ref (или LUA_NOREF)
@@ -411,13 +411,22 @@ static void lua_timers_tick(float dt)
     }
 }
 
-// --- engine.update: per-frame колбэк -------------------------------------------
-static int s_update_ref = LUA_NOREF;
+// --- engine.update: список per-frame колбэков (движок + карта) ------------------
+#define LUA_UPDATE_MAX 8
+static int s_update_refs[LUA_UPDATE_MAX];
+static int s_update_n = 0;
+// Индексы, с которых начинаются update/таймеры ТЕКУЩЕЙ карты (см. lua_engine_map)
+static int s_map_update0 = 0;
+static int s_map_timer0 = 0;
 
 static int l_update(lua_State *ls)
 {
     luaL_checktype(ls, 1, LUA_TFUNCTION);
-    s_update_ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+    if (s_update_n >= LUA_UPDATE_MAX) {
+        lua_engine_print("engine.update: лимит колбэков");
+        return 0;
+    }
+    s_update_refs[s_update_n++] = luaL_ref(ls, LUA_REGISTRYINDEX);
     return 0;
 }
 
@@ -425,8 +434,8 @@ void lua_engine_update(float dt)
 {
     if (!L) return;
     lua_timers_tick(dt);
-    if (s_update_ref != LUA_NOREF) {
-        lua_rawgeti(L, LUA_REGISTRYINDEX, s_update_ref);
+    for (int i = 0; i < s_update_n; i++) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, s_update_refs[i]);
         lua_pushnumber(L, dt);
         if (lua_pcall(L, 1, 0, 0) != 0)
             lua_engine_print(lua_tostring(L, -1));
@@ -440,6 +449,11 @@ void lua_engine_update(float dt)
 void lua_engine_map(const char *map_name)
 {
     if (!L || !map_name || !map_name[0]) return;
+    // Индексы, откуда начнут добавляться update/таймеры этой карты — по ним
+    // lua_engine_clear() при выгрузке уберёт только карточное состояние
+    // (движковые скрипты main.lua остаются).
+    s_map_update0 = s_update_n;
+    s_map_timer0 = s_timers_n;
     char path[128];
     snprintf(path, sizeof path, "lua/maps/%s.lua", map_name);
     char *src = resources_read_text(path);
@@ -454,6 +468,19 @@ void lua_engine_map(const char *map_name)
         SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
     else
         SDL_Log("lua: карта %s: скрипт %s", map_name, path);
+}
+
+// --- Выгрузка карты: сбросить состояние скрипта карты --------------------------
+// Убирает update-колбэки и таймеры, добавленные скриптом карты (lua_engine_map),
+// чтобы они не «тикали» в следующей карте. Классы сущностей перезаписываются
+// по имени (dedup в lua_cls_find) — их не трогаем.
+void lua_engine_clear(void)
+{
+    if (!L) return;
+    while (s_timers_n > s_map_timer0)
+        luaL_unref(L, LUA_REGISTRYINDEX, s_timers[--s_timers_n].ref);
+    while (s_update_n > s_map_update0)
+        luaL_unref(L, LUA_REGISTRYINDEX, s_update_refs[--s_update_n]);
 }
 
 // --- Инициализация -------------------------------------------------------------
@@ -492,7 +519,14 @@ void lua_engine_init(void)
     }
     // Песочница: только безопасные библиотеки (без os/io/package/debug —
     // скрипт не может читать файлы и запускать процессы). Строки/таблицы/математика.
-    luaL_requiref(L, "_G", luaopen_base, 1); lua_pop(L, 1);
+    luaL_requiref(L, "_G", luaopen_base, 1);
+    // Закрыть дыры песочницы: dofile/loadfile читают файлы через stdio
+    // напрямую и работают БЕЗ io-библиотеки — любая карта смогла бы вычитать
+    // файлы процесса и утечь через engine.log/exec.
+    lua_pushnil(L); lua_setfield(L, -2, "dofile");
+    lua_pushnil(L); lua_setfield(L, -2, "loadfile");
+    lua_pushnil(L); lua_setfield(L, -2, "load");   // load из строки — тоже от греха
+    lua_pop(L, 1);
     luaL_requiref(L, "string", luaopen_string, 1); lua_pop(L, 1);
     luaL_requiref(L, "table", luaopen_table, 1); lua_pop(L, 1);
     luaL_requiref(L, "math", luaopen_math, 1); lua_pop(L, 1);
