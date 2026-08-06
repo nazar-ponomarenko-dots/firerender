@@ -2,16 +2,20 @@
 //  particles.h — система частиц (instanced-спрайты, CPU-обновление)
 // ----------------------------------------------------------------------------
 //  Пул частиц фиксированного размера. Каждая частица — биллборд-квад с
-//  текстурой (спрайт), аддитивный или альфа-бленд. Обновление — в тике
-//  сцены (particles_update с dt из фиксированного шага 100 Гц), рендер —
-//  ОДИН instanced draw call на весь пул (uParticles[] array texture-free,
-//  per-instance buffer: pos, size, color, alpha).
+//  текстурой, аддитивный или альфа-бленд. Обновление — в тике сцены
+//  (particles_update с dt из фиксированного шага), рендер — ОДИН instanced
+//  draw call на весь пул.
+//
+//  Параметры частицы задаются структурой ParticleParams (размер/альфа по
+//  жизни, гравитация, сопротивление воздуха, ветер, покачивание, стрик для
+//  дождя, отскок от земли для крови). Именованные пресеты эффектов и
+//  непрерывные эмиттеры — в fx.h.
 //
 //  Использование:
-//    particles_make_node(rc)      — узел сцены (создаётся при загрузке мира)
-//    particles_emit(..)           — спавн burst'а частиц
-//    particles_clear()            — сбросить пул (смена карты)
-//    particles_cleanup(node)      — освободить GL
+//    particles_make_node(w, rc)     — узел сцены (создаётся при загрузке мира)
+//    particles_burst(&pp, count)    — взрыв частиц по параметрам
+//    particles_clear()              — сбросить пул (смена карты)
+//    particles_cleanup(node)        — освободить GL
 // ============================================================================
 #ifndef PARTICLES_H
 #define PARTICLES_H
@@ -20,31 +24,44 @@
 #include "scene.h"
 #include "world.h"
 
-#define PARTICLES_MAX 512          // размер пула (instancing: 1 draw call)
+#define PARTICLES_MAX 4096         // размер пула (instancing: 2 draw call)
 
-// Эмитит burst частиц из точки. dir — базовое направление (может быть 0),
-// spread — разброс (рад), speed — скорость, life — жизнь (с), size — размер
-// квада (м), r/g/b — цвет 0..1, gravity — м/с2 (0 для дыма/искр).
-void particles_emit(float x, float y, float z,
-                    const float *dir, float spread, float speed, float life,
-                    float size, float r, float g, float b, float gravity);
+// --- Параметры частицы --------------------------------------------------------
+typedef struct {
+    float pos[3];              // базовая позиция (центр области спавна)
+    float dir[3];              // базовое направление (0,1,0 = вверх)
+    float spread;              // разброс, рад (0 = строго по dir)
+    float speed0, speed1;      // диапазон стартовой скорости, м/с
+    float life0, life1;        // диапазон жизни, с
+    float size0, size1;        // размер в начале и в конце жизни, м
+    float alpha0, alpha1;      // альфа в начале и в конце жизни
+    float r, g, b;             // цвет
+    float gravity;             // м/с2 (>0 вниз; <0 вверх, напр. дым)
+    float drag;                // сопротивление воздуха: доля потери скорости/с
+    float sway;                // амплитуда покачивания (снег/пыль), м/с
+    float wind[3];             // постоянный ветер, м/с
+    int   blend;               // 0 = альфа-бленд, 1 = аддитив (свет)
+    int   streak;              // 1 = вытянуть вдоль скорости (дождь/капли)
+    int   bounce;              // 1 = отскок от земли (кровь/искры) — нужен world
+} ParticleParams;
 
-// count частиц из одной точки (burst) — то же самое, но пачкой.
-void particles_burst(float x, float y, float z,
-                     const float *dir, float spread, float speed, float life,
-                     float size, float r, float g, float b, float gravity,
-                     int count);
+// Эмитит ОДНУ частицу по параметрам (случайная скорость/жизнь/размер в
+// диапазонах). Направление dir + конус разброса spread.
+void particles_emit(const ParticleParams *pp);
+
+// count частиц из одной точки/области.
+void particles_burst(const ParticleParams *pp, int count);
 
 // Обновляет все живые частицы (dt — фиксированный шаг). Вызывать из
 // game_update или update узла.
 void particles_update(float dt);
 
-// Рендер всех живых частиц (один instanced draw). Вызывать после terrain
-// (частицы летят над рельефом), в цветном проходе.
+// Рендер всех живых частиц (два instanced draw: альфа-бленд + аддитив).
 void particles_draw(const RendererContext *rc);
 
-// Создаёт узел Particles (биллборд-спрайты). NULL при ошибке.
-SceneNode *particles_make_node(const RendererContext *rc);
+// Создаёт узел Particles. w — карта высот (для отскока частиц bounce).
+// NULL при ошибке.
+SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc);
 
 // Сбрасывает пул (при смене карты / выгрузке мира).
 void particles_clear(void);
