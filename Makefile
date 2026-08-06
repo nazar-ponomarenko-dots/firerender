@@ -46,8 +46,29 @@ SRC := $(wildcard src/*.c) \
        third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_tdef.c
 BIN := build/firerender
 
+# Первая цель в файле — buildnum (phony); чтобы «make» собирал движок, а не
+# только счётчик, фиксируем цель по умолчанию.
+.DEFAULT_GOAL := $(BIN)
+
+# --- Номер сборки (build number) ----------------------------------------------
+# Идея как в движках: каждой сборке присваивается порядковый номер, по нему
+# отличают одну версию движка от другой (консоль: version, логи при старте).
+# buildnum.txt — счётчик (локальный, в .gitignore); make на КАЖДЫЙ сборку
+# инкрементирует его и пишет src/buildnum.h с #define ENGINE_BUILD_NUM n.
+BUILD_COUNT := buildnum.txt
+BUILD_H     := src/buildnum.h
+
+.PHONY: buildnum
+buildnum:
+	@num=0; [ -f $(BUILD_COUNT) ] && num=$$(cat $(BUILD_COUNT) 2>/dev/null); \
+	  num=$$((num + 1)); \
+	  printf '%d' $$num > $(BUILD_COUNT); \
+	  printf '#ifndef FR_BUILDNUM_H\n#define FR_BUILDNUM_H\n#define ENGINE_BUILD_NUM %d\n#endif\n' $$num > $(BUILD_H); \
+	  echo "Build #$$num"
+
 # Правило сборки: если любой исходник новее бинарника — пересобрать.
-$(BIN): $(SRC)
+# buildnum (phony) инкрементирует номер сборки и пишет buildnum.h.
+$(BIN): $(SRC) buildnum
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 
@@ -136,4 +157,4 @@ distclean:
 	rm -rf build
 
 # .PHONY — эти цели не являются файлами, их нужно выполнять всегда.
-.PHONY: run clean distclean linux win winpkg
+.PHONY: run clean distclean linux win winpkg buildnum

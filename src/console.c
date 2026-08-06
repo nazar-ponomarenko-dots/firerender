@@ -10,6 +10,7 @@
 #include "hud.h"
 #include "resources.h"
 #include "utf8.h"
+#include "buildnum.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -538,7 +539,7 @@ static void cmd_quit(const char *args)
 static void cmd_version(const char *args)
 {
     (void)args;
-    console_print("firerender 0.4 (SDL3 + OpenGL)");
+    console_print("firerender 0.4 build #%d (SDL3 + OpenGL)", ENGINE_BUILD_NUM);
 }
 
 // Снимает обрамляющие кавычки (объявлена ниже, используется в cmd_bind)
@@ -1085,6 +1086,16 @@ void console_selftest(void)
     // 9) закрытие консоли
     console_toggle();
     if (console_active()) { SDL_Log("console test: close FAIL"); fail++; }
+
+    // 10) version — номер сборки (buildnum.h генерируется Makefile)
+    {
+        console_exec("version");
+        int n = 0;
+        for (int i = 0; i < s_count && n == 0; i++)
+            if (strstr(ring_at(i), "build #"))
+                n = (int)strtol(strstr(ring_at(i), "build #") + 7, NULL, 10);
+        if (n <= 0) { SDL_Log("console test: version/buildnum FAIL"); fail++; }
+    }
 
     SDL_Log("console selftest: %s", fail ? "FAIL" : "OK");
 }
