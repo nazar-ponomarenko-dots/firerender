@@ -44,3 +44,34 @@ engine.update(function()
         engine.log("[Lua] сущностей после загрузки: " .. engine.entity_count())
     end
 end)
+
+-- --- Эффекты частиц (engine.fx_*) ------------------------------------------------
+-- Регистрация своего пресета из Lua (параметры — как ParticleParams в particles.h)
+engine.fx_register("magic", {
+    dir      = { 0, 1, 0 },   -- вверх
+    spread   = 0.7,           -- широкий конус
+    speed    = { 1.0, 3.0 },  -- м/с
+    life     = { 0.5, 1.2 },  -- с
+    size     = { 0.3, 0.05 }, -- старт -> финал
+    alpha    = { 1.0, 0.0 },  -- fade out
+    color    = { 0.4, 1.0, 0.8 },
+    gravity  = -0.5,          -- всплывает
+    drag     = 1.0,
+    sway     = 0.6,           -- покачивание
+    blend    = 1,             -- аддитив (светится)
+    count    = 20,
+})
+
+-- Команда lua_fx: engine.fx_burst("magic", x, y, z)
+engine.cmd("lua_fx", function()
+    local x, y, z = engine.camera()
+    engine.fx_burst("magic", x, y, z + 1, 0)
+    engine.log("[Lua] магия: fx_burst(magic)")
+end)
+
+-- Команда lua_rain: engine.fx_emit("rain", ...) на 15 секунд
+engine.cmd("lua_rain", function()
+    local x, y, z = engine.camera()
+    engine.fx_emit("rain", x, y + 15, z, 200, 15)
+    engine.log("[Lua] дождь: fx_emit(rain) на 15 сек")
+end)

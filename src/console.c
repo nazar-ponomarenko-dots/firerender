@@ -11,6 +11,7 @@
 #include "resources.h"
 #include "utf8.h"
 #include "buildnum.h"
+#include "fx.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1095,6 +1096,20 @@ void console_selftest(void)
             if (strstr(ring_at(i), "build #"))
                 n = (int)strtol(strstr(ring_at(i), "build #") + 7, NULL, 10);
         if (n <= 0) { SDL_Log("console test: version/buildnum FAIL"); fail++; }
+    }
+
+    // 11) fx — пресеты эффектов (fx_init_console в main.c)
+    {
+        console_exec("fx_list");
+        int found = 0;
+        for (int i = 0; i < s_count && !found; i++)
+            if (strstr(ring_at(i), "blood")) found = 1;
+        if (!found || !fx_find("blood") || !fx_find("rain") || !fx_find("smoke")
+            || !fx_find("explosion") || !fx_find("fire") || !fx_find("snow")
+            || !fx_find("sparks") || !fx_find("dust") || !fx_find("muzzle_flash")) {
+            SDL_Log("console test: fx presets FAIL");
+            fail++;
+        }
     }
 
     SDL_Log("console selftest: %s", fail ? "FAIL" : "OK");

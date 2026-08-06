@@ -20,6 +20,7 @@
 #include "events.h"
 #include "game.h"
 #include "resources.h"
+#include "fx.h"
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -363,6 +364,120 @@ static int l_time(lua_State *ls)
     return 1;
 }
 
+// --- Эффекты частиц: engine.fx_* (см. fx.h) -------------------------------------
+// engine.fx_burst("имя", x, y, z, [count]) — взрыв эффекта в точке
+static int l_fx_burst(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    int count = (int)luaL_optinteger(ls, 5, 0);
+    fx_burst(name, pos[0], pos[1], pos[2], count);
+    return 0;
+}
+
+// engine.fx_emit("имя", x, y, z, rate, [life]) — эмиттер в точке
+static int l_fx_emit(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    float rate = (float)luaL_optnumber(ls, 5, 10.0f);
+    float life = (float)luaL_optnumber(ls, 6, 0.0f);
+    fx_emitter_start(name, pos, NULL, rate, life);
+    return 0;
+}
+
+// engine.fx_stop("имя") — остановить эмиттеры; без аргумента — все
+static int l_fx_stop(lua_State *ls)
+{
+    const char *name = luaL_optstring(ls, 1, "");
+    if (name[0]) fx_emitter_stop(name);
+    else fx_emitter_stop_all();
+    return 0;
+}
+
+// engine.fx_clear() — остановить все эмиттеры и очистить пул частиц
+static int l_fx_clear(lua_State *ls)
+{
+    (void)ls;
+    fx_emitter_stop_all();
+    particles_clear();
+    return 0;
+}
+
+// engine.fx_register("имя", { ... }) — свой пресет из Lua.
+// Таблица: dir={x,y,z}, spread, speed={min,max}, life={min,max},
+// size={min,max}, alpha={a0,a1}, color={r,g,b}, gravity, drag, sway,
+// wind={x,y,z}, blend (0/1), streak (0/1), bounce (0/1), count.
+static int l_fx_register(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    luaL_checktype(ls, 2, LUA_TTABLE);
+    ParticleParams pp;
+    memset(&pp, 0, sizeof pp);
+    pp.dir[1] = 1.0f;
+    pp.spread = 0.5f;
+    pp.speed0 = 1.0f; pp.speed1 = 2.0f;
+    pp.life0 = 0.5f;  pp.life1 = 1.0f;
+    pp.size0 = 0.2f;  pp.size1 = 0.2f;
+    pp.alpha0 = 1.0f; pp.alpha1 = 0.0f;
+    pp.r = 1.0f; pp.g = 1.0f; pp.b = 1.0f;
+    int count = 8;
+    float tmp;
+
+#define GET_VEC(field, dst) \
+    lua_getfield(ls, 2, field); \
+    if (lua_istable(ls, -1)) { \
+        for (int i = 0; i < 3; i++) { \
+            lua_rawgeti(ls, -1, i + 1); \
+            if (lua_isnumber(ls, -1)) dst[i] = (float)lua_tonumber(ls, -1); \
+            lua_pop(ls, 1); \
+        } \
+    } \
+    lua_pop(ls, 1)
+#define GET_NUM(field, dst) \
+    lua_getfield(ls, 2, field); \
+    if (lua_isnumber(ls, -1)) dst = (float)lua_tonumber(ls, -1); \
+    lua_pop(ls, 1)
+#define GET_PAIR(field, a, b) \
+    lua_getfield(ls, 2, field); \
+    if (lua_istable(ls, -1)) { \
+        lua_rawgeti(ls, -1, 1); if (lua_isnumber(ls, -1)) a = (float)lua_tonumber(ls, -1); lua_pop(ls, 1); \
+        lua_rawgeti(ls, -1, 2); if (lua_isnumber(ls, -1)) b = (float)lua_tonumber(ls, -1); lua_pop(ls, 1); \
+    } \
+    lua_pop(ls, 1)
+
+    GET_VEC("dir", pp.dir);
+    GET_NUM("spread", pp.spread);
+    GET_PAIR("speed", pp.speed0, pp.speed1);
+    GET_PAIR("life", pp.life0, pp.life1);
+    GET_PAIR("size", pp.size0, pp.size1);
+    GET_PAIR("alpha", pp.alpha0, pp.alpha1);
+    {
+        float col[3] = { pp.r, pp.g, pp.b };
+        GET_VEC("color", col);
+        pp.r = col[0]; pp.g = col[1]; pp.b = col[2];
+    }
+    GET_NUM("gravity", pp.gravity);
+    GET_NUM("drag", pp.drag);
+    GET_NUM("sway", pp.sway);
+    GET_VEC("wind", pp.wind);
+    GET_NUM("blend", tmp); if (tmp > 0.5f) pp.blend = 1;
+    GET_NUM("streak", tmp); if (tmp > 0.5f) pp.streak = 1;
+    GET_NUM("bounce", tmp); if (tmp > 0.5f) pp.bounce = 1;
+    GET_NUM("count", tmp); if (tmp > 0.0f) count = (int)tmp;
+
+#undef GET_VEC
+#undef GET_NUM
+#undef GET_PAIR
+
+    fx_register(name, &pp, count);
+    return 0;
+}
+
 // engine.world_loaded() -> bool (мир загружен)
 static int l_world_loaded(lua_State *ls)
 {
@@ -507,6 +622,11 @@ static const luaL_Reg engine_lib[] = {
     { "teleport",      l_teleport },
     { "msg",           l_msg },
     { "time",          l_time },
+    { "fx_burst",      l_fx_burst },
+    { "fx_emit",       l_fx_emit },
+    { "fx_stop",       l_fx_stop },
+    { "fx_clear",      l_fx_clear },
+    { "fx_register",   l_fx_register },
     { NULL, NULL }
 };
 

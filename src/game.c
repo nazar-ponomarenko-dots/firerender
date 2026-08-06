@@ -25,6 +25,7 @@
 #include "entity.h"
 #include "fauna.h"
 #include "field.h"
+#include "fx.h"
 #include "lua_engine.h"
 #include "mapdata.h"
 #include "objects.h"
@@ -422,7 +423,7 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->mm_node = minimap_make_node(w, wt->tex_base, rc);
     g->hud_node = hud_make_node(w, rc);
     g->fauna_node = fauna_make_node(rc);
-    g->particles_node = particles_make_node(rc);
+    g->particles_node = particles_make_node(w, rc);
     g->decals_node = decals_make_node(w, rc);
     if (!g->sky_node || !g->terr_node || !g->wheat_node || !g->field_node ||
         !g->sel_node || !g->mm_node || !g->hud_node) {
@@ -643,6 +644,7 @@ void game_update(Game *g, float dt)
     // Логика: мир живёт только в игре; в меню/паузе — заморожен
     if (app_state() == APP_PLAY) {
         node_update_tree(g->root, dt);
+        fx_update(dt);              // эмиттеры эффектов (дождь/огонь/...)
         entity_update_all(dt);
         if (mapdata_field_attached() && g->field_node) {
             g->field_node->pos[0] = g->cam->cam.pos[0];
