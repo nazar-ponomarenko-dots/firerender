@@ -26,8 +26,14 @@ char *resources_read_text(const char *path);
 
 // Загружает картинку через stb_image (с кешем). Возвращает указатель на
 // данные, которыми ВЛАДЕЕТ кеш — НЕ освобождать; живут до shutdown().
-// channels: 3 = RGB, 4 = RGBA. NULL — не загрузилась.
+// channels: 3 = RGB, 4 = RGBA. Если файла нет — подставляет img/notfound.png
+// (Source Engine style). NULL — только если и notfound.png отсутствует.
 unsigned char *resources_image(const char *path, int *w, int *h, int channels);
+
+// Строгий вариант без подмены: NULL — если файла нет. Для данных
+// (карта высот), которые не являются рендер-текстурами.
+unsigned char *resources_image_strict(const char *path, int *w, int *h,
+                                      int channels);
 
 // Текстура из файла с кешем и подсчётом ссылок.
 // wrap: GL_REPEAT / GL_CLAMP_TO_EDGE; linear: 1 = GL_LINEAR, 0 = GL_NEAREST.

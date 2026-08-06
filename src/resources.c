@@ -294,11 +294,26 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
     }
 
     unsigned char *p = image_load_raw(path, w, h, channels);
+    if (!p) {
+        // Source Engine style: отсутствующая картинка заменяется notfound.png.
+        // Если и он пропал — честный NULL (не рекурсия: ниже защита).
+        if (strcmp(path, "img/notfound.png") == 0) return NULL;
+        SDL_Log("Texture %s not found -> using img/notfound.png", path);
+        p = image_load_raw("img/notfound.png", w, h, channels);
+    }
     if (!p) return NULL;
     ResEntry *ne = cache_add(key, p, 1);
     ne->iw = *w;
     ne->ih = *h;
     return p;
+}
+
+// Строгий вариант без подмены не-текстурных данных (карта высот): NULL —
+// если картинки нет вообще, не подставлять notfound.png.
+unsigned char *resources_image_strict(const char *path, int *w, int *h,
+                                      int channels)
+{
+    return image_load_raw(path, w, h, channels);
 }
 
 // --- Текстуры ----------------------------------------------------------------
@@ -313,7 +328,12 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     }
     int w = 0, h = 0;
     unsigned char *img = resources_image(path, &w, &h, channels);
-    if (!img) return 0;
+    if (!img) {
+        // Source Engine style: отсутствующая текстура заменяется notfound.png.
+        // Если и он пропал — честный 0 (чёрный) вместо мусора (без рекурсии).
+        if (strcmp(path, "img/notfound.png") == 0) return 0;
+        return resources_texture("img/notfound.png", channels, wrap, linear);
+    }
     GLuint tex = make_texture(w, h, img, channels == 4 ? GL_RGBA : GL_RGB,
                               wrap, linear);
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)tex, 1);

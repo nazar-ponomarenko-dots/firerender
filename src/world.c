@@ -114,7 +114,10 @@ int world_load(WorldState *w, WorldTextures *out)
     else
         snprintf(map_path, sizeof map_path, "map/%s", mapdata_image());
     int mw = 0, mh = 0;
-    unsigned char *img = load_img(map_path, &mw, &mh, STBI_rgb);
+    // Карта высот — данные геометрии, НЕ рендер-текстура: подмена notfound
+    // сломала бы рельеф (все высоты одного цвета = плоский мир). strict —
+    // честный fail, если карты карты.w нет нигде.
+    unsigned char *img = resources_image_strict(map_path, &mw, &mh, STBI_rgb);
     if (!img) return -1;
     SDL_Log("Map loaded: %s (%dx%d)", map_path, mw, mh);
 
