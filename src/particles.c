@@ -321,5 +321,5 @@ void particles_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->inst_vbo);
     glDeleteVertexArrays(1, &p->vao);
-    free(p);
+    // params (p) освобождает node_free_tree(g->root)
 }

@@ -183,5 +183,5 @@ void decals_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->ibo);
     glDeleteVertexArrays(1, &p->vao);
-    free(p);
+    // params (p) освобождает node_free_tree(g->root)
 }
