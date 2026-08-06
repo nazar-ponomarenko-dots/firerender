@@ -198,8 +198,8 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         // через кеш ресурсов (60 деревьев tree.png = ОДНА GL-текстура).
         unsigned char *img = load_img(o->model, &w, &h, STBI_rgb_alpha);
         if (!img || w <= 0 || h <= 0) {
-            SDL_Log("Object %s: cannot load texture %s", o->name, o->model);
-            continue;
+            SDL_Log("Object %s: cannot load texture %s (will use notfound)", o->name, o->model);
+            w = 64; h = 64;   // фолбек-пропорции
         }
         // Материал: дефолты + переопределения из блока render в JSON
         material_defaults(&it->r);
@@ -470,6 +470,11 @@ void objects_node_render(SceneNode *n, float dt)
     GLuint cur = 0;
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
+        // Отсечение фрустумом: сфера (позиция + максимальный размер)
+        if (!frustum_test_sphere(&p->rc->frustum, it->pos[0], it->pos[1],
+                                 it->pos[2],
+                                 it->height + it->width * 0.5f))
+            continue;
         GLuint prog = it->prog ? it->prog : p->prog;
         if (prog != cur) {
             cur = prog;

@@ -18,6 +18,7 @@
 #ifndef RENDER_CTX_H
 #define RENDER_CTX_H
 #include "gl_loader.h"
+#include "frustum.h"
 #include "shadow.h"      // SHADOW_CASCADES
 #include "sun.h"         // SUN_MAX_LIGHTS
 
@@ -87,6 +88,8 @@ typedef struct RendererContext {
     int shadow_cascade;                  // индекс каскада
     int shadow_dyn, shadow_static;       // рисовать динамику/статику
     int shadow_cull;                     // culling по боксу каскада
+    // Фрустум цветного прохода (экстракция из viewproj в renderer_ctx_fill)
+    Frustum frustum;
 } RendererContext;
 
 // --- Общий набор uniform-хендлов шейдеров сцены --------------------------------

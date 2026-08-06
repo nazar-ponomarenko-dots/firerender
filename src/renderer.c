@@ -76,6 +76,7 @@ static void renderer_ctx_fill(Game *g)
         camera_dirs(cam, rc->cam_fwd, rc->cam_right);
         vec3_cross(rc->cam_right, rc->cam_fwd, rc->cam_up);
         vec3_normalize(rc->cam_up);
+        frustum_build(&rc->frustum, rc->viewproj);   // culling цветного прохода
     }
     // Свет: направленные источники (0 = солнце)
     if (g->sun_node) {

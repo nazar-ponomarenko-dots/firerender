@@ -222,6 +222,11 @@ void fauna_node_render(SceneNode *n, float dt)
 
     for (int gi = 0; gi < p->n; gi++) {
         FaunaGroup *g = &p->g[gi];
+        // Отсечение фрустумом на уровне группы: сфера (центр + диагональ)
+        float gd = g->hw > g->hd ? g->hw : g->hd;
+        if (!frustum_test_sphere(&p->rc->frustum, g->cx, g->h, g->cz,
+                                 gd + 20.0f))
+            continue;
         int mode = (g->type == FAUNA_FIREFLIES) ? 0 : 1;
         // светлячки — аддитивно; бабочки/птицы — альфа-тест
         if (mode == 0) {
