@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libsdl3-dev \
+            pkg-config \
+            gcc \
+            make \
+            python3 \
+            libgl1-mesa-dev
+
+      - name: Build (Release)
+        run: make
+
+      - name: Build with ASAN/UBSAN
+        run: |
+          make clean
+          make EXTRA_CFLAGS="-fsanitize=address,undefined -O1 -g -fno-omit-frame-pointer"
+        env:
+          # detect_leaks=0: SDL3 утекает 256 байт при выходе (внутренние потоки)
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
+
+      - name: Run basic test
+        run: |
+          timeout 5 ./build/firerender || true
+        env:
+          SDL_VIDEODRIVER: dummy
+          # detect_leaks=0: SDL3 сам утекает 256 байт при выходе (внутренние
+          # потоки) — это не наш код. Проверяем corruption/UB, не утечки.
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1

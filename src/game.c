@@ -460,7 +460,7 @@ static int scene_build(Game *g, const WorldTextures *wt)
     }
 
     // Размер окна в пикселях — его видит OpenGL (glViewport)
-    int vw = g_vw, vh = g_vh;
+    int vw = renderer_vw(), vh = renderer_vh();
     g->cam->aspect = (float)vw / vh;
     g->mm->vw = vw;
     g->mm->vh = vh;

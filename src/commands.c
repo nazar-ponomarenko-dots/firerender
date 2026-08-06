@@ -325,6 +325,7 @@ void cmd_reload_shaders(const char *args)
 {
     (void)args;
     int n = shader_hot_reload();
+    n += resources_texture_reload();
     console_print("reload_shaders: %d", n);
 }
 

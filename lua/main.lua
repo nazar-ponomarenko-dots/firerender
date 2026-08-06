@@ -35,19 +35,12 @@ engine.entity_class("beacon", {
     end,
 })
 
--- --- После загрузки мира: спавн маяка и раз в 2с сведения -------------------------
+-- --- После загрузки мира: спавн маяка -------------------------------------------
 local world_up = false
-local frames = 0
-engine.update(function(dt)
+engine.update(function()
     if not world_up and engine.world_loaded() then
         world_up = true
         engine.entity_spawn("beacon", 950, 5, 540)
         engine.log("[Lua] сущностей после загрузки: " .. engine.entity_count())
-    end
-    frames = frames + 1
-    if frames % 120 == 0 then
-        engine.log(string.format("[Lua] fov=%.0f shadows=%s",
-            engine.cvar_get("fov"),
-            engine.cvar_get("r_shadows_mode") > 0.5 and "ON" or "OFF"))
     end
 end)

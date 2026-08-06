@@ -24,7 +24,7 @@
                              // из Java-обёртки SDLActivity.
 
 #include "gl_loader.h"
-#include "world.h"           // g_vw / g_vh — размер окна в пикселях
+#include "world.h"
 #include "game.h"
 #include "commands.h"
 #include "renderer.h"
@@ -170,21 +170,51 @@ int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    // Если в текущей папке нет данных (map/map.json) — переходим в папку
-    // исполняемого файла: двойной клик запускает из любого места.
+    // Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
+    // Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
+    static char base_dir[512];
     FILE *probe = fopen("map/map.json", "rb");
-    if (!probe) {
+    if (probe) {
+        fclose(probe);
+        snprintf(base_dir, sizeof base_dir, ".");   // CWD — это корень проекта
+    } else {
         const char *base = SDL_GetBasePath();
         if (base && base[0]) {
-#ifdef _WIN32
-            _chdir(base);
-#else
-            chdir(base);
-#endif
+            // Проверяем папку exe
+            char test_path[512];
+            snprintf(test_path, sizeof test_path, "%smap/map.json", base);
+            probe = fopen(test_path, "rb");
+            if (probe) {
+                fclose(probe);
+                snprintf(base_dir, sizeof base_dir, "%s", base);
+            } else {
+                // Проверяем родительскую папку (проект при запуске из build/)
+                snprintf(test_path, sizeof test_path, "%s../map/map.json", base);
+                probe = fopen(test_path, "rb");
+                if (probe) {
+                    fclose(probe);
+                    snprintf(base_dir, sizeof base_dir, "%s..", base);
+                } else {
+                    snprintf(base_dir, sizeof base_dir, "%s", base);  // fallback
+                }
+            }
+            SDL_free((void *)base);
+        } else {
+            snprintf(base_dir, sizeof base_dir, ".");
         }
-        SDL_free((void *)base);
-    } else {
-        fclose(probe);
+    }
+
+    // Устанавливаем базовую директорию ДО resources_init()
+    resources_set_base_dir(base_dir);
+
+    // Если в текущей папке нет данных — переходим в папку исполняемого файла
+    // (для config.cfg, логов и т.п.)
+    if (strcmp(base_dir, ".") != 0) {
+#ifdef _WIN32
+        _chdir(base_dir);
+#else
+        chdir(base_dir);
+#endif
     }
 
     // 1) Инициализация SDL -----------------------------------------------------
@@ -233,7 +263,7 @@ int main(int argc, char *argv[])
     int vw = WIN_W, vh = WIN_H;
     SDL_GetWindowSizeInPixels(g_win, &vw, &vh);
     glViewport(0, 0, vw, vh);
-    g_vw = vw; g_vh = vh;
+    renderer_set_viewport(vw, vh);
 
     // 7) Отсечение задних граней, блендинг -------------------------------------
     glEnable(GL_CULL_FACE);
@@ -277,16 +307,33 @@ int main(int argc, char *argv[])
             s_sync_fog = cvar_get("r_fog_mode");
         }
 
-        // Hot-reload шейдеров: раз в ~30 кадров проверяем mtime файлов
+        // Hot-reload шейдеров и текстур: раз в ~30 кадров проверяем mtime
         {
             static int s_reload = 0;
-            if (++s_reload >= 30) { s_reload = 0; shader_hot_reload(); }
+            if (++s_reload >= 30) {
+                s_reload = 0;
+                shader_hot_reload();
+                resources_texture_reload();
+            }
         }
 
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
-        game_update(&game, dt);             // мир: узлы, триггеры/use, туман
-        audio_update();                     // фоновые петли и 3D-источники
-        lua_engine_update(dt);              // per-frame колбэк скрипта
+
+        // Фиксированный тик логики/физики: 100 Гц. Мир обновляется постоянным
+        // шагом 1/100 с независимо от FPS — стабильная физика, триггеры и Lua.
+        // Аккумулятор: накладка времени, сброс "спирали смерти" (макс 8 тиков).
+        {
+            static float s_sim_acc = 0.0f;
+            const float step = 1.0f / 100.0f;
+            s_sim_acc += dt;
+            if (s_sim_acc >= 0.25f) s_sim_acc = 0.25f;   // лаг >250 мс — не крутим вперёд
+            for (int ticks = 0; s_sim_acc >= step && ticks < 8; ticks++) {
+                game_update(&game, step);   // мир: узлы, триггеры/use, туман
+                audio_update();             // фоновые петли и 3D-источники
+                lua_engine_update(step);    // per-frame колбэк скрипта
+                s_sim_acc -= step;
+            }
+        }
 
         sync_cvars(&game);
         input_sync_mode();
@@ -299,7 +346,7 @@ int main(int argc, char *argv[])
 
         // Меню (главное/пауза/настройки) — поверх замороженной сцены
         if (app_state() != APP_PLAY) {
-            int act = app_menu(g_vw, g_vh);
+            int act = app_menu(renderer_vw(), renderer_vh());
             if (act == APP_ACT_START || act == APP_ACT_RESUME) {
                 if (!game.world_loaded && game_load_world(&game) != 0) {
                     SDL_Log("World load failed");
@@ -335,8 +382,8 @@ int main(int argc, char *argv[])
                 g_quit_request = 1;
             }
         }
-        commands_shot_take(g_vw, g_vh);     // скриншот (F12)
-        console_render(g_vw, g_vh);         // консоль — поверх всего (`)
+        commands_shot_take(renderer_vw(), renderer_vh());     // скриншот (F12)
+        console_render(renderer_vw(), renderer_vh());         // консоль — поверх всего (`)
 
         // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland)
         {
@@ -345,17 +392,17 @@ int main(int argc, char *argv[])
                 if (shot_frame == 0) shot_frame = 1;
                 else if (shot_frame < 60) shot_frame++;
                 if (shot_frame == 60) {
-                    unsigned char *px = malloc((size_t)g_vw * g_vh * 3);
-                    glReadPixels(0, 0, g_vw, g_vh, GL_RGB, GL_UNSIGNED_BYTE, px);
+                    unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
+                    glReadPixels(0, 0, renderer_vw(), renderer_vh(), GL_RGB, GL_UNSIGNED_BYTE, px);
                     FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
                     if (f) {
-                        fprintf(f, "P6\n%d %d\n255\n", g_vw, g_vh);
-                        for (int y = 0; y < g_vh; y++)
-                            fwrite(px + (size_t)(g_vh - 1 - y) * g_vw * 3, 1,
-                                   (size_t)g_vw * 3, f);
+                        fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());
+                        for (int y = 0; y < renderer_vh(); y++)
+                            fwrite(px + (size_t)(renderer_vh() - 1 - y) * renderer_vw() * 3, 1,
+                                   (size_t)renderer_vw() * 3, f);
                         fclose(f);
                         SDL_Log("FR_SHOT: /tmp/fr_shot.ppm (%dx%d) console=%d",
-                                g_vw, g_vh, console_active());
+                                renderer_vw(), renderer_vh(), console_active());
                     }
                     free(px);
                     shot_frame = -1;

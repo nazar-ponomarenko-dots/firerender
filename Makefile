@@ -36,6 +36,9 @@ CC   := gcc
 CFLAGS := -O2 -Wall -Wextra -Ithird_party -Ithird_party/lua -Ithird_party/miniz -Isrc $(shell pkg-config --cflags sdl3)
 LIBS   := $(shell pkg-config --libs sdl3) -lm   # -lm: математика
 
+# Дополнительные флаги компилятора (пример: EXTRA_CFLAGS="-fsanitize=address,undefined" make)
+CFLAGS += $(EXTRA_CFLAGS)
+
 # Исходники и бинарник ---------------------------------------------------------
 SRC := $(wildcard src/*.c) \
        third_party/lua/lua.c \
