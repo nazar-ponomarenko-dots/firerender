@@ -318,9 +318,22 @@ int main(int argc, char *argv[])
         }
 
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
-        game_update(&game, dt);             // мир: узлы, триггеры/use, туман
-        audio_update();                     // фоновые петли и 3D-источники
-        lua_engine_update(dt);              // per-frame колбэк скрипта
+
+        // Фиксированный тик логики/физики: 100 Гц. Мир обновляется постоянным
+        // шагом 1/100 с независимо от FPS — стабильная физика, триггеры и Lua.
+        // Аккумулятор: накладка времени, сброс "спирали смерти" (макс 8 тиков).
+        {
+            static float s_sim_acc = 0.0f;
+            const float step = 1.0f / 100.0f;
+            s_sim_acc += dt;
+            if (s_sim_acc >= 0.25f) s_sim_acc = 0.25f;   // лаг >250 мс — не крутим вперёд
+            for (int ticks = 0; s_sim_acc >= step && ticks < 8; ticks++) {
+                game_update(&game, step);   // мир: узлы, триггеры/use, туман
+                audio_update();             // фоновые петли и 3D-источники
+                lua_engine_update(step);    // per-frame колбэк скрипта
+                s_sim_acc -= step;
+            }
+        }
 
         sync_cvars(&game);
         input_sync_mode();
