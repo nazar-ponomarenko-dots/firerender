@@ -28,6 +28,7 @@
 #include "game.h"
 #include "commands.h"
 #include "renderer.h"
+#include "buildnum.h"
 #include "input.h"
 #include "lua_engine.h"
 #include "shader.h"   // shader_hot_reload (см. reload_shaders)
@@ -38,6 +39,8 @@
 #include "resources.h"
 #include "audio.h"
 #include "binds.h"
+#include "decals.h"
+#include "particles.h"
 #include "actions.h"
 #include "shadow.h"          // FR_TEST: shadow_toggle, g_shadow_*
 #include "vegetation.h"      // FR_TEST: veg_* тумблеры
@@ -140,7 +143,10 @@ static void boot_init(Game *g)
 }
 
 // --- FR_TEST — тест производительности / самопроверка (после boot_init) --------
-// Требует мир: грузим его сразу и входим в игру. 0 — успех, -1 — мир не загрузился.
+// Флаги: x — селфтест консоли; s — тени; v/p/q/c/e/f — выкл. подсистем;
+// o — воксельный туман; t/k — без рельефа/неба; m — burst частиц;
+// d — декаль. Требует мир: грузим сразу и входим в игру. 0 — успех,
+// -1 — мир не загрузился.
 static int fr_test_apply(Game *g)
 {
     const char *fr_test = getenv("FR_TEST");
@@ -161,6 +167,18 @@ static int fr_test_apply(Game *g)
     // t/k — отключить рельеф/небо (нужны узлы, поэтому после load_world)
     if (strchr(fr_test, 't')) g->terr_node->render = NULL;
     if (strchr(fr_test, 'k')) g->sky_node->render = NULL;
+    // m — burst частиц у игрока; d — декаль под игроком (тест систем)
+    if (strchr(fr_test, 'm')) {
+        const float *cp = g->cam->cam.pos;
+        float dir[3] = { 0.0f, 1.0f, 0.0f };
+        particles_burst(cp[0], cp[1] + 1.0f, cp[2], dir, 0.6f, 4.0f, 2.5f,
+                        0.35f, 1.0f, 0.7f, 0.2f, 6.0f, 120);
+    }
+    if (strchr(fr_test, 'd')) {
+        const float *cp = g->cam->cam.pos;
+        decal_place(cp[0], cp[2], 3.0f, 3.0f, 0.0f, "img/particle.png",
+                    0.15f, 0.4f, 0.8f, 0.85f);
+    }
     app_set_state(APP_PLAY);
     SDL_Log("FR_TEST=[%s]", fr_test);
     return 0;
@@ -258,6 +276,7 @@ int main(int argc, char *argv[])
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
     SDL_Log("OpenGL: %s", glGetString(GL_VERSION));
+    SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
     // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------
     int vw = WIN_W, vh = WIN_H;

@@ -21,12 +21,14 @@
 #include "audio.h"
 #include "console.h"
 #include "cvars.h"
+#include "decals.h"
 #include "entity.h"
 #include "fauna.h"
 #include "field.h"
 #include "lua_engine.h"
 #include "mapdata.h"
 #include "objects.h"
+#include "particles.h"
 #include "renderer.h"
 #include "resources.h"
 #include "selection.h"
@@ -420,6 +422,8 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->mm_node = minimap_make_node(w, wt->tex_base, rc);
     g->hud_node = hud_make_node(w, rc);
     g->fauna_node = fauna_make_node(rc);
+    g->particles_node = particles_make_node(rc);
+    g->decals_node = decals_make_node(w, rc);
     if (!g->sky_node || !g->terr_node || !g->wheat_node || !g->field_node ||
         !g->sel_node || !g->mm_node || !g->hud_node) {
         SDL_Log("Failed to create a scene node (missing texture/shader?)");
@@ -435,6 +439,8 @@ static int scene_build(Game *g, const WorldTextures *wt)
     node_add(g->root, g->wheat_node);
     if (g->obj_node) node_add(g->root, g->obj_node);
     if (g->fauna_node) node_add(g->root, g->fauna_node);
+    if (g->particles_node) node_add(g->root, g->particles_node);
+    if (g->decals_node) node_add(g->root, g->decals_node);
     node_add(g->root, g->field_node);
     node_add(g->root, g->sel_node);
     node_add(g->root, g->cam_node);
@@ -572,6 +578,8 @@ static void scene_teardown(Game *g)
     selection_cleanup(g->sel_node);
     field_cleanup(g->field_node);
     if (g->fauna_node) fauna_cleanup(g->fauna_node);
+    if (g->particles_node) particles_cleanup(g->particles_node);
+    if (g->decals_node) decals_cleanup(g->decals_node);
     if (g->obj_node) objects_cleanup(g->obj_node);
     veg_cleanup(g->wheat_node);
     terrain_cleanup(g->terr_node);
@@ -581,7 +589,7 @@ static void scene_teardown(Game *g)
     g->root = NULL;
     g->cam_node = g->sun_node = g->sky_node = g->terr_node = g->wheat_node = NULL;
     g->obj_node = g->field_node = g->sel_node = g->mm_node = g->hud_node = NULL;
-    g->fauna_node = NULL;
+    g->fauna_node = g->particles_node = g->decals_node = NULL;
     g->cam = NULL;
     g->mm = NULL;
     g->hud = NULL;
