@@ -70,6 +70,8 @@ void fx_burst(const char *name, float x, float y, float z, int count)
 typedef struct {
     char name[FX_NAME_LEN];
     int active;
+    int follow;        // 1 = центр следует за камерой (погода)
+    float y_off;       // вертикальное смещение центра от камеры (для follow)
     float pos[3], ext[3];
     float rate;        // частиц/сек
     float accum;       // накопитель времени
@@ -117,6 +119,19 @@ void fx_emitter_stop(const char *name)
     if (e) e->active = 0;
 }
 
+// Погода: центр следует за камерой (x,z игрока), y = y камеры + y_off.
+void fx_weather_start(const char *name, float y_off, const float *ext,
+                      float rate, float life)
+{
+    Game *g = game_instance();
+    if (!g || !g->cam) return;
+    float pos[3] = { g->cam->cam.pos[0], g->cam->cam.pos[1] + y_off,
+                     g->cam->cam.pos[2] };
+    fx_emitter_start(name, pos, ext, rate, life);
+    FxEmitter *e = emitter_find(name);
+    if (e) { e->follow = 1; e->y_off = y_off; }
+}
+
 void fx_emitter_stop_all(void)
 {
     for (int i = 0; i < FX_MAX_EMITTERS; i++) s_emitters[i].active = 0;
@@ -124,12 +139,25 @@ void fx_emitter_stop_all(void)
 
 void fx_update(float dt)
 {
+    Game *g = game_instance();
+    float camx = 0, camy = 0, camz = 0;
+    if (g && g->cam) {
+        camx = g->cam->cam.pos[0];
+        camy = g->cam->cam.pos[1];
+        camz = g->cam->cam.pos[2];
+    }
     for (int i = 0; i < FX_MAX_EMITTERS; i++) {
         FxEmitter *e = &s_emitters[i];
         if (!e->active) continue;
         if (e->life > 0.0f) {
             e->life -= dt;
             if (e->life <= 0.0f) { e->active = 0; continue; }
+        }
+        // Погода следует за игроком
+        if (e->follow) {
+            e->pos[0] = camx;
+            e->pos[1] = camy + e->y_off;
+            e->pos[2] = camz;
         }
         e->accum += e->rate * dt;
         int n = (int)e->accum;
@@ -244,6 +272,31 @@ static void cmd_fx_clear(const char *args)
     console_print("fx: очищено");
 }
 
+// weather <имя> [rate] — дождь/снег/... следует за игроком; weather off — стоп
+static void cmd_weather(const char *args)
+{
+    if (!args || !args[0]) {
+        console_print("usage: weather <пресет> [rate] | weather off");
+        return;
+    }
+    char name[FX_NAME_LEN];
+    float rate = 0.0f;
+    if (sscanf(args, "%31s %f", name, &rate) < 1) return;
+    if (strcmp(name, "off") == 0 || strcmp(name, "clear") == 0) {
+        fx_emitter_stop_all();
+        console_print("weather: остановлено");
+        return;
+    }
+    if (!fx_find(name)) {
+        console_print("weather: нет пресета \"%s\" (fx_list)", name);
+        return;
+    }
+    if (rate <= 0.0f) rate = 100.0f;
+    float ext[3] = { 20.0f, 10.0f, 20.0f };
+    fx_weather_start(name, 12.0f, ext, rate, 0.0f);
+    console_print("weather: %s rate=%g (следует за игроком)", name, rate);
+}
+
 // --- Встроенные пресеты ---------------------------------------------------------
 static void fx_register_builtin(void)
 {
@@ -301,14 +354,14 @@ static void fx_register_builtin(void)
             .gravity = -1.0f, .drag = 1.2f, .sway = 0.6f, .blend = 1 };
         fx_register("fire", &pp, 6);
     }
-    // Дождь: стрики вниз, серо-голубые
+    // Дождь: тонкие стрики вниз, быстрые, слегка голубые
     {
-        ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.05f,
-            .speed0 = 18.0f, .speed1 = 26.0f,
-            .life0 = 0.8f, .life1 = 1.4f,
-            .size0 = 0.03f, .size1 = 0.03f,
-            .alpha0 = 0.5f, .alpha1 = 0.0f,
-            .r = 0.7f, .g = 0.8f, .b = 1.0f,
+        ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.03f,
+            .speed0 = 30.0f, .speed1 = 40.0f,
+            .life0 = 0.5f, .life1 = 0.8f,
+            .size0 = 0.015f, .size1 = 0.015f,
+            .alpha0 = 0.35f, .alpha1 = 0.0f,
+            .r = 0.75f, .g = 0.85f, .b = 1.0f,
             .gravity = 9.8f, .drag = 0.0f, .streak = 1 };
         fx_register("rain", &pp, 1);
     }
@@ -356,4 +409,5 @@ void fx_init_console(void)
     console_add_command("fx_stop",    "fx_stop [имя] — остановить эмиттер(ы)", cmd_fx_stop);
     console_add_command("fx_clear",   "fx_clear — все эмиттеры + пул", cmd_fx_clear);
     console_add_command("fx_list",    "fx_list — список пресетов", cmd_fx_list);
+    console_add_command("weather",    "weather <пресет> [rate] | off — погода за игроком", cmd_weather);
 }
