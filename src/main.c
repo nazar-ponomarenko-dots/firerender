@@ -28,6 +28,7 @@
 #include "game.h"
 #include "commands.h"
 #include "renderer.h"
+#include "buildnum.h"
 #include "input.h"
 #include "lua_engine.h"
 #include "shader.h"   // shader_hot_reload (см. reload_shaders)
@@ -38,6 +39,9 @@
 #include "resources.h"
 #include "audio.h"
 #include "binds.h"
+#include "decals.h"
+#include "particles.h"
+#include "fx.h"
 #include "actions.h"
 #include "shadow.h"          // FR_TEST: shadow_toggle, g_shadow_*
 #include "vegetation.h"      // FR_TEST: veg_* тумблеры
@@ -107,6 +111,7 @@ static void boot_init(Game *g)
     audio_init();                // звук: устройство + каналы
     binds_init();                // дефолтные привязки клавиш (HL-стиль)
     actions_register_commands(); // +forward/-forward и прочие +/-команды
+    fx_init_console();           // пресеты эффектов + команды fx_*
     // Команды-действия (см. commands.c) — доступны СРАЗУ, в т.ч. в меню
     console_add_command("toggle_map", "показать/скрыть мини-карту", cmd_toggle_map);
     console_add_command("toggle_hud", "показать/скрыть HUD", cmd_toggle_hud);
@@ -140,7 +145,11 @@ static void boot_init(Game *g)
 }
 
 // --- FR_TEST — тест производительности / самопроверка (после boot_init) --------
-// Требует мир: грузим его сразу и входим в игру. 0 — успех, -1 — мир не загрузился.
+// Флаги: x — селфтест консоли; s — тени; v/p/q/c/e/f — выкл. подсистем;
+// o — воксельный туман; t/k — без рельефа/неба; m — burst частиц у игрока
+// (пресет "fire"); d — декаль; a — дождь-эмиттер; n — снег-эмиттер;
+// y — взрыв. Требует мир: грузим сразу и входим в игру. 0 — успех,
+// -1 — мир не загрузился.
 static int fr_test_apply(Game *g)
 {
     const char *fr_test = getenv("FR_TEST");
@@ -161,6 +170,35 @@ static int fr_test_apply(Game *g)
     // t/k — отключить рельеф/небо (нужны узлы, поэтому после load_world)
     if (strchr(fr_test, 't')) g->terr_node->render = NULL;
     if (strchr(fr_test, 'k')) g->sky_node->render = NULL;
+    // m — burst "fire" у игрока; d — декаль под игроком
+    if (strchr(fr_test, 'm')) {
+        const float *cp = g->cam->cam.pos;
+        fx_burst("fire", cp[0], cp[1] + 1.0f, cp[2], 0);
+    }
+    if (strchr(fr_test, 'd')) {
+        const float *cp = g->cam->cam.pos;
+        decal_place(cp[0], cp[2], 3.0f, 3.0f, 0.0f, "img/particle.png",
+                    0.15f, 0.4f, 0.8f, 0.85f);
+    }
+    // a/n — эмиттеры дождя/снега вокруг игрока; y — взрыв
+    if (strchr(fr_test, 'a')) {
+        const float *cp = g->cam->cam.pos;
+        float pos[3] = { cp[0], cp[1] + 12.0f, cp[2] };
+        float ext[3] = { 20.0f, 10.0f, 20.0f };
+        fx_emitter_start("rain", pos, ext, 150.0f, 0.0f);
+    }
+    if (strchr(fr_test, 'n')) {
+        const float *cp = g->cam->cam.pos;
+        float pos[3] = { cp[0], cp[1] + 12.0f, cp[2] };
+        float ext[3] = { 20.0f, 8.0f, 20.0f };
+        fx_emitter_start("snow", pos, ext, 40.0f, 0.0f);
+    }
+    if (strchr(fr_test, 'y')) {
+        const float *cp = g->cam->cam.pos;
+        fx_burst("explosion", cp[0], cp[1] + 1.0f, cp[2], 0);
+        fx_burst("sparks", cp[0], cp[1] + 1.0f, cp[2], 0);
+        fx_burst("smoke", cp[0], cp[1] + 1.0f, cp[2], 0);
+    }
     app_set_state(APP_PLAY);
     SDL_Log("FR_TEST=[%s]", fr_test);
     return 0;
@@ -169,6 +207,7 @@ static int fr_test_apply(Game *g)
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+    srand((unsigned)SDL_GetTicks());   // частицы/фауна — различаются между запусками
 
     // Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
     // Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
@@ -258,6 +297,7 @@ int main(int argc, char *argv[])
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
     SDL_Log("OpenGL: %s", glGetString(GL_VERSION));
+    SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
     // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------
     int vw = WIN_W, vh = WIN_H;

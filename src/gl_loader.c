@@ -47,6 +47,15 @@ void fr_glDrawArrays(GLenum mode, GLint first, GLsizei count)
     p_glDrawArrays(mode, first, count);
 }
 
+void fr_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
+                              GLsizei primcount)
+{
+    g_prof_draws++;
+    g_prof_verts += count * primcount;
+    g_prof_tris += prim_tris(mode, count) * primcount;
+    p_glDrawArraysInstanced(mode, first, count, primcount);
+}
+
 void fr_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
     g_prof_draws++;

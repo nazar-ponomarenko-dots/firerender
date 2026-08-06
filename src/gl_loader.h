@@ -55,6 +55,7 @@
     F(void,             glGenBuffers,            (GLsizei, GLuint *))             \
     F(void,             glBindBuffer,            (GLenum, GLuint))                \
     F(void,             glBufferData,            (GLenum, GLsizeiptr, const void *, GLenum)) \
+    F(void,             glBufferSubData,         (GLenum, GLintptr, GLsizeiptr, const void *)) \
     F(void,             glVertexAttribPointer,   (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) \
     F(void,             glReadPixels,            (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
     F(void,             glGenFramebuffers,       (GLsizei, GLuint *))             \
@@ -81,6 +82,7 @@
     F(void,             glDrawElements,          (GLenum, GLsizei, GLenum, const void *)) \
     F(void,             glDrawElementsInstanced, (GLenum, GLsizei, GLenum, const void *, GLsizei)) \
     F(void,             glDrawElementsInstancedBaseInstance, (GLenum, GLsizei, GLenum, const void *, GLsizei, GLuint)) \
+    F(void,             glDrawArraysInstanced,  (GLenum, GLint, GLsizei, GLsizei)) \
     F(void,             glEnableVertexAttribArray,(GLuint))                       \
     F(void,             glUseProgram,            (GLuint))                        \
     F(void,             glDrawArrays,            (GLenum, GLint, GLsizei))        \
@@ -142,6 +144,7 @@ GL_FUNCS(F)
 #define glGenBuffers              p_glGenBuffers
 #define glBindBuffer              p_glBindBuffer
 #define glBufferData              p_glBufferData
+#define glBufferSubData           p_glBufferSubData
 #define glVertexAttribPointer     p_glVertexAttribPointer
 #define glReadPixels              p_glReadPixels
 #define glGenFramebuffers         p_glGenFramebuffers
@@ -171,6 +174,7 @@ GL_FUNCS(F)
 #define glEnableVertexAttribArray p_glEnableVertexAttribArray
 #define glUseProgram              p_glUseProgram
 #define glDrawArrays              fr_glDrawArrays
+#define glDrawArraysInstanced     fr_glDrawArraysInstanced
 #define glDeleteVertexArrays      p_glDeleteVertexArrays
 #define glDeleteBuffers           p_glDeleteBuffers
 #define glActiveTexture           p_glActiveTexture
@@ -215,6 +219,8 @@ extern int g_prof_draws;
 extern int g_prof_verts;
 extern int g_prof_tris;
 void fr_glDrawArrays(GLenum mode, GLint first, GLsizei count);
+void fr_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
+                              GLsizei primcount);
 void fr_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices);
 void fr_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                                 const void *indices, GLsizei primcount);
