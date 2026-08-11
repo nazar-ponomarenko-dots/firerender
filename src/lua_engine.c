@@ -21,6 +21,11 @@
 #include "game.h"
 #include "resources.h"
 #include "fx.h"
+#include "binds.h"
+#include "material.h"
+#include "mesh.h"
+#include "glb.h"
+#include "renderer.h"
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -364,6 +369,150 @@ static int l_time(lua_State *ls)
     return 1;
 }
 
+// --- Строковые cvar'ы: engine.cvar_get_string / engine.cvar_set_string --------
+static int l_cvar_get_string(lua_State *ls)
+{
+    lua_pushstring(ls, cvar_get_string(luaL_checkstring(ls, 1)));
+    return 1;
+}
+
+static int l_cvar_set_string(lua_State *ls)
+{
+    cvar_set_string(luaL_checkstring(ls, 1), luaL_checkstring(ls, 2));
+    return 0;
+}
+
+// --- Бинды из Lua: engine.bind/unbind (управление вводом, как Far Cry ActionMap)
+static int l_bind(lua_State *ls)
+{
+    const char *key = luaL_checkstring(ls, 1);
+    const char *cmd = luaL_checkstring(ls, 2);
+    SDL_Scancode sc = binds_key_from_name(key);
+    if (sc == SDL_SCANCODE_UNKNOWN) {
+        lua_engine_print("engine.bind: неизвестная клавиша");
+        return 0;
+    }
+    binds_set(sc, cmd);
+    return 0;
+}
+
+static int l_unbind(lua_State *ls)
+{
+    const char *key = luaL_checkstring(ls, 1);
+    SDL_Scancode sc = binds_key_from_name(key);
+    if (sc != SDL_SCANCODE_UNKNOWN) binds_clear(sc);
+    return 0;
+}
+
+// --- Материалы из Lua: engine.material_register(name, { ... }) ----------------
+// Таблица: tint={r,g,b}, alpha, blend (0/1/2/3), tile={u,v}, offset={u,v}.
+// По имени материал потом находит рендер (material_find) — data-driven,
+// как material library в HL2.
+#define MATERIAL_LUA_MAX 4
+static const char *s_mat_lua_names[MATERIAL_LUA_MAX];
+static int s_mat_lua_n = 0;
+
+static int l_material_register(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    luaL_checktype(ls, 2, LUA_TTABLE);
+    if (s_mat_lua_n >= MATERIAL_LUA_MAX) {
+        lua_engine_print("engine.material_register: лимит Lua-материалов");
+        return 0;
+    }
+    Material m;
+    material_defaults(&m);
+    m.set = 1;
+    float tmp;
+#define MAT_NUM(field, dst) \
+    lua_getfield(ls, 2, field); \
+    if (lua_isnumber(ls, -1)) dst = (float)lua_tonumber(ls, -1); \
+    lua_pop(ls, 1)
+    MAT_NUM("alpha", m.alpha);
+    MAT_NUM("blend", tmp); if (tmp >= 0) m.blend = (int)tmp;
+    {
+        float tint[3] = { 1, 1, 1 };
+        lua_getfield(ls, 2, "tint");
+        if (lua_istable(ls, -1)) {
+            for (int i = 0; i < 3; i++) {
+                lua_rawgeti(ls, -1, i + 1);
+                if (lua_isnumber(ls, -1)) tint[i] = (float)lua_tonumber(ls, -1);
+                lua_pop(ls, 1);
+            }
+        }
+        lua_pop(ls, 1);
+        m.tint[0] = tint[0]; m.tint[1] = tint[1]; m.tint[2] = tint[2];
+    }
+    {
+        float tile[2] = { 1, 1 };
+        lua_getfield(ls, 2, "tile");
+        if (lua_istable(ls, -1)) {
+            lua_rawgeti(ls, -1, 1); if (lua_isnumber(ls, -1)) tile[0] = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+            lua_rawgeti(ls, -1, 2); if (lua_isnumber(ls, -1)) tile[1] = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        m.tile[0] = tile[0]; m.tile[1] = tile[1];
+    }
+#undef MAT_NUM
+    material_register(name, &m);
+    lua_pushboolean(ls, 1);
+    return 1;
+}
+
+// engine.material_list() -> "name1 name2 ..." (для отладки)
+static int l_material_list(lua_State *ls)
+{
+    char buf[512] = "";
+    size_t off = 0;
+    for (int i = 0; i < material_count(); i++) {
+        const char *n = material_name(i);
+        if (!n) continue;
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "%s%s",
+                                off ? " " : "", n);
+        if (off >= sizeof buf - 1) break;
+    }
+    lua_pushstring(ls, buf);
+    return 1;
+}
+
+// engine.mesh(obj, x, y, z, [scale], [tex]) — поставить статичный меш (.obj)
+// как узел MeshInstance3D. Возвращает 1 при успехе. Дубликаты узлов списка
+// не отслеживаются (prop_static грузятся разово из карты).
+static int l_mesh(lua_State *ls)
+{
+    const char *path = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    float scale = (float)luaL_optnumber(ls, 5, 1.0f);
+    const char *tex = lua_isstring(ls, 6) ? lua_tostring(ls, 6) : NULL;
+    Game *g = game_instance();
+    if (!g || !g->root) { lua_pushboolean(ls, 0); return 1; }
+    SceneNode *n = mesh_make_node(path, pos, scale, tex, renderer_context());
+    if (!n) { lua_pushboolean(ls, 0); return 1; }
+    node_add(g->root, n);
+    lua_pushboolean(ls, 1);
+    return 1;
+}
+
+// engine.glb(obj, x, y, z, [scale]) — поставить бинарный glTF (.glb)
+// как узел GlbInstance3D. Возвращает 1 при успехе.
+static int l_glb(lua_State *ls)
+{
+    const char *path = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    float scale = (float)luaL_optnumber(ls, 5, 1.0f);
+    Game *g = game_instance();
+    if (!g || !g->root) { lua_pushboolean(ls, 0); return 1; }
+    SceneNode *n = glb_make_node(path, pos, scale, renderer_context());
+    if (!n) { lua_pushboolean(ls, 0); return 1; }
+    node_add(g->root, n);
+    lua_pushboolean(ls, 1);
+    return 1;
+}
+
 // --- Эффекты частиц: engine.fx_* (см. fx.h) -------------------------------------
 // engine.fx_burst("имя", x, y, z, [count]) — взрыв эффекта в точке
 static int l_fx_burst(lua_State *ls)
@@ -405,6 +554,20 @@ static int l_fx_clear(lua_State *ls)
     (void)ls;
     fx_emitter_stop_all();
     particles_clear();
+    return 0;
+}
+
+// engine.fx_weather("имя", rate) — погода за игроком; "off"/0 — стоп
+static int l_fx_weather(lua_State *ls)
+{
+    const char *name = luaL_optstring(ls, 1, "");
+    float rate = (float)luaL_optnumber(ls, 2, 100.0f);
+    if (!name[0] || strcmp(name, "off") == 0 || strcmp(name, "clear") == 0) {
+        fx_emitter_stop_all();
+        return 0;
+    }
+    float ext[3] = { 20.0f, 10.0f, 20.0f };
+    fx_weather_start(name, 12.0f, ext, rate, 0.0f);
     return 0;
 }
 
@@ -603,6 +766,14 @@ static const luaL_Reg engine_lib[] = {
     { "log",           l_log },
     { "cvar_get",      l_cvar_get },
     { "cvar_set",      l_cvar_set },
+    { "cvar_get_string", l_cvar_get_string },
+    { "cvar_set_string", l_cvar_set_string },
+    { "bind",          l_bind },
+    { "unbind",        l_unbind },
+    { "material_register", l_material_register },
+    { "material_list", l_material_list },
+    { "mesh",          l_mesh },
+    { "glb",           l_glb },
     { "exec",          l_exec },
     { "cmd",           l_cmd },
     { "on",            l_on },
@@ -618,14 +789,15 @@ static const luaL_Reg engine_lib[] = {
     { "world_loaded",  l_world_loaded },
     { "camera",        l_camera },
     { "terrain_height", l_terrain_height },
-    { "after",         l_after },
     { "teleport",      l_teleport },
+    { "after",         l_after },
     { "msg",           l_msg },
     { "time",          l_time },
     { "fx_burst",      l_fx_burst },
     { "fx_emit",       l_fx_emit },
     { "fx_stop",       l_fx_stop },
     { "fx_clear",      l_fx_clear },
+    { "fx_weather",    l_fx_weather },
     { "fx_register",   l_fx_register },
     { NULL, NULL }
 };

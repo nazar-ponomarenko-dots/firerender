@@ -2,29 +2,32 @@
 //  decals.h — декали на рельефе (проецируемые квады с текстурами)
 // ----------------------------------------------------------------------------
 //  Декаль — плоский квад, «лежащий» на рельефе: высота каждого угла берётся
-//  из карты высот (имитация проекции на поверхность). Текстура — спрайт
-//  (например, следы, кровь, тень). Альфа-бленд, смещение вверх на 0.1 м от
-//  рельефа — без z-fighting. Один draw на декаль (их немного).
-//
-//  Использование:
-//    decals_make_node(w, rc)  — узел сцены (во время загрузки мира);
-//    decals_place(~)          — добавить декаль;
-//    decals_clear()           — сбросить (смена карты);
-//    decals_cleanup(node)     — освободить GL.
+//  из карты высот (9 сэмплов на декаль — 3x3) для плавного следования за
+//  склонами. Полигон-оффсет (glPolygonOffset) вместо ручного смещения —
+//  без z-fighting и парения.
+//  API:
+//    decal_place(x, z, hw, hd, rot, tex, r,g,b,a)      — offset=0.03f
+//    decal_place_ex(x, z, hw, hd, rot, tex, r,g,b,a, off)
+//    decals_clear()
 // ============================================================================
 #ifndef DECALS_H
 #define DECALS_H
+
 #include "gl_loader.h"
 #include "render_ctx.h"
 #include "scene.h"
 #include "world.h"
 
-#define DECALS_MAX 64
+#define DECALS_MAX 256
 
-// Добавляет декаль: центр (x,y,z), размер (полуширина/полувысота), поворот
-// вокруг вертикали (рад), текстура (path), цвет/интенсивность (0..1).
+// Добавляет декаль на рельеф (offset=0.03f — малое прилегание).
 void decal_place(float x, float z, float half_w, float half_d, float rot,
                  const char *tex_path, float r, float g, float b, float alpha);
+
+// То же, но с явным offset (м) от рельефа (0.0f = вплотную).
+void decal_place_ex(float x, float z, float half_w, float half_d, float rot,
+                    const char *tex_path, float r, float g, float b,
+                    float alpha, float offset);
 
 // Создаёт узел Decals (квады на рельефе). NULL при ошибке.
 SceneNode *decals_make_node(const WorldState *w, const RendererContext *rc);

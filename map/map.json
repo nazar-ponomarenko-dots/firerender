@@ -24,7 +24,10 @@
         "band_t1": 0.4,
         "band_h0": -50,
         "band_h1": 200,
-        "blur": 10,
+        "blur": 2,
+        "blur_radius": 80,
+        "erosion": 250,
+        "erosion_slope": 33,
         "ground_tex": "img/ground.png",
         "tex_scale": 6.4,
         "field_color": [

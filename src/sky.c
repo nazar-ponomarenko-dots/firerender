@@ -37,8 +37,10 @@ SceneNode *sky_make_node(const RendererContext *rc)
     if (!prog || !img) return NULL;
 
     // Небо: REPEAT по X убирает шов панорамы на стыке 360 градусов.
+    // LINEAR (последний аргумент 1) — без полос/пикселизации на куполе
+    // (панорама 512x128 даёт ~1.4px/градус — NEAREST выглядел грязно).
     // Текстура — через кеш ресурсов (пиксели уже загружены для цвета тумана).
-    GLuint tex = resources_texture(sc.tex, 3, GL_REPEAT, 0);
+    GLuint tex = resources_texture(sc.tex, 3, GL_REPEAT, 1);
 
     // Цвет тумана берём из середины панорамы неба — горизонт сходится с небом
     float fr = 0, fg = 0, fb = 0, fn = 0;

@@ -12,10 +12,14 @@
 #include "utf8.h"
 #include "buildnum.h"
 #include "fx.h"
+#include "mesh.h"
+#include "glb.h"
+#include "material.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #define CON_LINES      400     // строк вывода в кольце (скроллбек)
@@ -75,6 +79,44 @@ static const char *alias_find(const char *name)
     for (int i = 0; i < s_alias_n; i++)
         if (strcmp(s_aliases[i].name, name) == 0) return s_aliases[i].body;
     return NULL;
+}
+
+// --- Отложенное выполнение (wait): очередь команд с задержкой в кадрах --------
+// Как в GoldSrc: `wait` в строке задерживает ВСЕ команды после него на 1 кадр
+// (wait N — на N кадров). Каждый кадр console_drain (главный цикл) выполняет
+// те, чей счётчик дошёл до нуля. console_later — тот же механизм для кода/Lua.
+#define CON_PEND_MAX 64
+static struct { char cmd[192]; int frames; } s_pend[CON_PEND_MAX];
+static int s_pend_n = 0;
+
+static void console_exec_one(const char *line);   // forward (см. ниже)
+
+void console_later(int frames, const char *cmd)
+{
+    if (!cmd || !cmd[0]) return;
+    if (s_pend_n >= CON_PEND_MAX) {
+        console_print("console: очередь wait полна (%d)", CON_PEND_MAX);
+        return;
+    }
+    snprintf(s_pend[s_pend_n].cmd, sizeof s_pend[0].cmd, "%s", cmd);
+    s_pend[s_pend_n].frames = frames > 0 ? frames : 1;
+    s_pend_n++;
+}
+
+// Каждый кадр из главного цикла: выполняет отложенные команды.
+// Команда с frames=N выполняется на N-й кадр (wait -> 1 кадр спустя).
+void console_drain(void)
+{
+    if (s_pend_n == 0) return;
+    for (int i = 0; i < s_pend_n; ) {
+        if (s_pend[i].frames > 0) s_pend[i].frames--;
+        if (s_pend[i].frames <= 0) {
+            console_exec_one(s_pend[i].cmd);
+            s_pend[i] = s_pend[--s_pend_n];     // порядок не важен
+        } else {
+            i++;
+        }
+    }
 }
 
 int console_active(void)
@@ -139,12 +181,39 @@ static void console_exec_one(const char *line)
     console_print("Unknown command \"%s\" (help — список команд)", cmd);
 }
 
+// Подстроки команды за вычёт пробелов в начале и конце
+static const char *stmt_trim(const char *p, size_t *len)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    size_t l = strlen(p);
+    while (l > 0 && (p[l - 1] == ' ' || p[l - 1] == '\t')) l--;
+    *len = l;
+    return p;
+}
+
+// "wait" или "wait N" -> N (или 1), -1 если не wait
+static int stmt_wait_delay(const char *s, size_t len)
+{
+    if (len >= 4 && strncmp(s, "wait", 4) == 0) {
+        if (len == 4) return 1;
+        if (s[4] == ' ' || s[4] == '\t') {
+            const char *n = s + 4;
+            while (*n == ' ' || *n == '\t') n++;
+            int d = atoi(n);
+            return d > 0 ? d : 1;
+        }
+    }
+    return -1;
+}
+
 void console_exec(const char *line)
 {
     // Команды могут разделяться ";" — но НЕ внутри кавычек
-    // (alias/bind: "cmd1; cmd2" — единое тело).
+    // (alias/bind: "cmd1; cmd2" — единое тело). После `wait` все следующие
+    // команды строки откладываются на 1 кадр (wait N — на N).
     char buf[256];
     snprintf(buf, sizeof buf, "%s", line ? line : "");
+    int delay = 0;                 // накопленная задержка для последующих команд
     char *p = buf;
     while (p && *p) {
         char *semi = NULL;
@@ -154,7 +223,18 @@ void console_exec(const char *line)
             else if (*q == ';' && !inq) { semi = q; break; }
         }
         if (semi) *semi = 0;
-        console_exec_one(p);
+        size_t len;
+        const char *stmt = stmt_trim(p, &len);
+        if (len > 0) {
+            int wd = stmt_wait_delay(stmt, len);
+            if (wd >= 0) {
+                delay += wd;              // откладываем всё после wait
+            } else if (delay > 0) {
+                console_later(delay, stmt);   // отложенная команда
+            } else {
+                console_exec_one(stmt);
+            }
+        }
         p = semi ? semi + 1 : NULL;
     }
 }
@@ -455,6 +535,11 @@ static void cmd_cvarlist(const char *args)
     console_print("cvars:");
     for (int i = 0; i < cvar_count(); i++) {
         const Cvar *c = cvar_at(i);
+        if (c->flags & CVAR_STRING) {
+            console_print("  %-14s = \"%s\" %s", c->name, cvar_get_string(c->name),
+                          c->help);
+            continue;
+        }
         if (c->minv <= c->maxv)
             console_print("  %-14s = %-8.4g [%.4g..%.4g] %s",
                           c->name, c->value, c->minv, c->maxv, c->help);
@@ -471,6 +556,16 @@ static void cmd_echo(const char *args)
 static void cmd_set(const char *args)
 {
     char name[32];
+    // set name "строка" — для строковых переменных (CVAR_STRING)
+    char sval[64];
+    if (sscanf(args, "%31s \"%63[^\"]\"", name, sval) == 2) {
+        cvar_set_from_string(name, sval);
+        if (cvar_index(name) >= 0 && (cvar_at(cvar_index(name))->flags & CVAR_STRING))
+            console_print("  %s = \"%s\"", name, cvar_get_string(name));
+        else
+            console_print("  %s = %.4g", name, cvar_get(name));
+        return;
+    }
     float v;
     int n = sscanf(args, "%31s %f", name, &v);
     if (n == 2) {
@@ -478,10 +573,14 @@ static void cmd_set(const char *args)
         console_print("  %s = %.4g", name, cvar_get(name));
     } else if (n == 1) {
         int i = cvar_index(name);
-        console_print("  %s = %.4g%s", name, cvar_get(name),
-                      i >= 0 ? "" : " (не зарегистрирован)");
+        if (i >= 0 && (cvar_at(i)->flags & CVAR_STRING))
+            console_print("  %s = \"%s\"%s", name, cvar_get_string(name),
+                          " (строковая)");
+        else
+            console_print("  %s = %.4g%s", name, cvar_get(name),
+                          i >= 0 ? "" : " (не зарегистрирован)");
     } else {
-        console_print("usage: set <name> [value]");
+        console_print("usage: set <name> [value | \"string\"]");
     }
 }
 
@@ -745,6 +844,7 @@ void console_init(void)
     cvar_register_ex("sv_maxspeed", 0.0f, 0.0f, 100.0f, CVAR_ARCHIVE, "макс. скорость игрока, м/с (0 = cl_walkspeed)");
     cvar_register_ex("cl_flightspeed", 25.0f, 0.0f, 500.0f, CVAR_ARCHIVE, "скорость полёта, м/с");
     cvar_register_ex("sv_gravity", 20.0f, 0.0f, 100.0f, CVAR_ARCHIVE, "гравитация, м/с2");
+    cvar_register_ex("sv_maxslope", 60.0f, 0.0f, 89.0f, CVAR_ARCHIVE, "крутизна склона, который можно взойти, градусы (0 = отключено)");
     cvar_register_ex("sv_jumpspeed", 7.0f, 0.0f, 50.0f, CVAR_ARCHIVE, "скорость прыжка, м/с");
     cvar_register_ex("r_shadows_mode", 1.0f, 0, 3, CVAR_ARCHIVE, "тени: 0=выкл, 1=CSM, 2=статические, 3=пятна");
     cvar_register_ex("r_fog_mode", 1.0f, 0, 2, CVAR_ARCHIVE, "туман: 0=выкл, 1=объёмный, 2=простой");
@@ -763,6 +863,8 @@ void console_init(void)
     cvar_register_ex("snd_sfx", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость звуков (шаги, эффекты)");
     cvar_register_ex("snd_dialog", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость диалогов");
     cvar_register_ex("snd_music", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость музыки");
+    // Строковая переменная (как name в GoldSrc): значение в c->str.
+    cvar_register_string("name", "player", "имя игрока (строка)");
 
     console_add_command("help", "список команд", cmd_help);
     console_add_command("cvarlist", "список переменных", cmd_cvarlist);
@@ -804,7 +906,15 @@ void console_save_config(void)
     for (int i = 0; i < cvar_count(); i++) {
         const Cvar *c = cvar_at(i);
         if (!(c->flags & CVAR_ARCHIVE)) continue;
-        fprintf(f, "%s %.4g\n", c->name, c->value);
+        // Сохраняем только ИЗМЕНЁННЫЕ (отличные от дефолта) переменные —
+        // config.cfg хранит отличия, как в GoldSrc/Source.
+        if (c->flags & CVAR_STRING) {
+            if (strcmp(c->str, c->def_str) == 0) continue;
+            fprintf(f, "%s \"%s\"\n", c->name, c->str);
+        } else {
+            if (c->value == c->def) continue;
+            fprintf(f, "%s %.4g\n", c->name, c->value);
+        }
     }
     binds_save_config(f);       // bind-строки после cvar'ов
     for (int i = 0; i < s_alias_n; i++)
@@ -1088,6 +1198,64 @@ void console_selftest(void)
     console_toggle();
     if (console_active()) { SDL_Log("console test: close FAIL"); fail++; }
 
+    // 9.1) строковые cvar'ы: set name "строка" -> cvar_set_string /
+    //      cvar_get_string (без config.cfg — просто API)
+    {
+        console_exec("set name \"bob\"");
+        if (strcmp(cvar_get_string("name"), "bob") != 0) {
+            SDL_Log("console test: string cvar set FAIL (%s)", cvar_get_string("name"));
+            fail++;
+        }
+        cvar_set_string("name", "alice");
+        if (strcmp(cvar_get_string("name"), "alice") != 0) {
+            SDL_Log("console test: string cvar get FAIL");
+            fail++;
+        }
+        cvar_set_string("name", "player");   // вернуть дефолт
+    }
+
+    // 9.2) wait: "set fov 55; wait; set fov 56" — команда после wait отложена
+    //      на 1 кадр (выполняется при console_drain из главного цикла)
+    {
+        console_exec("set fov 55; wait; set fov 56");
+        if (cvar_get("fov") != 55.0f) {
+            SDL_Log("console test: wait pre-drain FAIL (fov=%g)", cvar_get("fov"));
+            fail++;
+        }
+        console_drain();                    // 1 кадр спустя
+        if (cvar_get("fov") != 56.0f) {
+            SDL_Log("console test: wait post-drain FAIL (fov=%g)", cvar_get("fov"));
+            fail++;
+        }
+        console_exec("set fov 59; wait 2; set fov 58");
+        if (cvar_get("fov") != 59.0f) { SDL_Log("console test: wait2 FAIL"); fail++; }
+        console_drain();
+        if (cvar_get("fov") != 59.0f) { SDL_Log("console test: wait2 early FAIL"); fail++; }
+        console_drain();
+        if (cvar_get("fov") != 58.0f) { SDL_Log("console test: wait2 late FAIL"); fail++; }
+        console_exec("set fov 60");
+    }
+
+    // 9.3) реестр материалов по имени (material_register/find/get)
+    {
+        Material m;
+        material_defaults(&m);
+        m.alpha = 0.5f;
+        m.tint[0] = 0.2f;
+        material_register("test_mat", &m);
+        const Material *f = material_find("test_mat");
+        if (!f || f->alpha != 0.5f || f->tint[0] != 0.2f) {
+            SDL_Log("console test: material registry find FAIL");
+            fail++;
+        }
+        Material g;
+        int ok = material_get("test_mat", &g);
+        if (!ok || g.alpha != 0.5f) { SDL_Log("console test: material get FAIL"); fail++; }
+        ok = material_get("no_such_mat", &g);       // нет — дефолты, 0
+        if (ok || g.alpha != 1.0f) { SDL_Log("console test: material default FAIL"); fail++; }
+        material_clear_all();
+    }
+
     // 10) version — номер сборки (buildnum.h генерируется Makefile)
     {
         console_exec("version");
@@ -1109,6 +1277,84 @@ void console_selftest(void)
             || !fx_find("sparks") || !fx_find("dust") || !fx_find("muzzle_flash")) {
             SDL_Log("console test: fx presets FAIL");
             fail++;
+        }
+    }
+
+    // 12) mesh — .obj загрузчик (квад = 2 треуг., треугольник = 1 треуг.)
+    {
+        Mesh *m = mesh_load_obj_mem("cube.obj",
+            "# test cube\n"
+            "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+            "vn 0 0 1\n"
+            "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+            "f 1/1/1 2/2/1 3/3/1 4/4/1\n"
+            "v 0 0 1\nv 1 0 1\nv 0 1 1\n"
+            "f 5//1 6//1 7//1\n");
+        if (!m) { SDL_Log("console test: mesh load FAIL"); fail++; }
+        else {
+            // квад -> 6 вершин / 2 треуг.; треугольник -> 3 вершины / 1 треуг.
+            if (m->tri_count != 3 || m->vcount != 9) {
+                SDL_Log("console test: mesh triangable FAIL (%d tri, %d v)",
+                        m->tri_count, m->vcount);
+                fail++;
+            }
+            mesh_free(m);
+        }
+    }
+
+    // 13) Центральный реестр команд (cmdreg.c) — проверить, что ключевые
+    // команды из разных модулей реально зарегистрированы (иначе — тихая
+    // потеря при переполнении/ошибке сборки реестра).
+    {
+        const char *need[] = { "mesh", "glb", "map", "maps", "save", "load", "setpos",
+                               "+forward", "-forward", "+use", "fx", "fx_list",
+                               "weather", "matlist", "noclip", "thirdperson",
+                               "reload_shaders", "ent_create", "screenshot" };
+        for (size_t i = 0; i < sizeof need / sizeof need[0]; i++) {
+            int found = 0;
+            for (int j = 0; j < s_cmds_n && !found; j++)
+                if (strcmp(s_cmds[j].name, need[i]) == 0) found = 1;
+            if (!found) {
+                SDL_Log("console test: команда \"%s\" не зарегистрирована", need[i]);
+                fail++;
+            }
+        }
+        if (s_cmds_n < 40) {
+            SDL_Log("console test: команд всего %d (<40), реестр неполный", s_cmds_n);
+            fail++;
+        }
+    }
+
+    // 14) Бинарный glTF (.glb): glb_parse_file headless — чанки, иерархия,
+    // запекание в мировые координаты, материалы (псевдо-PBR 2004).
+    {
+        GlbModel *gm = glb_parse_file("models/test.glb");
+        if (!gm) { SDL_Log("console test: glb parse FAIL (NULL)"); fail++; }
+        else {
+            int t = (gm->count != 1);
+            if (!t) {
+                GlbItem *o = &gm->items[0];
+                if (o->index_count != 6 || o->vcount != 4) {
+                    SDL_Log("console test: glb geo FAIL (idx=%d, v=%d)",
+                            o->index_count, o->vcount); t = 1;
+                }
+                // корневой узел translation [5,7,9] + дочерний scale 2:
+                // вершина 0 (0,0,0) -> мир (5,7,9)
+                if (fabsf(o->verts[0] - 5) > 1e-3f || fabsf(o->verts[1] - 7) > 1e-3f ||
+                    fabsf(o->verts[2] - 9) > 1e-3f) {
+                    SDL_Log("console test: glb world-tf FAIL (%.1f,%.1f,%.1f, ожид. 5,7,9)",
+                            o->verts[0], o->verts[1], o->verts[2]); t = 1;
+                }
+                if (o->alpha < 0.999f) { SDL_Log("console test: glb alpha FAIL"); t = 1; }
+                if (o->specular < 0.5f) { SDL_Log("console test: glb specular FAIL (%.2f)", o->specular); t = 1; }
+                if (!(o->cull == MAT_CULL_NONE)) { SDL_Log("console test: glb doubleSided FAIL (cull=%d)", o->cull); t = 1; }
+                if (o->blend != MAT_BLEND_OPAQUE) { SDL_Log("console test: glb alphaMode FAIL (blend=%d)", o->blend); t = 1; }
+                if (o->tint[0] < 0.19f || o->tint[0] > 0.21f) {
+                    SDL_Log("console test: glb baseColorFactor FAIL (%.2f)", o->tint[0]); t = 1;
+                }
+            }
+            if (t) fail++;
+            glb_model_free(gm);
         }
     }
 

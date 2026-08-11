@@ -14,6 +14,7 @@
 #include "camera.h"
 #include "hud.h"
 #include "minimap.h"
+#include "player.h"
 #include "scene.h"
 #include "sun.h"
 #include "world.h"
@@ -42,15 +43,8 @@ typedef struct {
     float field_pos[3];
     float field_size[3];
 
-    // Стартовая позиция игрока (из map.json) — для пункта "Новая игра"
-    float spawn_pos[3];
-    float spawn_yaw, spawn_pitch;
-
-    // Save/Load (F5/F9): позиция игрока + карта в save.cfg
-    float save_pos[3];
-    float save_yaw, save_pitch;
-    char save_map[64];
-    int pending_spawn;         // телепорт после загрузки мира (load из меню)
+    // Игрок: спавн, сохранение/загрузка, телепорт (см. player.h)
+    Player player;
 
     // Сообщение карты (message из триггеров/use) — рисует renderer.c
     char ui_msg[256];

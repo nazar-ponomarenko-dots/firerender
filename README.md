@@ -123,9 +123,18 @@ firerender/
 - `help` — список команд, `cvarlist` — список переменных
 - `set <name> [value]` — переменные: `fov`, `cl_sens`, `cl_walkspeed`,
   `cl_flightspeed`, `sv_gravity`, `sv_jumpspeed`, `r_shadows`, `r_fog`,
-  `developer` (значения зажимаются в диапазон)
+  `developer` (значения зажимаются в диапазон). Для строковых переменных
+  (флаг `CVAR_STRING`, напр. `name`) — `set <name> "строка"`.
 - `fly`, `map`, `hud` — переключатели (те же, что клавиши F/G/H)
 - `exec <file>` — выполнить команды из файла, `clear` — очистить консоль
+- `wait` / `wait N` — отложить выполнение следующих команд строки на
+  1 / N кадров (как в GoldSrc; `cmd1; wait; cmd2`)
+- `alias <имя> <команда[; команда]>` — макрос; `unalias`, `aliaslist`
+- `matlist` — список зарегистрированных материалов по имени
+- `mesh <obj> [x y z] [scale] [tex]` — поставить статичный меш (Wavefront .obj,
+  prop_static) как узел MeshInstance3D; пример: `mesh models/crate.obj 0 2 0 1`
+- `glb <glb> [x y z] [scale]` — поставить бинарный glTF 2.0 (.glb)
+  (prop_static) как узел GlbInstance3D; пример: `glb models/vaz-2105.glb 0 5 0 1`
 - `quit` — выход; `cfg load|save` — config.cfg; `version` — версия
   и номер сборки (каждый `make` инкрементирует buildnum.txt — см. Makefile)
 
@@ -212,6 +221,22 @@ engine.fx_register("magic", {                 -- свой пресет
     color = {0.4,1,0.8}, gravity = -0.5,
     blend = 1, count = 20,
 })
+```
+
+Строковые переменные и материалы (data-driven, как material library в HL2):
+
+```lua
+engine.cvar_set_string("name", "имя")         -- строковый cvar
+engine.cvar_get_string("name")
+engine.bind("k", "+forward")                  -- привязка клавиши из Lua
+engine.unbind("k")
+engine.material_register("gold", {            -- регистрация материала по имени
+    tint = {1, 0.8, 0.2}, alpha = 1, blend = 0, tile = {1, 1},
+})
+engine.material_list()                        -- "gold ..." (для отладки)
+engine.mesh("models/crate.obj", 0, 2, 0, 1,   -- статичный меш (.obj) в мире
+            "img/crate.png")                  -- (путь, x, y, z, scale, текстура)
+engine.glb("models/vaz-2105.glb", 0, 5, 0, 1) -- статичный меш (.glb) в мире
 ```
 
 Примеры в `lua/main.lua` (команды `lua_fx`, `lua_rain`).

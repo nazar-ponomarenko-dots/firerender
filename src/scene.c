@@ -3,6 +3,8 @@
 // ============================================================================
 #include "scene.h"
 
+#include "events.h"
+
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +32,7 @@ void node_add(SceneNode *parent, SceneNode *child)
     if (parent->last_child) parent->last_child->next = child;
     else                    parent->first_child = child;
     parent->last_child = child;
+    events_emit(EV_NODE_INIT, child, NULL);  // узел вошёл в дерево
 }
 
 void node_remove(SceneNode *n)
@@ -72,6 +75,8 @@ void node_render_tree(SceneNode *n, float dt)
 
 void node_free_tree(SceneNode *n)
 {
+    if (!n) return;
+    events_emit(EV_NODE_EXIT, n, NULL);      // узел уходит из дерева
     for (SceneNode *c = n->first_child; c;) {
         SceneNode *tmp = c->next;
         node_free_tree(c);

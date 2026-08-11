@@ -130,6 +130,9 @@ typedef struct {
     float band_t0, band_t1;         // полоса игровых высот (по яркости)
     float band_h0, band_h1;         // высоты полосы
     int blur;                       // сглаживание карты высот (проходы)
+    int blur_radius;                // радиус сглаживания, метры
+    int erosion;                    // проходы ограничения крутизны (0 = выкл)
+    float erosion_slope;            // макс. крутизна после эрозии, градусы
     char ground_tex[256];           // текстура земли (img/ground.png)
     float tex_scale;                // метр на тайл текстуры
     float field_color[3];           // тон почвы поля пшеницы
@@ -227,6 +230,9 @@ const MapSound3D *mapdata_sound(int i);
 #define MAP_MAX_TRIGGERS 64
 int mapdata_trigger_count(void);
 const MapTrigger *mapdata_trigger(int i);
+int mapdata_trigger_fired(int i);
+void mapdata_trigger_set_fired(int i, int v);
+void mapdata_object_set_used(const char *name, int v);
 
 // --- Фауна: fauna[] -------------------------------------------------------------
 typedef enum {

@@ -22,7 +22,7 @@
 
 typedef void (*ConsoleCmdFn)(const char *args);
 
-#define CON_MAX_COMMANDS 64
+#define CON_MAX_COMMANDS 128
 
 // Флаг "запрошен выход" — ставит команда quit, читает главный цикл.
 extern int g_quit_request;
@@ -46,8 +46,14 @@ void console_print(const char *fmt, ...);
 // (args — остаток строки после имени команды).
 int console_add_command(const char *name, const char *help, ConsoleCmdFn fn);
 
-// Выполнить строку команды (Enter или из кода).
+// Выполнить строку команды (Enter или из кода). Команды `wait` / `wait N`
+// в строке откладывают следующие за ними на 1 / N кадров.
 void console_exec(const char *line);
+
+// Отложенное выполнение: выполнить cmd через frames кадров (wait/console_later).
+// Каждый кадр главный цикл вызывает console_drain().
+void console_later(int frames, const char *cmd);
+void console_drain(void);
 
 // Рисует консоль (панель, строки вывода со скроллбеком, строка ввода
 // с курсором). Вызывать из главного цикла ПОСЛЕ отрисовки UI.

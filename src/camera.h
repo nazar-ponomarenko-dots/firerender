@@ -63,4 +63,10 @@ void camera_demo_set(int on);
 // камеру, пока консоль принимает текст.
 void camera_lock_input(int lock);
 
+// Raycast: луч из камеры вниз до рельефа.
+// Возвращает 1 если попал в рельеф в пределах max_dist (м).
+// out_x/out_y/out_z — точка попадания (y = высота рельефа).
+int camera_raycast_terrain(const Camera *cam, const WorldState *w,
+                           float max_dist, float *out_x, float *out_y, float *out_z);
+
 #endif

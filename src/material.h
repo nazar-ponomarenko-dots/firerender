@@ -57,6 +57,29 @@ typedef struct {
 // Дефолты материала (для объектов без блока material).
 void material_defaults(Material *m);
 
+// --- Реестр материалов по имени (data-driven, как material library в HL2) -----
+// Материал можно зарегистрировать по имени один раз (из map.json, Lua или
+// кода) и затем получать его константно: рендер не дублирует параметры.
+// Паттерн похож на IMaterialSystem::FindMaterial из Source.
+#define MATERIALS_MAX 32
+
+// Регистрирует/перезаписывает материал по имени (копия).
+void material_register(const char *name, const Material *m);
+
+// Ищет материал по имени; NULL — нет такого.
+const Material *material_find(const char *name);
+
+// Возвращает материал по имени, ИЛИ дефолты, если не зарегистрирован.
+// out заполняется всегда (материал->дефолты). Возвращает 1, если найден.
+int material_get(const char *name, Material *out);
+
+// Число зарегистрированных (для matlist / отладки).
+int material_count(void);
+const char *material_name(int i);
+
+// Сброс реестра (при выгрузке мира).
+void material_clear_all(void);
+
 // Хендлы uniform'ов материала в шейдере (ищутся один раз; необязательные = -1).
 typedef struct {
     GLint u_tint, u_blend, u_alpha;

@@ -28,6 +28,7 @@
 #include "fx.h"
 #include "lua_engine.h"
 #include "mapdata.h"
+#include "material.h"
 #include "objects.h"
 #include "particles.h"
 #include "renderer.h"
@@ -55,8 +56,7 @@ void game_init(Game *g)
     s_game = g;
     memset(g, 0, sizeof *g);
     snprintf(g->map_name, sizeof g->map_name, "%s", "map1");
-    g->spawn_yaw = 3.14159f;
-    g->spawn_pitch = -0.5f;
+    player_init(&g->player);
 }
 
 Game *game_instance(void)
@@ -172,15 +172,7 @@ static void demo_step(const WorldState *w, float t, CameraParams *cam)
 void game_apply_spawn(Game *g, const float pos[3], float yaw, float pitch)
 {
     if (!g->cam) return;
-    g->cam->cam.pos[0] = pos[0];
-    g->cam->cam.pos[1] = pos[1];
-    g->cam->cam.pos[2] = pos[2];
-    g->cam->cam.yaw = yaw;
-    g->cam->cam.pitch = pitch;
-    g->cam->cam.vx = g->cam->cam.vy = g->cam->cam.vz = 0.0f;
-    g->cam->cam.fly = 0;
-    SDL_Log("Spawn: %.1f %.1f %.1f yaw=%.2f pitch=%.2f",
-            pos[0], pos[1], pos[2], yaw, pitch);
+    player_teleport(&g->player, &g->cam->cam, pos, yaw, pitch);
 }
 
 // --- Демо-сцена (клавиша Q) ----------------------------------------------------
@@ -406,11 +398,9 @@ static int scene_build(Game *g, const WorldTextures *wt)
     cvar_set("fov", g->cam->fov_deg);
     console_autoload();
 
-    g->spawn_pos[0] = g->cam->cam.pos[0];
-    g->spawn_pos[1] = g->cam->cam.pos[1];
-    g->spawn_pos[2] = g->cam->cam.pos[2];
-    g->spawn_yaw = g->cam->cam.yaw;
-    g->spawn_pitch = g->cam->cam.pitch;
+        // Спавн: стартовая точка/взгляд игрока (для «Новой игры»)
+    player_set_spawn(&g->player, g->cam->cam.pos, g->cam->cam.yaw,
+                     g->cam->cam.pitch);
 
     // Узлы сцены получают единый рендер-контекст (renderer.c) вместо cam/sun
     const RendererContext *rc = renderer_context();
@@ -613,6 +603,7 @@ void game_unload_world(Game *g)
     audio_stop_map();            // фаза 4: звук карты
     scene_teardown(g);           // фаза 2: сцена
     world_unload_geometry(g);    // фаза 1: данные карты
+    material_clear_all();        // материалы карты не перетекают в следующую
     SDL_Log("World unloaded");
 }
 

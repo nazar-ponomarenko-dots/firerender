@@ -3,7 +3,7 @@
 // ----------------------------------------------------------------------------
 //  Вынесено из main.c (строки 215–660): тумблеры HUD/карты/теней/тумана,
 //  демо, пауза, выбор карты, save/load/setpos, сущности, скриншот, звук.
-//  Регистрация (console_add_command) осталась в main.c.
+//  Регистрация всех статических команд — в ЕДИНОМ реестре (cmdreg.c).
 // ============================================================================
 #include "commands.h"
 
@@ -12,10 +12,16 @@
 #include "camera.h"
 #include "console.h"
 #include "cvars.h"
+#include "fx.h"
 #include "entity.h"
 #include "game.h"
 #include "gl_loader.h"
+#include "glb.h"
+#include "mapdata.h"
+#include "material.h"
+#include "mesh.h"
 #include "png.h"
+#include "renderer.h"
 #include "selection.h"
 #include "shader.h"
 #include "world.h"
@@ -129,10 +135,13 @@ void cmd_map_select(const char *args)
             return;
         }
         game_demo_stop(g);
-        if (g->pending_spawn) {          // load: телепорт в сохранённую точку
-            game_apply_spawn(g, g->save_pos, g->save_yaw, g->save_pitch);
-            g->pending_spawn = 0;
+        bool was_load = g->player.pending_spawn != 0;
+        if (g->player.pending_spawn) { // load: телепорт в сохранённую точку
+            game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
+                             g->player.save_pitch);
+            g->player.pending_spawn = 0;
         }
+        if (was_load) commands_apply_saved_world_state(); // восстановить мир при load
         app_set_state(APP_PLAY);
         SDL_Log("Map loaded: %s", g->map_name);
     } else {
@@ -329,28 +338,80 @@ void cmd_reload_shaders(const char *args)
     console_print("reload_shaders: %d", n);
 }
 
-// --- Save/Load (F5/F9): позиция игрока + карта в save.cfg ------------------------
+// --- Save/Load (F5/F9): позиция игрока + карта + состояние мира -------------
+// Помимо позиции сохраняет, какие триггеры уже сработали и какие use-объекты
+// использованы, чтобы при загрузке мир «продолжался», а не сбрасывался.
+#define SAVE_MAX_TRIGGER 64
+#define SAVE_MAX_OBJUSED 128
+static int s_save_triggers[SAVE_MAX_TRIGGER];    // trigger: 0/1
+static int s_save_objects_used_n = 0;            // объекты: имя уже использован
+static char s_save_objects_used[SAVE_MAX_OBJUSED][64];
+
 void cmd_save(const char *args)
 {
     (void)args;
     Game *g = game_instance();
     if (!g->cam) { console_print("save: мир не загружен"); return; }
-    g->save_pos[0] = g->cam->cam.pos[0];
-    g->save_pos[1] = g->cam->cam.pos[1];
-    g->save_pos[2] = g->cam->cam.pos[2];
-    g->save_yaw = g->cam->cam.yaw;
-    g->save_pitch = g->cam->cam.pitch;
-    snprintf(g->save_map, sizeof g->save_map, "%s", g->map_name);
+    player_save(&g->player, &g->cam->cam, g->map_name);
     FILE *f = fopen("save.cfg", "w");
     if (!f) { console_print("save: не могу записать save.cfg"); return; }
-    fprintf(f, "map_name %s\n", g->save_map);
+    fprintf(f, "map_name %s\n", g->player.save_map);
     fprintf(f, "setpos %.2f %.2f %.2f %.4f %.4f\n",
-            g->save_pos[0], g->save_pos[1], g->save_pos[2], g->save_yaw, g->save_pitch);
+            g->player.save_pos[0], g->player.save_pos[1], g->player.save_pos[2],
+            g->player.save_yaw, g->player.save_pitch);
+    // Состояние мира: сработавшие триггеры + использованные use-объекты
+    int tn = mapdata_trigger_count();
+    if (tn > SAVE_MAX_TRIGGER) tn = SAVE_MAX_TRIGGER;
+    for (int i = 0; i < tn; i++)
+        fprintf(f, "trigger_fired %d %d\n", i, mapdata_trigger_fired(i));
+    for (int i = 0; i < mapdata_object_count(); i++) {
+        const MapObject *o = mapdata_object(i);
+        if (o && o->use.set && o->use.used)
+            fprintf(f, "object_used %s\n", o->name);
+    }
     fclose(f);
-    console_print("save: %s (%.0f,%.0f,%.0f)", g->save_map,
-                  g->save_pos[0], g->save_pos[1], g->save_pos[2]);
+    console_print("save: %s (%.0f,%.0f,%.0f)", g->player.save_map,
+                  g->player.save_pos[0], g->player.save_pos[1],
+                  g->player.save_pos[2]);
 }
 
+// Применяет сохранённое состояние мира к текущей карте (если совпадает).
+void commands_apply_saved_world_state(void)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    if (!g->world_loaded || !g->map_name[0]) return;
+    // только если сохранение относится к текущей карте
+    if (strcmp(g->player.save_map, g->map_name) != 0) return;
+    for (int i = 0; i < SAVE_MAX_TRIGGER; i++)
+        mapdata_trigger_set_fired(i, s_save_triggers[i]);
+    for (int i = 0; i < s_save_objects_used_n; i++)
+        mapdata_object_set_used(s_save_objects_used[i], 1);
+}
+
+// --- Эффекты на точке попадения взгляда (raycast) -------------------------------
+// m — искры (add), comma — дым (alpha), period — кровь (bounce)
+static void cmd_fx_raycast(const char *args, const char *preset, int count)
+{
+    (void)args;
+    Game *g = game_instance();
+    if (!g || !g->cam || !g->world_loaded) {
+        console_print("fx: мир не загружен");
+        return;
+    }
+    float x, y, z;
+    if (!camera_raycast_terrain(&g->cam->cam, &g->world, 50.0f, &x, &y, &z)) {
+        console_print("fx: луч не попал в рельеф");
+        return;
+    }
+    fx_burst(preset, x, y, z, count);
+}
+
+void cmd_fx_sparks(const char *args)  { cmd_fx_raycast(args, "sparks", 30); }
+void cmd_fx_smoke(const char *args)   { cmd_fx_raycast(args, "smoke", 16); }
+void cmd_fx_blood(const char *args)   { cmd_fx_raycast(args, "blood", 24); }
+
+// --- Save/Load (F5/F9) -----------------------------------------------------------
 void cmd_load(const char *args)
 {
     (void)args;
@@ -359,30 +420,47 @@ void cmd_load(const char *args)
     if (!f) { console_print("load: нет save.cfg (F5 — сохранить)"); return; }
     char line[256], map[64] = "";
     float x = 0, y = 0, z = 0, ya = 0, pi = 0;
+    // Сброс буфера состояния мира
+    for (int i = 0; i < SAVE_MAX_TRIGGER; i++) s_save_triggers[i] = 0;
+    s_save_objects_used_n = 0;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "map_name %63s", map) == 1) continue;
         if (sscanf(line, "setpos %f %f %f %f %f", &x, &y, &z, &ya, &pi) >= 3)
-            break;
+            continue;
+        int ti = -1, tv = 0;
+        if (sscanf(line, "trigger_fired %d %d", &ti, &tv) == 2) {
+            if (ti >= 0 && ti < SAVE_MAX_TRIGGER) s_save_triggers[ti] = tv;
+            continue;
+        }
+        char name[64] = "";
+        if (sscanf(line, "object_used %63s", name) == 1) {
+            if (name[0] && s_save_objects_used_n < SAVE_MAX_OBJUSED) {
+                snprintf(s_save_objects_used[s_save_objects_used_n], 64, "%s", name);
+                s_save_objects_used_n++;
+            }
+            continue;
+        }
     }
     fclose(f);
     if (!map[0]) { console_print("load: save.cfg повреждён"); return; }
-    g->save_pos[0] = x; g->save_pos[1] = y; g->save_pos[2] = z;
-    g->save_yaw = ya; g->save_pitch = pi;
-    snprintf(g->save_map, sizeof g->save_map, "%s", map);
-    if (g->world_loaded && strcmp(g->save_map, g->map_name) == 0) {
-        game_apply_spawn(g, g->save_pos, g->save_yaw, g->save_pitch);
+    player_load(&g->player, x, y, z, ya, pi, map);
+    if (g->world_loaded && strcmp(g->player.save_map, g->map_name) == 0) {
+        game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
+                         g->player.save_pitch);
+        commands_apply_saved_world_state();   // восстановить триггеры/use
         console_print("load: загружено (%.0f,%.0f,%.0f)", x, y, z);
         return;
     }
-    // Другая карта (или мир ещё не загружен): загрузить и телепортироваться
-    g->pending_spawn = 1;
+    // Другая карта (или мир ещё не загружен): загрузить и телепортироваться.
+    // Состояние применится автоматически в game_load_world.
+    g->player.pending_spawn = 1;
     if (g->world_loaded) {
-        cmd_map_select(g->save_map);
+        cmd_map_select(g->player.save_map);
     } else {
-        snprintf(g->map_name, sizeof g->map_name, "%s", g->save_map);
+        snprintf(g->map_name, sizeof g->map_name, "%s", g->player.save_map);
         SDL_Log("Map selected: %s (из save)", g->map_name);
     }
-    console_print("load: карта %s, телепорт при загрузке", g->save_map);
+    console_print("load: карта %s, телепорт при загрузке", g->player.save_map);
 }
 
 // Телепорт игрока: setpos x y z [yaw] [pitch]
@@ -400,4 +478,57 @@ void cmd_setpos(const char *args)
     if (n < 5) pi = g->cam->cam.pitch;
     float p[3] = { x, y, z };
     game_apply_spawn(g, p, ya, pi);
+}
+
+// Поставить статичный меш (.obj): mesh <путь> [x y z] [scale] [tex]
+void cmd_mesh(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->root) { console_print("mesh: мир не загружен"); return; }
+    char path[256] = "", tex[256] = "";
+    float x = 0, y = 0, z = 0, scale = 1.0f;
+    int n = sscanf(args, "%255s %f %f %f %f %255s", path, &x, &y, &z, &scale, tex);
+    g = game_instance();
+    if (n < 1) { console_print("usage: mesh <obj> [x y z] [scale] [tex]"); return; }
+    if (!g || !g->root) return;
+    float pos[3] = { x, y, z };
+    SceneNode *nd = mesh_make_node(path, pos, scale,
+                                   (n >= 6 && tex[0]) ? tex : NULL,
+                                   renderer_context());
+    if (!nd) { console_print("mesh: не удалось загрузить %s", path); return; }
+    node_add(g->root, nd);
+    console_print("mesh: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
+}
+
+// Поставить бинарный glTF (.glb): glb <путь> [x y z] [scale]
+void cmd_glb(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->root) { console_print("glb: мир не загружен"); return; }
+    char path[256] = "";
+    float x = 0, y = 0, z = 0, scale = 1.0f;
+    int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
+    if (n < 1) { console_print("usage: glb <glb> [x y z] [scale]"); return; }
+    float pos[3] = { x, y, z };
+    SceneNode *nd = glb_make_node(path, pos, scale, renderer_context());
+    if (!nd) { console_print("glb: не удалось загрузить %s", path); return; }
+    node_add(g->root, nd);
+    console_print("glb: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
+}
+
+// Список зарегистрированных материалов по имени (matlist).
+void cmd_matlist(const char *args)
+{
+    (void)args;
+    if (material_count() == 0) {
+        SDL_Log("matlist: материалов не зарегистрировано");
+        return;
+    }
+    for (int i = 0; i < material_count(); i++) {
+        const Material *m = material_find(material_name(i));
+        SDL_Log("material %-24s tint=(%.2f,%.2f,%.2f) alpha=%.2f blend=%d tile=(%.2f,%.2f)",
+                material_name(i),
+                m->tint[0], m->tint[1], m->tint[2], m->alpha, m->blend,
+                m->tile[0], m->tile[1]);
+    }
 }

@@ -38,12 +38,25 @@ void cmd_ent_list(const char *args);
 void cmd_screenshot(const char *args);
 void cmd_snd_test(const char *args);
 
+// Применяет сохранённое состояние мира (сработавшие триггеры, use-объекты)
+// после загрузки карты. Авто-вызов из game_load_world и cmd_load.
+void commands_apply_saved_world_state(void);
+
 // Save/Load (F5/F9): позиция игрока + карта в save.cfg
 void cmd_save(const char *args);
 void cmd_load(const char *args);
 
 // Телепорт игрока: setpos x y z [yaw] [pitch]
 void cmd_setpos(const char *args);
+void cmd_mesh(const char *args);
+// Поставить бинарный glTF (.glb): glb <путь> [x y z] [scale]
+void cmd_glb(const char *args);
+void cmd_matlist(const char *args);
+
+// Эффекты (fx) — частицы на точке попадения луча взгляда в рельеф
+void cmd_fx_sparks(const char *args);
+void cmd_fx_smoke(const char *args);
+void cmd_fx_blood(const char *args);
 
 // Hot-reload шейдеров: перекомпилирует изменённые (по mtime) файлы.
 void cmd_reload_shaders(const char *args);

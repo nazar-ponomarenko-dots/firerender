@@ -66,6 +66,9 @@ static MapTerrain s_terrain = {
     .band_t0 = 0.16f, .band_t1 = 0.40f,
     .band_h0 = -50.0f, .band_h1 = 200.0f,
     .blur = 2,
+    .blur_radius = 4,
+    .erosion = 40,
+    .erosion_slope = 35.0f,
     .ground_tex = "img/ground.png",
     .tex_scale = 6.4f,
     .field_color = { 0.68f, 0.57f, 0.33f },
@@ -502,6 +505,12 @@ int mapdata_load(const char *path)
         s_terrain.band_h1 = (float)json_num(json_find(tr, "band_h1"),
                                             s_terrain.band_h1);
         s_terrain.blur = (int)json_num(json_find(tr, "blur"), s_terrain.blur);
+        s_terrain.blur_radius = (int)json_num(json_find(tr, "blur_radius"),
+                                              s_terrain.blur_radius);
+        s_terrain.erosion = (int)json_num(json_find(tr, "erosion"),
+                                          s_terrain.erosion);
+        s_terrain.erosion_slope = (float)json_num(json_find(tr, "erosion_slope"),
+                                                  s_terrain.erosion_slope);
         const char *gtex = json_str(json_find(tr, "ground_tex"), "");
         if (gtex[0]) snprintf(s_terrain.ground_tex, sizeof s_terrain.ground_tex,
                               "%s", gtex);
@@ -777,6 +786,28 @@ int mapdata_trigger_count(void)
 const MapTrigger *mapdata_trigger(int i)
 {
     return (i >= 0 && i < s_trigger_count) ? &s_triggers[i] : NULL;
+}
+
+// --- Состояние мира для save/load -------------------------------------------
+int mapdata_trigger_fired(int i)
+{
+    return (i >= 0 && i < s_trigger_count) ? s_triggers[i].fired : 0;
+}
+
+void mapdata_trigger_set_fired(int i, int v)
+{
+    if (i >= 0 && i < s_trigger_count) s_triggers[i].fired = v;
+}
+
+void mapdata_object_set_used(const char *name, int v)
+{
+    if (!name) return;
+    for (int i = 0; i < s_object_count; i++) {
+        if (strcmp(s_objects[i].name, name) == 0) {
+            s_objects[i].use.used = v;
+            return;
+        }
+    }
 }
 
 int mapdata_fauna_count(void)

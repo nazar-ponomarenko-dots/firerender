@@ -206,13 +206,13 @@ static void fx_pos_args(const char *args, float *out)
     }
 }
 
-static void cmd_fx_list(const char *args)
+void cmd_fx_list(const char *args)
 {
     (void)args;
     fx_print_list();
 }
 
-static void cmd_fx(const char *args)
+void cmd_fx(const char *args)
 {
     if (!args || !args[0]) { fx_print_list(); return; }
     float pos[3];
@@ -227,7 +227,7 @@ static void cmd_fx(const char *args)
     }
 }
 
-static void cmd_fx_burst(const char *args)
+void cmd_fx_burst(const char *args)
 {
     char name[FX_NAME_LEN];
     float x = 0, y = 0, z = 0;
@@ -240,7 +240,7 @@ static void cmd_fx_burst(const char *args)
     fx_burst(name, x, y, z, count);
 }
 
-static void cmd_fx_emit(const char *args)
+void cmd_fx_emit(const char *args)
 {
     char name[FX_NAME_LEN];
     float x = 0, y = 0, z = 0, rate = 10.0f, life = 0.0f;
@@ -254,7 +254,7 @@ static void cmd_fx_emit(const char *args)
     console_print("fx_emit: %s rate=%g", name, rate);
 }
 
-static void cmd_fx_stop(const char *args)
+void cmd_fx_stop(const char *args)
 {
     if (!args || !args[0]) { fx_emitter_stop_all(); console_print("fx: все эмиттеры остановлены"); return; }
     char name[FX_NAME_LEN];
@@ -264,7 +264,7 @@ static void cmd_fx_stop(const char *args)
     }
 }
 
-static void cmd_fx_clear(const char *args)
+void cmd_fx_clear(const char *args)
 {
     (void)args;
     fx_emitter_stop_all();
@@ -273,7 +273,7 @@ static void cmd_fx_clear(const char *args)
 }
 
 // weather <имя> [rate] — дождь/снег/... следует за игроком; weather off — стоп
-static void cmd_weather(const char *args)
+void cmd_weather(const char *args)
 {
     if (!args || !args[0]) {
         console_print("usage: weather <пресет> [rate] | weather off");
@@ -298,7 +298,7 @@ static void cmd_weather(const char *args)
 }
 
 // --- Встроенные пресеты ---------------------------------------------------------
-static void fx_register_builtin(void)
+void fx_register_builtin(void)
 {
     // Кровь: красные капли, отскок, короткая жизнь
     {
@@ -403,11 +403,4 @@ static void fx_register_builtin(void)
 void fx_init_console(void)
 {
     fx_register_builtin();
-    console_add_command("fx",         "эффект: fx <имя> [x y z]", cmd_fx);
-    console_add_command("fx_burst",   "fx_burst <имя> <x> <y> <z> [count]", cmd_fx_burst);
-    console_add_command("fx_emit",    "fx_emit <имя> <x> <y> <z> <rate> [life]", cmd_fx_emit);
-    console_add_command("fx_stop",    "fx_stop [имя] — остановить эмиттер(ы)", cmd_fx_stop);
-    console_add_command("fx_clear",   "fx_clear — все эмиттеры + пул", cmd_fx_clear);
-    console_add_command("fx_list",    "fx_list — список пресетов", cmd_fx_list);
-    console_add_command("weather",    "weather <пресет> [rate] | off — погода за игроком", cmd_weather);
 }

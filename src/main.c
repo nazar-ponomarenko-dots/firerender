@@ -43,11 +43,13 @@
 #include "particles.h"
 #include "fx.h"
 #include "actions.h"
+#include "cmdreg.h"
 #include "shadow.h"          // FR_TEST: shadow_toggle, g_shadow_*
 #include "vegetation.h"      // FR_TEST: veg_* тумблеры
 #include "voxfog.h"          // FR_TEST: voxfog_set
 #include "terrain.h"         // sync_cvars: terrain_shadows_bake
 #include "sun.h"             // (SunParams*)g->sun_node->params
+#include "material.h"        // материал: реестр по имени
 
 #include <stdio.h>           // printf (FPS)
 #include <stdlib.h>          // getenv
@@ -101,41 +103,19 @@ static void sync_cvars(Game *g)
 }
 
 // --- Фаза APP_BOOT: инициализация систем (выполняется один раз) ---------------
-// Поднимает системы в любом порядке регистраций (console_add_command работает
-// и до console_init — см. console.c), грузит config.cfg и переводит
-// состояние в APP_MENU (или APP_PLAY при FR_TEST).
+// Поднимает системы в любом порядке (console_add_command работает и до
+// console_init — см. console.c), регистрирует ВСЕ статические команды через
+// ЕДИНЫЙ реестр cmdreg.c, грузит config.cfg и переводит состояние в APP_MENU
+// (или APP_PLAY при FR_TEST).
 static void boot_init(Game *g)
 {
     resources_init();            // кеш ресурсов — до любых загрузок
     console_init();              // cvar'ы, команды, вывод SDL_Log в консоль
     audio_init();                // звук: устройство + каналы
     binds_init();                // дефолтные привязки клавиш (HL-стиль)
-    actions_register_commands(); // +forward/-forward и прочие +/-команды
-    fx_init_console();           // пресеты эффектов + команды fx_*
-    // Команды-действия (см. commands.c) — доступны СРАЗУ, в т.ч. в меню
-    console_add_command("toggle_map", "показать/скрыть мини-карту", cmd_toggle_map);
-    console_add_command("toggle_hud", "показать/скрыть HUD", cmd_toggle_hud);
-    console_add_command("toggle_shadows", "вкл/выкл тени", cmd_toggle_shadows);
-    console_add_command("toggle_fog", "вкл/выкл объёмный туман", cmd_toggle_fog);
-    console_add_command("demo", "демо-сцена (автополёт, замер FPS)", cmd_demo);
-    console_add_command("pause", "пауза / назад в меню", cmd_pause);
-    console_add_command("map", "map <имя> — выбрать и запустить карту", cmd_map_select);
-    console_add_command("maps", "список карт", cmd_maps_list);
-    console_add_command("noclip", "полёт сквозь мир (чит)", cmd_noclip);
-    console_add_command("restart", "перезапустить текущую карту", cmd_restart);
-    console_add_command("changelevel", "changelevel <карта>", cmd_changelevel);
-    console_add_command("r_drawhud", "r_drawhud [0/1] — HUD", cmd_r_drawhud);
-    console_add_command("mat_wireframe", "mat_wireframe [0/1]", cmd_mat_wireframe);
-    console_add_command("thirdperson", "вид от третьего лица", cmd_thirdperson);
-    console_add_command("firstperson", "вид от первого лица", cmd_firstperson);
-    console_add_command("ent_create", "ent_create <класс> [x y z]", cmd_ent_create);
-    console_add_command("ent_list", "список сущностей", cmd_ent_list);
-    console_add_command("snd_test", "проиграть все звуки подряд", cmd_snd_test);
-    console_add_command("screenshot", "сохранить кадр в PNG (F12)", cmd_screenshot);
-    console_add_command("save", "сохранить позицию игрока (F5)", cmd_save);
-    console_add_command("load", "загрузить сохранение (F9)", cmd_load);
-    console_add_command("setpos", "setpos x y z [yaw] [pitch] — телепорт", cmd_setpos);
-    console_add_command("reload_shaders", "перекомпилировать изменённые шейдеры", cmd_reload_shaders);
+    fx_init_console();           // пресеты эффектов (команды fx_* — у cmdreg)
+    // Все статические команды — из одного центрального реестра (cmdreg.c).
+    cmdreg_register_all();
     hud_shared_init();           // шрифт/атласы + рендер текста для меню и консоли
     app_init();                  // фон img/menu.png
     console_autoload();          // config.cfg: cvar'ы и бинды пользователя
@@ -180,18 +160,14 @@ static int fr_test_apply(Game *g)
         decal_place(cp[0], cp[2], 3.0f, 3.0f, 0.0f, "img/particle.png",
                     0.15f, 0.4f, 0.8f, 0.85f);
     }
-    // a/n — эмиттеры дождя/снега вокруг игрока; y — взрыв
+    // a/n — погода (дождь/снег следует за игроком); y — взрыв
     if (strchr(fr_test, 'a')) {
-        const float *cp = g->cam->cam.pos;
-        float pos[3] = { cp[0], cp[1] + 12.0f, cp[2] };
         float ext[3] = { 20.0f, 10.0f, 20.0f };
-        fx_emitter_start("rain", pos, ext, 150.0f, 0.0f);
+        fx_weather_start("rain", 12.0f, ext, 150.0f, 0.0f);
     }
     if (strchr(fr_test, 'n')) {
-        const float *cp = g->cam->cam.pos;
-        float pos[3] = { cp[0], cp[1] + 12.0f, cp[2] };
         float ext[3] = { 20.0f, 8.0f, 20.0f };
-        fx_emitter_start("snow", pos, ext, 40.0f, 0.0f);
+        fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);
     }
     if (strchr(fr_test, 'y')) {
         const float *cp = g->cam->cam.pos;
@@ -396,17 +372,18 @@ int main(int argc, char *argv[])
                 if (act == APP_ACT_START) {
                     // Новая игра: камера на спавн, сброс демо.
                     // (если это load из save — телепорт вместо спавна)
-                    if (game.pending_spawn) {
-                        game_apply_spawn(&game, game.save_pos, game.save_yaw,
-                                         game.save_pitch);
-                        game.pending_spawn = 0;
+                    if (game.player.pending_spawn) {
+                        game_apply_spawn(&game, game.player.save_pos,
+                                         game.player.save_yaw,
+                                         game.player.save_pitch);
+                        game.player.pending_spawn = 0;
                         console_print("load: загружено");
                     } else {
-                        game.cam->cam.pos[0] = game.spawn_pos[0];
-                        game.cam->cam.pos[1] = game.spawn_pos[1];
-                        game.cam->cam.pos[2] = game.spawn_pos[2];
-                        game.cam->cam.yaw = game.spawn_yaw;
-                        game.cam->cam.pitch = game.spawn_pitch;
+                        game.cam->cam.pos[0] = game.player.spawn_pos[0];
+                        game.cam->cam.pos[1] = game.player.spawn_pos[1];
+                        game.cam->cam.pos[2] = game.player.spawn_pos[2];
+                        game.cam->cam.yaw = game.player.spawn_yaw;
+                        game.cam->cam.pitch = game.player.spawn_pitch;
                         game.cam->cam.vy = 0;
                         game.cam->cam.vx = game.cam->cam.vz = 0;
                         game_demo_stop(&game);
@@ -423,6 +400,7 @@ int main(int argc, char *argv[])
             }
         }
         commands_shot_take(renderer_vw(), renderer_vh());     // скриншот (F12)
+        console_drain();                                      // отложенные wait-команды
         console_render(renderer_vw(), renderer_vh());         // консоль — поверх всего (`)
 
         // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland)

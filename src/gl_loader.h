@@ -78,6 +78,7 @@
     F(void,             glReadBuffer,            (GLenum))                        \
     F(void,             glDeleteFramebuffers,    (GLsizei, const GLuint *))       \
     F(void,             glPolygonMode,           (GLenum, GLenum))                \
+    F(void,             glPolygonOffset,         (GLfloat, GLfloat))              \
     F(void,             glVertexAttribDivisor,   (GLuint, GLuint))                 \
     F(void,             glDrawElements,          (GLenum, GLsizei, GLenum, const void *)) \
     F(void,             glDrawElementsInstanced, (GLenum, GLsizei, GLenum, const void *, GLsizei)) \
@@ -99,6 +100,7 @@
     F(void,             glTexSubImage3D,         (GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
     F(void,             glPixelStorei,           (GLenum, GLint))                 \
     F(GLint,            glGetUniformLocation,    (GLuint, const GLchar *))        \
+    F(GLint,            glGetAttribLocation,     (GLuint, const GLchar *))        \
     F(void,             glUniform1i,             (GLint, GLint))                  \
     F(void,             glUniform1f,             (GLint, GLfloat))                \
     F(void,             glUniform2f,             (GLint, GLfloat, GLfloat))       \
@@ -167,6 +169,7 @@ GL_FUNCS(F)
 #define glReadBuffer              p_glReadBuffer
 #define glDeleteFramebuffers      p_glDeleteFramebuffers
 #define glPolygonMode             p_glPolygonMode
+#define glPolygonOffset           p_glPolygonOffset
 #define glVertexAttribDivisor     p_glVertexAttribDivisor
 #define glDrawElements            fr_glDrawElements
 #define glDrawElementsInstanced   fr_glDrawElementsInstanced
@@ -188,6 +191,7 @@ GL_FUNCS(F)
 #define glTexSubImage3D           p_glTexSubImage3D
 #define glPixelStorei             p_glPixelStorei
 #define glGetUniformLocation      p_glGetUniformLocation
+#define glGetAttribLocation       p_glGetAttribLocation
 #define glUniform1i               p_glUniform1i
 #define glUniform1f               p_glUniform1f
 #define glUniform2f               p_glUniform2f

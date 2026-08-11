@@ -140,6 +140,39 @@ void camera_update(Camera *cam, const WorldState *w,
         bool want_move = wlen > 1e-4f;
         if (want_move) { wishx /= wlen; wishz /= wlen; }
 
+        // Твёрдый рельеф (sv_maxslope): склон круче maxкрутизны — как стена.
+        // Скользим вдоль контура равной высоты вместо лезния вверх по круче склону.
+        if (want_move && !cam->fly) {
+            float max_slope = cvar_get("sv_maxslope");
+            if (max_slope > 0.0f && max_slope < 90.0f) {
+                float e = 0.75f;   // радиус сэмпла градиента, м
+                float hx = sample_height(w, cam->pos[0] + e, cam->pos[2])
+                         - sample_height(w, cam->pos[0] - e, cam->pos[2]);
+                float hz = sample_height(w, cam->pos[0], cam->pos[2] + e)
+                         - sample_height(w, cam->pos[0], cam->pos[2] - e);
+                float glen = sqrtf(hx*hx + hz*hz);          // |градиент высоты|
+                float slope_sin = glen / sqrtf(glen*glen + 4.0f*e*e); // sin угла наклона
+                float step_up = wishx*hx + wishz*hz;        // идём ли вверх по склону
+                if (step_up > 0.0f && slope_sin > sinf(max_slope * (float)M_PI / 180.0f)) {
+                    // движение вверх по слишком крутому склону: спроецируем
+                    // вдоль контура равной высоты (перпендикулярно градиенту)
+                    float cx = -hz, cz = hx;                // вдоль контура
+                    float clen = sqrtf(cx*cx + cz*cz);
+                    if (clen > 1e-5f) {
+                        cx /= clen; cz /= clen;
+                        float along = wishx*cx + wishz*cz;
+                        wishx = cx * along;
+                        wishz = cz * along;
+                        wlen = fabsf(along);
+                    } else {
+                        wishx = wishz = 0.0f;
+                        wlen = 0.0f;
+                    }
+                    want_move = wlen > 1e-4f;
+                }
+            }
+        }
+
         // ускорение к желаемой скорости (в воздухе — слабее)
         if (want_move) {
             float dot = cam->vx*wishx + cam->vz*wishz;
@@ -241,6 +274,40 @@ void camera_update(Camera *cam, const WorldState *w,
     s_player_pos[0] = cam->pos[0];
     s_player_pos[1] = cam->pos[1];
     s_player_pos[2] = cam->pos[2];
+}
+
+// --- Raycast: луч из камеры вниз до рельефа --------------------------------
+// Возвращает 1 если луч попал в рельеф, 0 если вышел за мир.
+// out_x, out_z — точка попадания; out_y — высота рельефа в точке.
+int camera_raycast_terrain(const Camera *cam, const WorldState *w,
+                           float max_dist, float *out_x, float *out_y, float *out_z)
+{
+    if (!cam || !w) return 0;
+    float fwd[3];
+    camera_dirs(cam, fwd, NULL);
+    float x = cam->pos[0];
+    float y = cam->pos[1];
+    float z = cam->pos[2];
+    float step = 0.2f;   // шаг марша (м)
+    float dist = 0.0f;
+    while (dist < max_dist) {
+        x += fwd[0] * step;
+        y += fwd[1] * step;
+        z += fwd[2] * step;
+        dist += step;
+        // Проверка выхода за мир
+        if (x < 1.0f || x > w->world_w - 1.0f ||
+            z < 1.0f || z > w->world_d - 1.0f)
+            return 0;
+        float h = sample_height(w, x, z);
+        if (y <= h + 0.1f) {
+            if (out_x) *out_x = x;
+            if (out_y) *out_y = h;
+            if (out_z) *out_z = z;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
