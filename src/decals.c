@@ -1,11 +1,9 @@
 // ============================================================================
 //  decals.c — декали на рельефе
 // ----------------------------------------------------------------------------
-//  Каждая декаль — квад с текстурой, лежащий на рельефе: 4 угла сдвигаются
-//  по высоте (sample_height) — имитация проекции на поверхность без
-//  проективной текстуры. Смещение на 0.12 м вверх — без z-fighting с
-//  рельефом. Альфа-бленд (GL_SRC_ALPHA). Однa текстура на декаль, кеш
-//  ресурсов (загрузка при первом использовании пути).
+//  Каждая декаль — квад, проецируемый на рельеф: 9 сэмплов высоты (3x3)
+//  для плавного следования за склонами. Полигон-оффсет вместо ручного
+//  смещения — без z-fighting и парения.
 // ============================================================================
 #include "decals.h"
 
@@ -24,6 +22,7 @@ typedef struct {
     float cx, cz;          // центр
     float hw, hd;          // полуширина/полувысота
     float rot;             // поворот вокруг Y
+    float offset;          // смещение от рельефа (м)
     GLuint tex;
     float r, g, b, a;
 } Decal;
@@ -35,6 +34,7 @@ typedef struct {
     GLint u_viewproj, u_tex, u_color, u_alpha;
     Decal d[DECALS_MAX];
     int n;
+    int head;        // следующий слот кольца (при n == DECALS_MAX)
 } DecalsParams;
 
 static DecalsParams *s_d = NULL;
@@ -96,29 +96,58 @@ static void decals_node_render(SceneNode *n, float dt)
     decals_draw(p->rc);
 }
 
-// Добавляет декаль (если пул полон — заменяет самую старую).
-void decal_place(float x, float z, float hw, float hd, float rot,
+// --- Внутренний хелпер: сэмпл 3x3 для плавного склона -----------------------
+static float decal_sample_terrain(const WorldState *w, float x, float z,
+                                  float hw, float hd, float u, float v)
+{
+    // 3x3 сетка сэмплов (u,v в 0..1): центр + 4 угла + 4 середины сторон
+    const float du[3] = { -1.0f, 0.0f, 1.0f };
+    const float dv[3] = { -1.0f, 0.0f, 1.0f };
+    float sum = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            float sx = x + (du[i] * hw);
+            float sz = z + (dv[j] * hd);
+            sum += sample_height(w, sx, sz);
+        }
+    }
+    return sum / 9.0f;
+}
+
+// --- Публичный API -----------------------------------------------------------
+void decal_place(float x, float z, float half_w, float half_d, float rot,
                  const char *tex_path, float r, float g, float b, float alpha)
+{
+    decal_place_ex(x, z, half_w, half_d, rot, tex_path, r, g, b, alpha, 0.03f);
+}
+
+void decal_place_ex(float x, float z, float half_w, float half_d, float rot,
+                    const char *tex_path, float r, float g, float b,
+                    float alpha, float offset)
 {
     if (!s_d) return;
     DecalsParams *p = s_d;
     int slot;
     if (p->n < DECALS_MAX) {
         slot = p->n++;
-        p->d[slot].tex = 0;   // новый слот: текстура ещё не взята
+        p->d[slot].tex = 0;
     } else {
-        slot = 0;   // кольцевой: первая — самая старая
-        if (p->d[slot].tex) resources_texture_release(p->d[slot].tex);
+        // Настоящее кольцо: раньше всегда переписывался slot 0 — самая
+        // старая декаль вытеснялась каждым новым штампением, остальные жили
+        // вечно (кольцо не работало).
+        slot = p->head;
+        p->head = (p->head + 1) % DECALS_MAX;
+        if (p->d[slot].tex) { resources_texture_release(p->d[slot].tex); p->d[slot].tex = 0; }
     }
     Decal *d = &p->d[slot];
     d->cx = x; d->cz = z;
-    d->hw = hw; d->hd = hd;
+    d->hw = half_w; d->hd = half_d;
     d->rot = rot;
+    d->offset = offset;
     d->r = r; d->g = g; d->b = b; d->a = alpha;
-    // Если файла нет — resources_texture подставит img/notfound.png
-    // (Source Engine style, виден в дебаге).
     d->tex = resources_texture(tex_path, 4, GL_CLAMP_TO_EDGE, 1);
 }
+
 void decals_clear(void)
 {
     if (!s_d) return;
@@ -127,6 +156,7 @@ void decals_clear(void)
     s_d->n = 0;
 }
 
+// --- Рендер: один draw per decal, polygon offset вместо смещения -----------
 void decals_draw(const RendererContext *rc)
 {
     if (!s_d || s_d->n == 0) return;
@@ -134,14 +164,16 @@ void decals_draw(const RendererContext *rc)
     DecalsParams *p = s_d;
 
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-1.0f, -1.0f);   // притягиваем к поверхности
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);          // декали не пишут глубину (друг на друге)
+    glDepthMask(GL_FALSE);           // декали друг на друге без глубины
     glDisable(GL_CULL_FACE);
     glUseProgram(p->prog);
     glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, rc->viewproj);
     glBindVertexArray(p->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, p->vbo);   // glBufferSubData в кадре
+    glBindBuffer(GL_ARRAY_BUFFER, p->vbo);
 
     for (int i = 0; i < p->n; i++) {
         const Decal *d = &p->d[i];
@@ -149,7 +181,8 @@ void decals_draw(const RendererContext *rc)
         glUniform1f(p->u_alpha, d->a);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, d->tex);
-        // Квад с поворотом и высотой углов по рельефу: 4 вершины
+
+        // Квад с поворотом и высотой по рельефу (3x3 сэмплирование)
         float ct = cosf(d->rot), st = sinf(d->rot);
         float off[4][2] = {
             { -d->hw, -d->hd }, {  d->hw, -d->hd },
@@ -159,7 +192,13 @@ void decals_draw(const RendererContext *rc)
         for (int k = 0; k < 4; k++) {
             tmp[k][0] = d->cx + off[k][0] * ct - off[k][1] * st;
             tmp[k][2] = d->cz + off[k][0] * st + off[k][1] * ct;
-            tmp[k][1] = sample_height(p->world, tmp[k][0], tmp[k][2]) + 0.12f;
+            // 3x3 сэмплирование для плавного склона
+            tmp[k][1] = decal_sample_terrain(p->world,
+                                             tmp[k][0], tmp[k][2],
+                                             d->hw, d->hd,
+                                             (k == 0 || k == 3) ? 0.0f : 1.0f,
+                                             (k < 2) ? 0.0f : 1.0f)
+                        + d->offset;
             tmp[k][3] = (k == 0 || k == 3) ? 0.0f : 1.0f;   // u
             tmp[k][4] = (k < 2) ? 0.0f : 1.0f;              // v
         }
@@ -167,6 +206,7 @@ void decals_draw(const RendererContext *rc)
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
     }
     glBindVertexArray(0);
+    glDisable(GL_POLYGON_OFFSET_FILL);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glUseProgram(0);
@@ -174,6 +214,7 @@ void decals_draw(const RendererContext *rc)
 
 void decals_cleanup(SceneNode *n)
 {
+    if (!n) return;
     DecalsParams *p = n->params;
     if (!p) return;
     if (s_d == p) s_d = NULL;

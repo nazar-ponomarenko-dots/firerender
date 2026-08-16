@@ -44,6 +44,14 @@ void renderer_teardown(void);
 // Каркасный режим (cvar r_wireframe, из main.c sync_cvars).
 void renderer_set_wireframe(int on);
 
+// Cubemap reflection texture (6 граней от позиции игрока, вода сэмплит
+// её по вектору отражения; обновляется по мере движения игрока).
+GLuint renderer_refl_cubemap(void);
+
+// Cubemap capture: отрендерить 6 граней в позиции pos и сохранить их
+// в cubemaps/*.png (размер size, лимит 512).
+void renderer_cubemap_capture_at(Game *g, const float *pos, int size);
+
 // --- Кадр -----------------------------------------------------------------------
 // Начало кадра: сброс профайлера, очистка сцены (в FBO bloom'а, если мир
 // загружен) цветом тумана.

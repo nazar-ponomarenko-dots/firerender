@@ -76,7 +76,7 @@ const char *prof_name(ProfSlot s)
 {
     static const char *names[PROF_N] = {
         "Sky", "Terrain", "Vegetation", "Objects", "Fauna", "Field",
-        "Selection", "Minimap", "HUD", "Shadows", "Fog", "Bloom"
+        "Selection", "Minimap", "HUD", "Shadows", "Fog", "Bloom", "SSR"
     };
     return (s >= 0 && s < PROF_N) ? names[s] : "?";
 }

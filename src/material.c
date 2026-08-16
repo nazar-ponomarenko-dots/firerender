@@ -3,7 +3,61 @@
 // ============================================================================
 #include "material.h"
 
+#include <stdio.h>
 #include <string.h>
+
+// --- Реестр материалов по имени --------------------------------------------------
+static struct { char name[32]; Material m; } s_mats[MATERIALS_MAX];
+static int s_mat_n = 0;
+
+static int mat_index(const char *name)
+{
+    if (!name) return -1;
+    for (int i = 0; i < s_mat_n; i++)
+        if (strcmp(s_mats[i].name, name) == 0) return i;
+    return -1;
+}
+
+void material_register(const char *name, const Material *m)
+{
+    if (!name || !name[0] || !m) return;
+    int i = mat_index(name);
+    if (i < 0) {
+        if (s_mat_n >= MATERIALS_MAX) return;
+        i = s_mat_n++;
+        snprintf(s_mats[i].name, sizeof s_mats[i].name, "%s", name);
+    }
+    s_mats[i].m = *m;
+}
+
+const Material *material_find(const char *name)
+{
+    int i = mat_index(name);
+    return i >= 0 ? &s_mats[i].m : NULL;
+}
+
+int material_get(const char *name, Material *out)
+{
+    material_defaults(out);
+    const Material *m = material_find(name);
+    if (m) { *out = *m; return 1; }
+    return 0;
+}
+
+int material_count(void)
+{
+    return s_mat_n;
+}
+
+const char *material_name(int i)
+{
+    return (i >= 0 && i < s_mat_n) ? s_mats[i].name : NULL;
+}
+
+void material_clear_all(void)
+{
+    s_mat_n = 0;
+}
 
 void material_defaults(Material *m)
 {

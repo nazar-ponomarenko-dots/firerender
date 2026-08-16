@@ -130,6 +130,9 @@ typedef struct {
     float band_t0, band_t1;         // полоса игровых высот (по яркости)
     float band_h0, band_h1;         // высоты полосы
     int blur;                       // сглаживание карты высот (проходы)
+    int blur_radius;                // радиус сглаживания, метры
+    int erosion;                    // проходы ограничения крутизны (0 = выкл)
+    float erosion_slope;            // макс. крутизна после эрозии, градусы
     char ground_tex[256];           // текстура земли (img/ground.png)
     float tex_scale;                // метр на тайл текстуры
     float field_color[3];           // тон почвы поля пшеницы
@@ -227,6 +230,42 @@ const MapSound3D *mapdata_sound(int i);
 #define MAP_MAX_TRIGGERS 64
 int mapdata_trigger_count(void);
 const MapTrigger *mapdata_trigger(int i);
+int mapdata_trigger_fired(int i);
+void mapdata_trigger_set_fired(int i, int v);
+void mapdata_object_set_used(const char *name, int v);
+
+// --- Вода: waters[] -----------------------------------------------------------
+// Четыре типа водоёмов. Каждый блок задаёт уровень воды (level), форму
+// (круг pos/radius для лужи/озера/моря или осевая линия points + width для
+// реки) и вид (цвет, прозрачность, волны, течение, пена у берега).
+typedef enum {
+    WATER_PUDDLE,   // лужа: маленькая, почти гладкая, быстро сходит
+    WATER_LAKE,     // озеро: спокойное, мягкая волна
+    WATER_RIVER,    // река: течение вдоль осевой линии (flow_speed)
+    WATER_SEA       // море: глобальный уровень воды, крупная волна
+} MapWaterType;
+
+#define MAP_MAX_WATERS        32   // потолок водоёмов из JSON
+#define MAP_WATER_MAX_POINTS  16   // максимум точек осевой линии реки
+
+typedef struct {
+    int type;              // MapWaterType
+    char name[64];         // имя водоёма (для поиска из кода)
+    float level;           // уровень поверхности (метры); у моря — глобальный
+    float center[2];       // центр круга [x, z] (лужа/озеро/море)
+    float radius;          // радиус круга, м (море: 0 = весь мир)
+    float width;           // ширина русла, м (река)
+    float points[MAP_WATER_MAX_POINTS][2]; // осевая линия реки [x, z]
+    int point_n;
+    float depth;           // глубина: просвет дна сквозь воду, м
+    float color[3];        // цвет воды (тон на глубине)
+    float alpha;           // базовая непрозрачность 0..1
+    float wave_amp;        // амплитуда волны, м
+    float wave_speed;      // скорость волны (множитель времени)
+    float flow[2];         // направление течения (река: авто из points по XZ)
+    float flow_speed;      // скорость течения, м/с (река сносит игрока)
+    float foam;            // сила пены у берега 0..1
+} MapWater;
 
 // --- Фауна: fauna[] -------------------------------------------------------------
 typedef enum {
@@ -253,6 +292,10 @@ void mapdata_info(MapInfo *i);
 // --- Звук карты: ambient/music. 1 — задан в JSON (играть петлёй). --------------
 int mapdata_ambient(MapSound *a);
 int mapdata_music(MapSound *m);
+
+// --- Вода: waters[] -------------------------------------------------------------
+int mapdata_water_count(void);
+const MapWater *mapdata_water(int i);
 
 // --- Команды карты: commands = [ "команда", ... ] -----------------------------
 // Выполняются через консоль при загрузке карты (после построения сцены),

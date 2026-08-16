@@ -69,9 +69,13 @@ engine.cmd("lua_fx", function()
     engine.log("[Lua] магия: fx_burst(magic)")
 end)
 
--- Команда lua_rain: engine.fx_emit("rain", ...) на 15 секунд
-engine.cmd("lua_rain", function()
-    local x, y, z = engine.camera()
-    engine.fx_emit("rain", x, y + 15, z, 200, 15)
-    engine.log("[Lua] дождь: fx_emit(rain) на 15 сек")
+-- Команда lua_rain: engine.fx_weather("rain") — дождь за игроком
+engine.cmd("lua_rain", function(args)
+    if args == "off" then
+        engine.fx_weather("off")
+        engine.log("[Lua] дождь выключен")
+    else
+        engine.fx_weather("rain", 200)
+        engine.log("[Lua] дождь: fx_weather(rain)")
+    end
 end)

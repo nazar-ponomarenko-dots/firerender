@@ -124,16 +124,22 @@ static const char *parse_string(void)
                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                     } else { free(buf); return NULL; }
                 }
-                // Кодовая точка -> UTF-8
+                // Кодовая точка -> UTF-8 (1/2/3/4 байта)
                 if (cp < 0x80) {
                     c = (unsigned char)cp;
                 } else if (cp < 0x800) {
                     if (len + 2 >= cap) { cap *= 2; buf = realloc(buf, cap); }
                     buf[len++] = (char)(0xC0 | (cp >> 6));
                     c = (unsigned char)(0x80 | (cp & 0x3F));
-                } else {
+                } else if (cp < 0x10000) {
                     if (len + 3 >= cap) { cap *= 2; buf = realloc(buf, cap); }
                     buf[len++] = (char)(0xE0 | (cp >> 12));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    c = (unsigned char)(0x80 | (cp & 0x3F));
+                } else {   // суррогатная пара: до 0x10FFFF — 4 байта
+                    if (len + 4 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    buf[len++] = (char)(0xF0 | (cp >> 18));
+                    buf[len++] = (char)(0x80 | ((cp >> 12) & 0x3F));
                     buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
                     c = (unsigned char)(0x80 | (cp & 0x3F));
                 }

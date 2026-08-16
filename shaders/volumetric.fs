@@ -32,6 +32,19 @@ uniform vec3 uFogColor;      // БАЗОВЫЙ цвет тумана (везде
 uniform vec3 uFogColorSun;   // тёплый цвет у солнца
 uniform float uGlare;        // ореол у самого солнца
 uniform float uRayStrength;  // контраст god rays (0 = нет, 2 = резкие)
+uniform float uWetness;      // мокрость 0..1 — в дождь туман от неба, не от солнца
+uniform vec3 uSkyColor;      // цвет неба (основной свет тумана)
+
+// Дымка над землёй (дождь): серая, ~0.5 м, с шумом. Карта высот (unit 10)
+// даёт точную высоту рельефа в каждой точке марша — слой лежит на склоне.
+// Шум дымки — img/noise.png (unit 12): живая неравномерность.
+uniform sampler2D uHeightmap;
+uniform sampler2D uNoise;
+uniform vec2 uWorldSize;
+uniform float uHeightMin, uHeightMax;
+uniform float uTime;
+uniform float uHaze;         // сила дымки (0 = нет), растёт с мокротой
+uniform float uHazeH;        // толщина слоя, м
 
 // CSM-тени солнца (отдельные сэмплеры — GLSL 330)
 uniform sampler2DShadow uShadowMap0;
@@ -106,6 +119,45 @@ float fog_hash(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
+// Высота рельефа из карты высот (в метрах) — та же формула, что в terrain.vs
+float terrain_height(vec3 p) {
+    vec2 uv = clamp(p.xz / uWorldSize, 0.0, 1.0);
+    float t = texture(uHeightmap, uv).r;
+    return mix(uHeightMin, uHeightMax, t);
+}
+
+// Дымка над землёй (дождь): тонкий серый слой ~uHazeH на рельефе, с шумом.
+// Плотность падает с высотой; шум — img/noise.png, КРУПНЫЕ пятна (~30 м)
+// видны издалека + дрейф по времени. Слабая — чтобы не выжигать фон белым.
+float haze_density(vec3 p) {
+    if (uHaze <= 0.001) return 0.0;
+    float ground = terrain_height(p);
+    float up = p.y - ground;
+    if (up < 0.0) return 0.0;            // под рельефом — нет
+    float h = 1.0 - smoothstep(0.0, uHazeH, up);
+    if (h <= 0.001) return 0.0;
+    // три масштаба шума + дрейф; клубы мелкие (тексель шума ~2.5..0.12 м)
+    vec2 nm = p.xz + vec2(uTime * 1.2, uTime * 0.8);
+    float n = texture(uNoise, nm / 600.0).r * 0.55
+            + texture(uNoise, nm / 150.0 + 13.7).r * 0.30
+            + texture(uNoise, nm / 30.0  -  7.3).r * 0.15;
+    return uHaze * h * (0.10 + 0.90 * n);
+}
+
+// Обычный (классический) туман вокруг игрока в дождь: равномерная дымка,
+// нарастает с дистанцией экспоненциально (быстро вблизи, стабильно вдали).
+// Цвет — серый (базовый). Заметный, но не белый.
+float rain_fog_density(float dist) {
+    return uWetness * 0.03 * (1.0 - exp(-dist / 30.0));
+}
+
+// Дождевой «класс тумана»: базовые каскады (density_ground/field из map.json)
+// гаснут с мокротой — в дождь вместо плотной дымки идёт лёгкий туман от
+// неба (rain_fog_density). Множитель 0.10 при полном дожде: в ~10 раз реже.
+float base_fog_scale() {
+    return 1.0 - 0.90 * uWetness;
+}
+
 void main() {
     vec3 scene = texture(uScene, vUV).rgb;
     float depth = texture(uSceneDepth, vUV).r;
@@ -126,14 +178,18 @@ void main() {
     vec3 inscat = vec3(0.0);
     float trans = 1.0;
     // Цвет рассеяния: солнечный (тёплый) ВЕЗДЕ — и в противоположном от
-    // солнца направлении (лишь чуть разбавлен базовым, 15%).
+    // солнца направлении (лишь чуть разбавлен базовым, 15%). В ДОЖДЬ
+    // (uWetness -> 1) солнца за облаками нет: туман РОВНЫЙ СЕРЫЙ (базовый
+    // цвет, БЕЗ примеси яркого неба) — вдали не выгорает в белое.
     vec3 stepCol = mix(uFogColorSun, uFogColor, 0.15 * (1.0 - sunHit));
+    stepCol = mix(stepCol, uFogColor, uWetness);
 
     for (int i = 0; i < 20; i++) {
         float t = (float(i) + 0.5 + jit * 0.8) * stepLen;
         if (t >= march) break;
         vec3 p = uCamPos + dir * t;
-        float d = fog_density(p) * uStrength;
+        float d = (fog_density(p) * base_fog_scale()
+                  + haze_density(p) + rain_fog_density(t)) * uStrength;
         if (d <= 0.001) continue;
         float od = d * stepLen;                    // оптическая толщина
         float ext = exp(-od);                      // Beer-Lambert
@@ -145,12 +201,20 @@ void main() {
         // В стороне от солнца — ЯРКАЯ тёплая дымка (0.55), не зависит от
         // тени. У солнца — контраст: тень тумана тёмная (0.2), просветы
         // яркие (до ~1.3). Лучи видны, солнце не выжигает.
+        // В ДОЖДЬ солнце скрыто облаками: контраст и ореол гаснут с
+        // мокротой — туман светится равномерно от неба.
+        float rainDim = 1.0 - uWetness;
+        float raystr = uRayStrength * rainDim;
         float litAway = 0.55;
-        float litSun  = 0.20 + 0.80 * uRayStrength * sunShadow;
-        float lit = mix(litAway, litSun, sunHit);
+        float litSun  = 0.20 + 0.80 * raystr * sunShadow;
+        float lit = mix(litAway, litSun, sunHit * rainDim);
+        lit = max(lit, mix(0.0, 0.32, uWetness));   // в дождь — серый свет неба
         // ореол у самого солнца (Mie-подобный пик в тумане)
-        float glare = pow(sunHit, 8.0) * uGlare * sunShadow;
-        inscat += stepCol * od * trans * (lit + glare);
+        float glare = pow(sunHit, 8.0) * uGlare * sunShadow * rainDim;
+        // Прирост рассеянного света: правильно Beer-Lambert (1 - ext), НЕ od.
+        // od в плотном узком слое (низкая дымка) огромно и переоценивало бы
+        // свет -> белое свечение. (1 - ext) упирается в 1, белого нет.
+        inscat += stepCol * (1.0 - ext) * trans * (lit + glare * (1.0 - trans));
         trans *= ext;
         if (trans < 0.01) break;                   // дальше не видно — хватит
     }

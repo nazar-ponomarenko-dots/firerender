@@ -51,6 +51,9 @@ typedef struct {
     GLuint prog;             // свой шейдер (0 = общий p->prog)
     ObjLocs locs;            // локации для prog
     int billboard;           // квад к камере (вместо креста)
+    int src;                 // индекс в map.json (objects[]): инстансы идут
+                             // плотнее mapdata (пустые model пропускаются),
+                             // поэтому связь только через src
     float pos[3];
     float width, height;
     int collision;           // цилиндр непроходимости
@@ -99,13 +102,39 @@ static ObjLocs obj_locs(GLenum prog)
 }
 
 // Пересоздаёт программы объектов и переищет uniform'ы (для hot-reload).
+// replace балансирует refcount (release старой + новая ссылка); если пара
+// не собралась — возвращает 0 и остаётся прежний id. Пересоздаём ВСЕ
+// программы узла (включая flat/shadow/blob и custom каждого инстанса),
+// иначе после reload часть объектов рисовала бы старым шейдером, а его
+// ссылка утекала навсегда (старый код даже не перезапрашивал flat/shadow).
 static void objects_reshade(void)
 {
     ObjectsParams *p = s_objs;
     if (!p) return;
-    p->prog = make_program("shaders/object.vs", "shaders/object.fs");
+    GLuint prog = resources_program_replace(p->prog,
+                                            "shaders/object.vs",
+                                            "shaders/object.fs");
+    if (prog) p->prog = prog;
     p->locs = obj_locs(p->prog);
-    if (p->flat_prog) p->flat_locs = obj_locs(p->flat_prog);
+    if (p->flat_prog) {
+        GLuint f = resources_program_replace(p->flat_prog,
+                                             "shaders/object.vs",
+                                             "shaders/object_flat.fs");
+        if (f) p->flat_prog = f;
+        p->flat_locs = obj_locs(p->flat_prog);
+    }
+    {
+        GLuint sp = resources_program_replace(p->shadow_prog,
+                                              "shaders/object_shadow.vs",
+                                              "shaders/object_shadow.fs");
+        if (sp) p->shadow_prog = sp;
+    }
+    if (p->blob_prog) {
+        GLuint bp = resources_program_replace(p->blob_prog,
+                                              "shaders/blob.vs",
+                                              "shaders/blob.fs");
+        if (bp) p->blob_prog = bp;
+    }
     glUseProgram(p->prog);
     glUniform1i(p->locs.u_tex, 0);
     for (int c = 0; c < SHADOW_CASCADES; c++) {
@@ -118,6 +147,13 @@ static void objects_reshade(void)
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
         if (!it->prog) continue;
+        const MapObject *o = mapdata_object(it->src);
+        if (o && o->shader_kind == OBJ_SHADER_CUSTOM) {
+            const char *vs = o->shader_vs[0] ? o->shader_vs
+                                             : "shaders/object.vs";
+            GLuint cp = resources_program_replace(it->prog, vs, o->shader_fs);
+            if (cp) it->prog = cp;
+        }
         it->locs = obj_locs(it->prog);
         glUseProgram(it->prog);
         if (it->locs.u_tex >= 0) glUniform1i(it->locs.u_tex, 0);
@@ -193,6 +229,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         const MapObject *o = mapdata_object(i);
         if (!o || !o->model[0]) continue;
         ObjectInst *it = &p->inst[p->count];
+        it->src = i;             // помним индекс map.json (инстансы плотнее)
         int w = 0, h = 0;
         // Пиксели нужны для пропорций и кастомных текстур; текстура —
         // через кеш ресурсов (60 деревьев tree.png = ОДНА GL-текстура).
@@ -259,7 +296,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         if (c->object[0]) {            // привязан к объекту: база = объект
             int found = 0;
             for (int k = 0; k < p->count; k++) {
-                const MapObject *o = mapdata_object(k);
+                const MapObject *o = mapdata_object(p->inst[k].src);
                 if (!o || strcmp(o->name, c->object) != 0) continue;
                 x = p->inst[k].pos[0] + c->pos[0];
                 z = p->inst[k].pos[2] + c->pos[2];
@@ -297,9 +334,11 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
             glUniform1i(p->locs.su.u_shadowdepth[c], 3 + c);
     }
     glUseProgram(0);
-    // Свои шейдеры объектов (custom): отдельная программа на объект
+    // Свои шейдеры объектов (custom): отдельная программа на объект.
+    // Индекс инстанса НЕ равен индексу map.json (пустые model пропускаются) —
+    // поэтому mapdata_object берём по сохранённому src.
     for (int i = 0; i < p->count; i++) {
-        const MapObject *o = mapdata_object(i);
+        const MapObject *o = mapdata_object(p->inst[i].src);
         if (!o || o->shader_kind != OBJ_SHADER_CUSTOM) continue;
         ObjectInst *it = &p->inst[i];
         const char *vs = o->shader_vs[0] ? o->shader_vs : "shaders/object.vs";
@@ -553,6 +592,7 @@ void objects_collide(float *x, float *z, float pr)
 
 void objects_cleanup(SceneNode *n)
 {
+    if (!n) return;
     ObjectsParams *p = n->params;
     if (!p) return;
     if (s_objs == p) s_objs = NULL;

@@ -32,6 +32,7 @@ uniform float uFogEnd;
 uniform float uFogOn;           // 1 = туман включён (cvar r_fog_mode)
 uniform float uSpecPower;        // "металличность" блика
 uniform float uSpecIntensity;    // сила блика
+uniform float uWetness;          // мокрость 0..1 (fx.c)
 uniform sampler2DShadow uShadowMap0;   // каскады теней: 0 = у ног, 1-2 = средне, 3 = далеко
 uniform mat4 uShadowMatrix0;
 uniform float uShadowBias0;
@@ -58,6 +59,16 @@ uniform float uShadowOn;         // 1 = тени включены (клавиш�
 uniform sampler2D uStaticShadow;   // R8: 1 = свет, ~0.25 = тень
 uniform float uStaticOn;           // 1 = применять статическую карту
 uniform vec2 uWorldSize;           // размер мира (для UV)
+
+// Маска мокрости: запечённая R8 текстура, 0 = под нависающим (сухо), 1 = открытое небо
+uniform sampler2D uWetnessMask;
+
+// Кубомап отражений воды (юнит 9, scene_uniforms_bind): мокрая земля
+// становится глянцевой и отражает окружение (небо, горы, деревья).
+uniform samplerCube uReflection;
+
+// Шум мокрости (img/noise.png, юнит 11): пятна "здесь мокрее, тут почти сухо"
+uniform sampler2D uNoise;
 
 // --- Источники света: все направленные из map.json ---------------------------
 // uLightDir[0] — солнце (единственный с каскадными тенями), дальше — фоновые
@@ -146,6 +157,31 @@ float shadow_at(vec3 wp, vec3 n) {
 
 void main() {
     vec3 base = texture(uBasemap, vUV * uTexScale).rgb;
+    vec3 N = normalize(texture(uNormalmap, vUV).rgb * 2.0 - 1.0);
+    // Детальные нормали на основе шума: у мелкомасштабного рельефа
+    // (почва, камни, тропинки) поверх базовой нормали добавляем возмущение
+    // из img/noise.png — без лишней текстуры, живой микрогеометрный рельеф.
+    // Две частоты шума: мелкая (~1 м) и чуть крупнее (~4 м).
+    {
+        vec2 nd = vWorldPos.xz;
+        float w1 = texture(uNoise, nd / 2.0 + 7.11).r;
+        float w2 = texture(uNoise, nd / 8.0 + 3.77).r;
+        vec2 perturb = vec2(w1 * 2.0 - 1.0, w2 * 2.0 - 1.0);
+        N = normalize(N + vec3(perturb * 0.25, 0.0));
+    }
+    // мокрость: затемнение альбедо и более сильный блик
+    float wet = clamp(uWetness, 0.0, 1.0);
+    // Маска мокрости: 0 = под крышей (сухо), 1 = открытое небо
+    float wet_mask = texture(uWetnessMask, vWorldPos.xz / uWorldSize).r;
+    // Вода скатывается: на вертикальных поверхностях эффект слабее
+    float slope_factor = clamp(N.y, 0.0, 1.0);
+    // Неоднородность мокрости: img/noise.png (REPEAT). Тексель шума
+    // ≈ 6 м / 1.25 м — мелкие пятна "мокрее / почти сухо".
+    float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
+                + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
+    noise = noise * noise;                 // контраст: резче мокрее/суше
+    float wet_eff = wet * wet_mask * slope_factor * mix(0.05, 1.8, noise);
+    base = mix(base, base * 0.6, wet_eff * 0.7);
     // на месте поля пшеницы земля — золотистая почва (не плоская трава)
     vec2 wp = vWorldPos.xz;
     float fx = smoothstep(uField.x - 8.0, uField.x, wp.x)
@@ -154,7 +190,6 @@ void main() {
              * (1.0 - smoothstep(uField.w, uField.w + 8.0, wp.y));
     base = mix(base, uFieldColor, fx * fz * uFieldBlend);
     base *= 0.94 + 0.12 * hash12(vWorldPos.xz * 0.5);
-    vec3 N = normalize(texture(uNormalmap, vUV).rgb * 2.0 - 1.0);
     vec3 V = normalize(uCamPos - vWorldPos);
 
     // дешёвый fresnel — лёгкое "env-отражение" неба на склонах
@@ -191,10 +226,12 @@ void main() {
         light += uLightColor[i] * uLightIntensity[i]
                * (0.55 + 0.45 * diff) * sh;
         if (i == 0) {
-            // rim-контур против света и тёплый ореол вокруг солнца
-            float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+            // rim-контур против света и тёплый ореол вокруг солнца.
+            // В дождь (wet > 0) — ВЫКЛЮЧЕНЫ: мокрая сцена без контровой
+            // обводки (см. request).
+            float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0) * (1.0 - wet);
             light += uLightColor[0] * uLightIntensity[0]
-                   * (rim * 0.35 + pow(diff, 8.0) * 0.18 * sh);
+                   * (rim * 0.35 + pow(diff, 8.0) * 0.18 * sh * (1.0 - wet));
         }
     }
     // Точечные источники: затухание по дистанции, локальный свет
@@ -222,7 +259,30 @@ void main() {
     light = min(light, vec3(1.0));
     vec3 col = base * light;
 
+    // мокрость: добавить спекулярный блик на влажных поверхностях
+    if (wet > 0.0) {
+        // wet_eff уже вычислен выше (с slope_factor и шумом)
+        float wet_spec = wet_eff * uSpecIntensity * 3.0;
+        for (int i = 0; i < uLightCount; i++) {
+            vec3 li = normalize(uLightDir[i]);
+            vec3 H = normalize(li + V);
+            float s = pow(max(dot(N, H), 0.0), uSpecPower + 30.0);
+            col += uLightColor[i] * uLightIntensity[i] * s * wet_spec;
+        }
+        // Френель-усиление: сильный блик под острым углом
+        col += uSkyColor * wet_eff * fres * 0.4;
+    }
+
     col += fres * uFogColor * 0.15;                      // блик "от неба"
+
+    // Мокрая земля — глянец: кубомап отражений растёт с мокротой и
+    // гляным углом (Fresnel). Только открытое небо (маска мокрости) и
+    // только поверхности, повёрнутые вверх (slope_factor) — вода скатывается.
+    if (wet_eff > 0.001) {
+        vec3 reflDir = reflect(-V, N);
+        vec3 reflCol = texture(uReflection, reflDir).rgb;
+        col = mix(col, reflCol, wet_eff * (0.18 + 0.55 * fres));
+    }
 
     // туман по дальности — скрывает край мира. При uFogOn = 0 (r_fog_mode 0)
     // ветка не выполняется: ни smoothstep, ни mix на каждый пиксель.

@@ -30,6 +30,7 @@
 enum {
     RP_COLOR = 0,   // обычный проход (в FBO сцены)
     RP_SHADOW,      // теневой проход (глубина в каскад) — см. shadow.c
+    RP_CUBEMAP_FACE, // рендер одной грани кубомапы (отражения воды)
 };
 
 // --- Кадровое состояние сцены (заполняет renderer.c каждый кадр) --------------
@@ -90,6 +91,14 @@ typedef struct RendererContext {
     int shadow_cull;                     // culling по боксу каскада
     // Фрустум цветного прохода (экстракция из viewproj в renderer_ctx_fill)
     Frustum frustum;
+    float wetness;             // мокрость 0..1 (из fx.c)
+    float sun_glow;            // яркость солнечного диска 0..1 (гаснет в дождь)
+    // Кубомап отражений воды: флаг "центр устарел" — renderer_frame рендерит
+    // 6 граней из позиции игрока, когда игрок ушёл дальше порога (см. renderer.c)
+    int refl_cubemap_dirty;
+    // Вьюпорт текущего прохода: обычные проходы — окно (vw/vh), проходы
+    // кубомапа — размер грани. Узлы сцены ставят его вместо vw/vh.
+    int view_vp[4];
 } RendererContext;
 
 // --- Общий набор uniform-хендлов шейдеров сцены --------------------------------
@@ -103,6 +112,9 @@ typedef struct {
     GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES];
     GLint u_shadowbias[SHADOW_CASCADES], u_shadowdepth[SHADOW_CASCADES];
     GLint u_shadowgrad[SHADOW_CASCADES], u_shadow_on;
+    GLint u_wetness;    // мокрость 0..1
+    GLint u_reflection; // кубомап отражений (unit 9): мокрая земля/деревья
+    GLint u_noise;      // img/noise.png (unit 11): неравномерность мокрости
 } SceneUniforms;
 
 // Ищет локации общего набора в программе (необязательные = -1). Теневые

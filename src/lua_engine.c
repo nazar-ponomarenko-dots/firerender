@@ -21,6 +21,12 @@
 #include "game.h"
 #include "resources.h"
 #include "fx.h"
+#include "binds.h"
+#include "material.h"
+#include "mesh.h"
+#include "glb.h"
+#include "glb_anim.h"
+#include "renderer.h"
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -67,14 +73,17 @@ static int l_exec(lua_State *ls)
 // каждой Lua-команде нужен свой C-трамплин. Пул статичных трамплинов.
 #define LUA_CMD_MAX 16
 static int s_cmd_ref[LUA_CMD_MAX];
+static char s_cmd_name[LUA_CMD_MAX][64];
 static int s_cmd_n = 0;
 
 static void lua_cmd_call_ref(int ref, const char *args)
 {
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     lua_pushstring(L, args ? args : "");
-    if (lua_pcall(L, 1, 0, 0) != 0)
+    if (lua_pcall(L, 1, 0, 0) != 0) {
         lua_engine_print(lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
 }
 
 #define DEF_TRAMP(i) \
@@ -95,13 +104,29 @@ static int l_cmd(lua_State *ls)
 {
     const char *name = luaL_checkstring(ls, 1);
     luaL_checktype(ls, 2, LUA_TFUNCTION);
-    if (s_cmd_n >= LUA_CMD_MAX) {
-        lua_engine_print("engine.cmd: лимит Lua-команд");
-        return 0;
+    // Повторная регистрация (перезагрузка карты/скрипта) — переиспользуем
+    // слот по имени. Иначе каждый reload сжигал бы трамплин и Lua-реф,
+    // пока пул не кончится (а console_add_command дубликат и так молча
+    // отбрасывал — реф утекал).
+    int i = -1;
+    for (int k = 0; k < s_cmd_n; k++)
+        if (strcmp(s_cmd_name[k], name) == 0) { i = k; break; }
+    if (i < 0) {
+        if (s_cmd_n >= LUA_CMD_MAX) {
+            lua_engine_print("engine.cmd: лимит Lua-команд");
+            return 0;
+        }
+        i = s_cmd_n++;
+        snprintf(s_cmd_name[i], sizeof s_cmd_name[i], "%s", name);
+        if (!console_add_command(name, "lua", s_cmd_fn[i])) {
+            lua_engine_print("engine.cmd: команда уже зарегистрирована");
+            s_cmd_n--;                       // имя занято C-командой — слот назад
+            return 0;
+        }
+    } else {
+        luaL_unref(ls, LUA_REGISTRYINDEX, s_cmd_ref[i]);  // старый обработчик
     }
-    int i = s_cmd_n++;
     s_cmd_ref[i] = luaL_ref(ls, LUA_REGISTRYINDEX);
-    console_add_command(name, "lua", s_cmd_fn[i]);
     return 0;
 }
 
@@ -129,8 +154,10 @@ static void lua_event_dispatch(const Event *e, void *user)
         lua_pushinteger(L, e->type);
         lua_pushlightuserdata(L, (void *)e->a);
         lua_pushlightuserdata(L, (void *)e->b);
-        if (lua_pcall(L, 3, 0, 0) != 0)
+        if (lua_pcall(L, 3, 0, 0) != 0) {
             lua_engine_print(lua_tostring(L, -1));
+            lua_pop(L, 1);          // pcall при ошибке оставляет сообщение
+        }
     }
 }
 
@@ -179,8 +206,10 @@ static void lua_cls_call(int ref, Entity *e, float dt)
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     lua_pushlightuserdata(L, e);
     lua_pushnumber(L, dt);
-    if (lua_pcall(L, 2, 0, 0) != 0)
+    if (lua_pcall(L, 2, 0, 0) != 0) {
         lua_engine_print(lua_tostring(L, -1));
+        lua_pop(L, 1);          // pcall при ошибке оставляет сообщение
+    }
 }
 
 static void lua_cls_spawn(Entity *e)
@@ -229,12 +258,11 @@ static int l_entity_class(lua_State *ls)
     lua_cls_take(ls, 2, "spawn", &c->spawn);
     lua_cls_take(ls, 2, "think", &c->think);
     lua_cls_take(ls, 2, "kill",  &c->kill);
-    EntityClass cls = {
-        c->name,
-        c->spawn >= 0 ? lua_cls_spawn : NULL,
-        c->think >= 0 ? lua_cls_think : NULL,
-        c->kill  >= 0 ? lua_cls_kill  : NULL
-    };
+    // entity_register_class игнорирует повторное имя, поэтому ВСЕГДА вешаем
+    // все три диспетчера. Они ищут актуальный реф по имени при вызове
+    // (lua_cls_find) — повторная регистрация с новыми колбэками подхватится.
+    // Если рефа нет, lua_cls_call сам вернётся (LUA_NOREF).
+    EntityClass cls = { c->name, lua_cls_spawn, lua_cls_think, lua_cls_kill };
     entity_register_class(&cls);
     return 0;
 }
@@ -364,6 +392,145 @@ static int l_time(lua_State *ls)
     return 1;
 }
 
+// --- Строковые cvar'ы: engine.cvar_get_string / engine.cvar_set_string --------
+static int l_cvar_get_string(lua_State *ls)
+{
+    lua_pushstring(ls, cvar_get_string(luaL_checkstring(ls, 1)));
+    return 1;
+}
+
+static int l_cvar_set_string(lua_State *ls)
+{
+    cvar_set_string(luaL_checkstring(ls, 1), luaL_checkstring(ls, 2));
+    return 0;
+}
+
+// --- Бинды из Lua: engine.bind/unbind (управление вводом, как Far Cry ActionMap)
+static int l_bind(lua_State *ls)
+{
+    const char *key = luaL_checkstring(ls, 1);
+    const char *cmd = luaL_checkstring(ls, 2);
+    SDL_Scancode sc = binds_key_from_name(key);
+    if (sc == SDL_SCANCODE_UNKNOWN) {
+        lua_engine_print("engine.bind: неизвестная клавиша");
+        return 0;
+    }
+    binds_set(sc, cmd);
+    return 0;
+}
+
+static int l_unbind(lua_State *ls)
+{
+    const char *key = luaL_checkstring(ls, 1);
+    SDL_Scancode sc = binds_key_from_name(key);
+    if (sc != SDL_SCANCODE_UNKNOWN) binds_clear(sc);
+    return 0;
+}
+
+// --- Материалы из Lua: engine.material_register(name, { ... }) ----------------
+// Таблица: tint={r,g,b}, alpha, blend (0/1/2/3), tile={u,v}, offset={u,v}.
+// По имени материал потом находит рендер (material_find) — data-driven,
+// как material library в HL2. Лимит — MATERIALS_MAX в реестре material.c.
+static int l_material_register(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    luaL_checktype(ls, 2, LUA_TTABLE);
+    Material m;
+    material_defaults(&m);
+    m.set = 1;
+    float tmp = -1.0f;   // -1 = не задано (MAT-макрос пишет только из чисел)
+#define MAT_NUM(field, dst) \
+    lua_getfield(ls, 2, field); \
+    if (lua_isnumber(ls, -1)) dst = (float)lua_tonumber(ls, -1); \
+    lua_pop(ls, 1)
+    MAT_NUM("alpha", m.alpha);
+    MAT_NUM("blend", tmp); if (tmp >= 0) m.blend = (int)tmp;
+    {
+        float tint[3] = { 1, 1, 1 };
+        lua_getfield(ls, 2, "tint");
+        if (lua_istable(ls, -1)) {
+            for (int i = 0; i < 3; i++) {
+                lua_rawgeti(ls, -1, i + 1);
+                if (lua_isnumber(ls, -1)) tint[i] = (float)lua_tonumber(ls, -1);
+                lua_pop(ls, 1);
+            }
+        }
+        lua_pop(ls, 1);
+        m.tint[0] = tint[0]; m.tint[1] = tint[1]; m.tint[2] = tint[2];
+    }
+    {
+        float tile[2] = { 1, 1 };
+        lua_getfield(ls, 2, "tile");
+        if (lua_istable(ls, -1)) {
+            lua_rawgeti(ls, -1, 1); if (lua_isnumber(ls, -1)) tile[0] = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+            lua_rawgeti(ls, -1, 2); if (lua_isnumber(ls, -1)) tile[1] = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        m.tile[0] = tile[0]; m.tile[1] = tile[1];
+    }
+#undef MAT_NUM
+    material_register(name, &m);
+    lua_pushboolean(ls, 1);
+    return 1;
+}
+
+// engine.material_list() -> "name1 name2 ..." (для отладки)
+static int l_material_list(lua_State *ls)
+{
+    char buf[512] = "";
+    size_t off = 0;
+    for (int i = 0; i < material_count(); i++) {
+        const char *n = material_name(i);
+        if (!n) continue;
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "%s%s",
+                                off ? " " : "", n);
+        if (off >= sizeof buf - 1) break;
+    }
+    lua_pushstring(ls, buf);
+    return 1;
+}
+
+// engine.mesh(obj, x, y, z, [scale], [tex]) — поставить статичный меш (.obj)
+// как узел MeshInstance3D. Возвращает 1 при успехе. Дубликаты узлов списка
+// не отслеживаются (prop_static грузятся разово из карты).
+static int l_mesh(lua_State *ls)
+{
+    const char *path = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    float scale = (float)luaL_optnumber(ls, 5, 1.0f);
+    const char *tex = lua_isstring(ls, 6) ? lua_tostring(ls, 6) : NULL;
+    Game *g = game_instance();
+    if (!g || !g->root) { lua_pushboolean(ls, 0); return 1; }
+    SceneNode *n = mesh_make_node(path, pos, scale, tex, renderer_context());
+    if (!n) { lua_pushboolean(ls, 0); return 1; }
+    node_add(g->root, n);
+    lua_pushboolean(ls, 1);
+    return 1;
+}
+
+// engine.glb(obj, x, y, z, [scale]) — поставить бинарный glTF (.glb).
+// Если в модели есть скин+анимация — узел AnimInstance3D (скиннинг),
+// иначе — статичный GlbInstance3D. Возвращает 1 при успехе.
+static int l_glb(lua_State *ls)
+{
+    const char *path = luaL_checkstring(ls, 1);
+    float pos[3] = { (float)luaL_optnumber(ls,2,0),
+                     (float)luaL_optnumber(ls,3,0),
+                     (float)luaL_optnumber(ls,4,0) };
+    float scale = (float)luaL_optnumber(ls, 5, 1.0f);
+    Game *g = game_instance();
+    if (!g || !g->root) { lua_pushboolean(ls, 0); return 1; }
+    SceneNode *n = glb_anim_has_anim(path)
+        ? glb_anim_make_node(path, pos, scale, renderer_context())
+        : glb_make_node(path, pos, scale, renderer_context());
+    if (!n) { lua_pushboolean(ls, 0); return 1; }
+    node_add(g->root, n);
+    lua_pushboolean(ls, 1);
+    return 1;
+}
+
 // --- Эффекты частиц: engine.fx_* (см. fx.h) -------------------------------------
 // engine.fx_burst("имя", x, y, z, [count]) — взрыв эффекта в точке
 static int l_fx_burst(lua_State *ls)
@@ -408,6 +575,20 @@ static int l_fx_clear(lua_State *ls)
     return 0;
 }
 
+// engine.fx_weather("имя", rate) — погода за игроком; "off"/0 — стоп
+static int l_fx_weather(lua_State *ls)
+{
+    const char *name = luaL_optstring(ls, 1, "");
+    float rate = (float)luaL_optnumber(ls, 2, 100.0f);
+    if (!name[0] || strcmp(name, "off") == 0 || strcmp(name, "clear") == 0) {
+        fx_emitter_stop_all();
+        return 0;
+    }
+    float ext[3] = { 20.0f, 10.0f, 20.0f };
+    fx_weather_start(name, 12.0f, ext, rate, 0.0f);
+    return 0;
+}
+
 // engine.fx_register("имя", { ... }) — свой пресет из Lua.
 // Таблица: dir={x,y,z}, spread, speed={min,max}, life={min,max},
 // size={min,max}, alpha={a0,a1}, color={r,g,b}, gravity, drag, sway,
@@ -426,7 +607,7 @@ static int l_fx_register(lua_State *ls)
     pp.alpha0 = 1.0f; pp.alpha1 = 0.0f;
     pp.r = 1.0f; pp.g = 1.0f; pp.b = 1.0f;
     int count = 8;
-    float tmp;
+    float tmp = 0.0f;    // инициализирован: GET_NUM пишет только при наличии числа
 
 #define GET_VEC(field, dst) \
     lua_getfield(ls, 2, field); \
@@ -519,8 +700,10 @@ static void lua_timers_tick(float dt)
         s_timers[i].remaining -= dt;
         if (s_timers[i].remaining > 0.0f) { i++; continue; }
         lua_rawgeti(L, LUA_REGISTRYINDEX, s_timers[i].ref);
-        if (lua_pcall(L, 0, 0, 0) != 0)
+        if (lua_pcall(L, 0, 0, 0) != 0) {
             lua_engine_print(lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
         luaL_unref(L, LUA_REGISTRYINDEX, s_timers[i].ref);
         s_timers[i] = s_timers[--s_timers_n];   // порядок не важен
     }
@@ -530,9 +713,12 @@ static void lua_timers_tick(float dt)
 #define LUA_UPDATE_MAX 8
 static int s_update_refs[LUA_UPDATE_MAX];
 static int s_update_n = 0;
-// Индексы, с которых начинаются update/таймеры ТЕКУЩЕЙ карты (см. lua_engine_map)
+// Индексы, с которых начинаются update/таймеры/подписки ТЕКУЩЕЙ карты
+// (см. lua_engine_map) — по ним lua_engine_clear() уберёт только карточное
+// состояние (движковые скрипты main.lua остаются).
 static int s_map_update0 = 0;
 static int s_map_timer0 = 0;
+static int s_map_ev0[EVENTS_MAX_TYPES];
 
 static int l_update(lua_State *ls)
 {
@@ -552,8 +738,10 @@ void lua_engine_update(float dt)
     for (int i = 0; i < s_update_n; i++) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, s_update_refs[i]);
         lua_pushnumber(L, dt);
-        if (lua_pcall(L, 1, 0, 0) != 0)
+        if (lua_pcall(L, 1, 0, 0) != 0) {
             lua_engine_print(lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
     }
 }
 
@@ -564,11 +752,12 @@ void lua_engine_update(float dt)
 void lua_engine_map(const char *map_name)
 {
     if (!L || !map_name || !map_name[0]) return;
-    // Индексы, откуда начнут добавляться update/таймеры этой карты — по ним
-    // lua_engine_clear() при выгрузке уберёт только карточное состояние
+    // Индексы, откуда начнут добавляться update/таймеры/подписки этой карты —
+    // по ним lua_engine_clear() при выгрузке уберёт только карточное состояние
     // (движковые скрипты main.lua остаются).
     s_map_update0 = s_update_n;
     s_map_timer0 = s_timers_n;
+    for (int t = 0; t < EVENTS_MAX_TYPES; t++) s_map_ev0[t] = s_ev_n[t];
     char path[128];
     snprintf(path, sizeof path, "lua/maps/%s.lua", map_name);
     char *src = resources_read_text(path);
@@ -577,18 +766,21 @@ void lua_engine_map(const char *map_name)
     free(src);
     if (rc != 0) {
         SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
+        lua_pop(L, 1);               // сообщение об ошибке со стека
         return;
     }
-    if (lua_pcall(L, 0, 0, 0) != 0)
+    if (lua_pcall(L, 0, 0, 0) != 0) {
         SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
-    else
+        lua_pop(L, 1);
+    } else {
         SDL_Log("lua: карта %s: скрипт %s", map_name, path);
+    }
 }
 
 // --- Выгрузка карты: сбросить состояние скрипта карты --------------------------
-// Убирает update-колбэки и таймеры, добавленные скриптом карты (lua_engine_map),
-// чтобы они не «тикали» в следующей карте. Классы сущностей перезаписываются
-// по имени (dedup в lua_cls_find) — их не трогаем.
+// Убирает update-колбэки, таймеры и подписки на события, добавленные скриптом
+// карты (lua_engine_map), чтобы они не «тикали» в следующей карте. Классы
+// сущностей перезаписываются по имени (dedup в lua_cls_find) — их не трогаем.
 void lua_engine_clear(void)
 {
     if (!L) return;
@@ -596,6 +788,9 @@ void lua_engine_clear(void)
         luaL_unref(L, LUA_REGISTRYINDEX, s_timers[--s_timers_n].ref);
     while (s_update_n > s_map_update0)
         luaL_unref(L, LUA_REGISTRYINDEX, s_update_refs[--s_update_n]);
+    for (int t = 0; t < EVENTS_MAX_TYPES; t++)
+        while (s_ev_n[t] > s_map_ev0[t])
+            luaL_unref(L, LUA_REGISTRYINDEX, s_ev_ref[t][--s_ev_n[t]]);
 }
 
 // --- Инициализация -------------------------------------------------------------
@@ -603,6 +798,14 @@ static const luaL_Reg engine_lib[] = {
     { "log",           l_log },
     { "cvar_get",      l_cvar_get },
     { "cvar_set",      l_cvar_set },
+    { "cvar_get_string", l_cvar_get_string },
+    { "cvar_set_string", l_cvar_set_string },
+    { "bind",          l_bind },
+    { "unbind",        l_unbind },
+    { "material_register", l_material_register },
+    { "material_list", l_material_list },
+    { "mesh",          l_mesh },
+    { "glb",           l_glb },
     { "exec",          l_exec },
     { "cmd",           l_cmd },
     { "on",            l_on },
@@ -618,14 +821,15 @@ static const luaL_Reg engine_lib[] = {
     { "world_loaded",  l_world_loaded },
     { "camera",        l_camera },
     { "terrain_height", l_terrain_height },
-    { "after",         l_after },
     { "teleport",      l_teleport },
+    { "after",         l_after },
     { "msg",           l_msg },
     { "time",          l_time },
     { "fx_burst",      l_fx_burst },
     { "fx_emit",       l_fx_emit },
     { "fx_stop",       l_fx_stop },
     { "fx_clear",      l_fx_clear },
+    { "fx_weather",    l_fx_weather },
     { "fx_register",   l_fx_register },
     { NULL, NULL }
 };
@@ -663,10 +867,13 @@ void lua_engine_init(void)
     free(src);
     if (rc != 0) {
         lua_engine_print(lua_tostring(L, -1));
+        lua_pop(L, 1);               // сообщение об ошибке со стека
         return;
     }
-    if (lua_pcall(L, 0, 0, 0) != 0)
+    if (lua_pcall(L, 0, 0, 0) != 0) {
         SDL_Log("lua: ошибка main.lua: %s", lua_tostring(L, -1));
-    else
+        lua_pop(L, 1);
+    } else {
         SDL_Log("lua: скрипты загружены");
+    }
 }

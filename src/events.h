@@ -15,6 +15,8 @@ enum {
     EV_ENTITY_KILL,        // a = Entity*
     EV_CONSOLE_OPENED,     // a = NULL
     EV_CONSOLE_CLOSED,     // a = NULL
+    EV_NODE_INIT,          // a = SceneNode*  (узел добавлен в дерево)
+    EV_NODE_EXIT,          // a = SceneNode*  (узел удаляется из дерева)
 };
 
 typedef struct {

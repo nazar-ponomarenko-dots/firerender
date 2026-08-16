@@ -70,6 +70,7 @@ uniform sampler2D uShadowDepth2;
 uniform sampler2D uShadowDepth3;
 uniform float uShadowGrad[4];         // глубина до полной темноты (NDC)
 uniform float uShadowOn;          // 1 = тени включены (клавиша [)
+uniform float uWetness;        // мокрость 0..1 (fx.c)
 
 // Растения светятся прямым светом и CSM-тенями солнца; никакого AO —
 // поле остаётся золотым, тени от растений на землю кладут каскады.
@@ -163,6 +164,8 @@ void main() {
     if (c.a < 0.5) discard;              // прозрачный фон спрайта
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vWorldPos);
+    float wet = clamp(uWetness, 0.0, 1.0);
+    c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.5);
 
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
@@ -231,17 +234,25 @@ void main() {
         vec3 H = normalize(L + V);
         float spec = pow(max(dot(N, H), 0.0), 48.0) * layer;
         col += uLightColor[0] * spec * 0.5 * shadow;
+
+        // мокрость: лёгкий влажный блеск на колосях (слой 1). Слабый —
+        // чтобы в дождь колос не "выгорал" в белый; приглушён с высотой.
+        if (wet > 0.0) {
+            float wet_spec = wet * layer * 0.18;
+            col += uLightColor[0] * wet_spec * shadow;
+        }
     }
 
     // ПОДПОВЕРХНОСТНОЕ РАССЕИВАНИЕ — всем растениям по умолчанию: когда
     // свет за растением (смотрим против солнца), часть света проходит
     // сквозь стебель/колос и светит изнутри — тёплое свечение как у
     // настоящей листвы. Верхушки тоньше — просвечивают сильнее. Тень
-    // уважается: растение в тени не светится.
+    // уважается: растение в тени не светится. В ДОЖДЬ — выключено:
+    // мокрая листва не просвечивает (нет контрового солнца).
     if (uLightCount > 0 && length(L) > 0.5) {
         float trans = max(dot(-L, V), 0.0);          // 1 = свет строго за растением
         float tip = smoothstep(0.25, 1.0, suv.y);    // верхушка тоньше — ярче
-        float sss = trans * trans * (0.25 + 0.75 * tip) * shadow;
+        float sss = trans * trans * (0.25 + 0.75 * tip) * shadow * (1.0 - wet);
         col += c.rgb * vTint * uLightColor[0] * uLightIntensity[0] * sss * 0.7;
     }
 
@@ -249,9 +260,11 @@ void main() {
     // L·V < 0). Низ затемняется тем СИЛЬНЕЕ, чем ВЫШЕ растение (высокая
     // пшеница затеняет собственное основание, низкая трава — почти нет),
     // к верху градиентом сходит на нет. Только в ближних метрах (до ~55 м).
+    // В ДОЖДЬ весь контровой эффект выключен (wet) — без rim-обводок.
     vec3 lit = col;                          // освещённый цвет до затемнения
     float near_fade = 1.0 - smoothstep(15.0, 55.0, d);
-    float backlit = (1.0 - smoothstep(-0.1, 0.55, dot(L, V))) * near_fade;
+    float backlit = (1.0 - smoothstep(-0.1, 0.55, dot(L, V))) * near_fade
+                  * (1.0 - wet);
     float hf = clamp(vHeight / 0.9, 0.0, 1.0);   // 0 = низкая трава, 1 = пшеница
     float bottom = mix(0.85, 0.5, hf);           // затемнение у самого низа
     float shade = mix(bottom, 1.0, suv.y);       // низ → верх

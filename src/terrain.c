@@ -29,11 +29,11 @@ static TerrainParams *s_terr = NULL;   // для hot-reload (shader_on_reshade)
 
 // Пересоздаёт программы, ищет uniform'ы и статичные uniform'ы. Вызывается
 // при создании узла и при hot-reload шейдеров (shader_hot_reload).
+// Проги создаются СНАРУЖИ (make_node / reshade: refcount балансируется там).
+// Здесь — только uniform'ы для ТЕКУЩИХ id (p->prog и s_shadow_prog).
 static void terrain_prog_init(TerrainParams *p, const WorldState *w)
 {
     GLuint prog = p->prog;
-    // Теневая программа (глубина рельефа)
-    s_shadow_prog = make_program("shaders/shadow.vs", "shaders/shadow.fs");
     u_sh_viewproj = glGetUniformLocation(s_shadow_prog, "uViewProj");
     u_sh_heightmap = glGetUniformLocation(s_shadow_prog, "uHeightmap");
     u_sh_hmin = glGetUniformLocation(s_shadow_prog, "uHeightMin");
@@ -49,6 +49,17 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
     p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
 
+    scene_uniforms_init(&p->su, prog);    // общий набор сцены
+    p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
+    p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
+    p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
+    p->u_heightmax = glGetUniformLocation(prog, "uHeightMax");
+    p->u_texscale  = glGetUniformLocation(prog, "uTexScale");
+    p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
+    p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
+    p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
+    p->u_wetness_mask = glGetUniformLocation(prog, "uWetnessMask");
+
     // Материал рельефа: статичные параметры шейдера
     MapTerrain tc;
     mapdata_terrain(&tc);
@@ -56,6 +67,7 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     glUniform1i(glGetUniformLocation(prog, "uBasemap"), 0);   // земля
     glUniform1i(glGetUniformLocation(prog, "uNormalmap"), 1); // нормали
     glUniform1i(glGetUniformLocation(prog, "uHeightmap"), 2); // высоты
+    glUniform1i(p->u_wetness_mask, 8);             // маска мокрости (unit 8)
     // Каскады теней на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d —
     // ТЕ ЖЕ текстуры: при выборке через sampler2D режим сравнения
     // игнорируется, читается глубина).
@@ -87,10 +99,26 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     glUseProgram(0);
 }
 
-// Hot-reload: пересоздать программы и uniform'ы текущего узла
+// Hot-reload: пересоздать программы и uniform'ы текущего узла.
+// Старые программы отдаём в релиз: make_program считает ссылки, и без release
+// каждый reload утекал бы и p->prog, и теневую программу (refs не падали,
+// отложенное удаление в resources.c никогда не срабатывало).
+// replace отдаёт старую ссылку и берёт свежую. Если пара не пересобралась,
+// возвращает 0 — НЕ меняем id, рисуем прежнюю (она жива до релиза).
 static void terrain_reshade(void)
 {
-    if (s_terr) terrain_prog_init(s_terr, s_terr->world);
+    if (!s_terr) return;
+    GLuint prog = resources_program_replace(s_terr->prog,
+                                            "shaders/terrain.vs",
+                                            "shaders/terrain.fs");
+    if (prog) s_terr->prog = prog;
+    else SDL_Log("terrain: reshade failed, keeping old program");
+    GLuint sp = resources_program_replace(s_shadow_prog,
+                                          "shaders/shadow.vs",
+                                          "shaders/shadow.fs");
+    if (sp) s_shadow_prog = sp;
+    else SDL_Log("terrain: shadow program reshade failed, keeping old");
+    terrain_prog_init(s_terr, s_terr->world);
 }
 
 // --- Статические тени (режим r_shadows_mode 2) ---------------------------------
@@ -288,6 +316,12 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
 
     GLuint prog = make_program("shaders/terrain.vs", "shaders/terrain.fs");
     if (!prog) return NULL;
+    // Теневая программа (глубина рельефа): после cleanup() s_shadow_prog == 0,
+    // поэтому replace здесь эквивалентен plain-загрузке.
+    s_shadow_prog = resources_program_replace(s_shadow_prog,
+                                              "shaders/shadow.vs",
+                                              "shaders/shadow.fs");
+    if (!s_shadow_prog) { resources_program_release(prog); return NULL; }
 
     GLuint vao, vbo, ibo;
     int vert_count;
@@ -303,7 +337,7 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     p->tex_norm = wt->tex_norm;           // нормали (unit 1)
     p->tex_height = wt->tex_height;       // высоты (unit 2)
     p->vert_count = vert_count;
-    terrain_prog_init(p, w);              // uniform'ы + статичные + теневая программа
+    terrain_prog_init(p, w);              // uniform'ы (+ статичные)
     s_terr = p;                           // для hot-reload
     shader_on_reshade(terrain_reshade);
 
@@ -336,8 +370,8 @@ void terrain_node_render(SceneNode *n, float dt)
         return;
     }
 
-    // обычный проход
-    glViewport(0, 0, p->rc->vw, p->rc->vh);
+    // обычный проход (вьюпорт задаёт рендер-контекст: окно или грань кубомапа)
+    glViewport(rc->view_vp[0], rc->view_vp[1], rc->view_vp[2], rc->view_vp[3]);
     glEnable(GL_DEPTH_TEST);   // 3D: ближние склоны закрывают дальние
     glDepthMask(GL_TRUE);      // (скайбокс её выключает)
     glUseProgram(p->prog);
@@ -354,6 +388,11 @@ void terrain_node_render(SceneNode *n, float dt)
             glBindTexture(GL_TEXTURE_2D, s_static_tex);
         }
     }
+    // Маска мокрости (под крышей): unit 8
+    if (terrain_wetness_mask_have()) {
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, terrain_wetness_mask_tex());
+    }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex_base);     // земля (unit 0)
     glActiveTexture(GL_TEXTURE1);
@@ -367,6 +406,7 @@ void terrain_node_render(SceneNode *n, float dt)
 
 void terrain_cleanup(SceneNode *n)
 {
+    if (!n) return;   // безопасно при частичном построении сцены (error-path)
     TerrainParams *p = n->params;
     resources_program_release(s_shadow_prog);
     s_shadow_prog = 0;
@@ -477,6 +517,103 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
     glBindTexture(GL_TEXTURE_2D, 0);
     free(tex);
     s_static_baked = 1;
+}
+
+// --- Wetness mask (baked "under roof" detection) ---------------------------
+// Текстура мокрости: R8, 0 = под нависающим (сухо), 255 = открытое небо (мокрое)
+#define WETNESS_MASK_W 512
+#define WETNESS_MASK_H 512
+#define WETNESS_MASK_MAX_H 500.0f   // макс. высота луча вверх
+#define WETNESS_MASK_STEPS 256      // шагов луча
+
+static GLuint s_wetness_mask_tex = 0;
+static int s_wetness_mask_baked = 0;
+
+// Луч вверх: задевает ли крону дерева? Аналогично ray_hits_object, но луч
+// направлен строго вверх (0, 1, 0).
+static int ray_hits_object_up(float x, float y, float z)
+{
+    if (s_shobjs_n == 0) return 0;
+    // диапазон объектов с |ox| < 120 м
+    int lo = 0, hi = s_shobjs_n - 1, first = -1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (s_shobjs[mid].x >= x - 120.0f) { first = mid; hi = mid - 1; }
+        else lo = mid + 1;
+    }
+    if (first < 0) return 0;
+    for (int k = first; k < s_shobjs_n; k++) {
+        const ShadowObj *o = &s_shobjs[k];
+        if (o->x > x + 120.0f) break;
+        float ddx = x - o->x;
+        float ddz = z - o->z;
+        if (ddx * ddx + ddz * ddz > o->r * o->r) continue;
+        if (y < o->base - 1.0f || y > o->base + o->h + 1.0f) continue;
+        return 1;
+    }
+    return 0;
+}
+
+void terrain_wetness_mask_bake(const WorldState *w)
+{
+    if (s_wetness_mask_baked) return; // already baked this session
+    shobjs_build(w);   // строим список объектов (цилиндры крон)
+
+    unsigned char *tex = malloc((size_t)WETNESS_MASK_W * WETNESS_MASK_H);
+    if (!tex) return;
+
+    Uint64 t0 = SDL_GetTicks();
+    int dry_px = 0, total_px = 0;
+
+    for (int j = 0; j < WETNESS_MASK_H; j++) {
+        for (int i = 0; i < WETNESS_MASK_W; i++) {
+            float x = ((float)i + 0.5f) / WETNESS_MASK_W * w->world_w;
+            float z = ((float)j + 0.5f) / WETNESS_MASK_H * w->world_d;
+            float y = static_ground(w, x, z) + 0.1f; // чуть выше земли
+            int dry = 0;
+
+            // Луч вверх: ищем нависающие объекты
+            for (int s = 1; s <= WETNESS_MASK_STEPS; s++) {
+                float tt = s * (WETNESS_MASK_MAX_H / WETNESS_MASK_STEPS);
+                float py = y + tt;
+                if (ray_hits_object_up(x, py, z)) { dry = 1; break; }
+            }
+
+            // В OpenGL первый ряд = v=0 (НИЗ текстуры), z=0 -> v=0
+            tex[j * WETNESS_MASK_W + i] = dry ? 0 : 255;
+            total_px++;
+            if (dry) dry_px++;
+        }
+    }
+    SDL_Log("Wetness mask baked (%dx%d) in %llu ms: %d/%d px dry (%.1f%%)",
+            WETNESS_MASK_W, WETNESS_MASK_H,
+            (unsigned long long)(SDL_GetTicks() - t0),
+            dry_px, total_px,
+            total_px ? 100.0 * dry_px / total_px : 0.0);
+
+    if (!s_wetness_mask_tex)
+        glGenTextures(1, &s_wetness_mask_tex);
+    glBindTexture(GL_TEXTURE_2D, s_wetness_mask_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, WETNESS_MASK_W, WETNESS_MASK_H,
+                 0, GL_RED, GL_UNSIGNED_BYTE, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    free(tex);
+    s_wetness_mask_baked = 1;
+}
+
+int terrain_wetness_mask_have(void)
+{
+    return s_wetness_mask_baked && s_wetness_mask_tex;
+}
+
+GLuint terrain_wetness_mask_tex(void)
+{
+    return s_wetness_mask_tex;
 }
 
 int terrain_shadows_have(void)

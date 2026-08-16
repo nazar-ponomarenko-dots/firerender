@@ -152,6 +152,7 @@ void minimap_node_render(SceneNode *n, float dt)
 
 void minimap_cleanup(SceneNode *n)
 {
+    if (!n) return;   // error-path scene_build: узел мог не создаться
     MinimapParams *p = n->params;
     resources_program_release(p->prog);
     resources_texture_release(p->tex_marker);   // карта — общая, её не удаляем

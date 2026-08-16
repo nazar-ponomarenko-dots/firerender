@@ -18,15 +18,15 @@ void main()
     if (vIsStreak > 0.5) {
         // vUV.y = 0..1 вдоль стрика (0 = хвост, 1 = голова)
         float t = vUV.y;
-        // Маска капли: синусоида с затуханием к краям
-        float dropMask = sin(t * 3.14159) * (1.0 - abs(t - 0.5) * 1.2);
-        dropMask = clamp(dropMask, 0.0, 1.0);
-        // Вертикальный тайлинг: текстура повторяется вдоль стрика
+        // Капля ярче у головы (t→1), плавно затухает к хвосту, чтобы стрик
+        // читался как летящая капля, а не симметричный жёсткий стержень.
+        float dropMask = smoothstep(0.0, 0.15, t) * smoothstep(1.0, 0.55, t);
+        // Вертикальный тайлинг: с REPEAT текстура реально повторяется вдоль
         vec2 texUV = vec2(vUV.x, t * 4.0);
         vec4 tTex = texture(uTex, texUV);
-        a *= tTex.a * dropMask * 0.8;
-        // Небольшое аддитивное свечение для мокрости
-        col = col * tTex.rgb;
+        a *= (0.35 + 0.65 * tTex.a) * dropMask * 0.85;
+        // мокрый грейдинг: слегка подсвечиваем центр, сохраняя цвет
+        col = col * mix(0.8, 1.1, tTex.a * tTex.a);
     } else {
         vec4 tTex = texture(uTex, vUV);
         if (tTex.a < 0.01) discard;

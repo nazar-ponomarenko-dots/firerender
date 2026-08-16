@@ -261,6 +261,7 @@ void fauna_node_render(SceneNode *n, float dt)
 
 void fauna_cleanup(SceneNode *n)
 {
+    if (!n) return;
     FaunaParams *p = n->params;
     if (!p) return;
     for (int i = 0; i < p->n; i++)

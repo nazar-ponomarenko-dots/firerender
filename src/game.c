@@ -28,6 +28,7 @@
 #include "fx.h"
 #include "lua_engine.h"
 #include "mapdata.h"
+#include "material.h"
 #include "objects.h"
 #include "particles.h"
 #include "renderer.h"
@@ -39,6 +40,7 @@
 #include "terrain.h"
 #include "vegetation.h"
 #include "voxfog.h"
+#include "water.h"
 
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -50,13 +52,17 @@
 // через game_init; game_instance() отдаёт его командам и прочим.
 static Game *s_game = NULL;
 
+// Функции фаз определены ниже в этом же файле; forward-объявления для
+// вызовов из scene_build (частичный rollback) и game_load_world.
+static void scene_teardown(Game *g);
+static void world_unload_geometry(Game *g);
+
 void game_init(Game *g)
 {
     s_game = g;
     memset(g, 0, sizeof *g);
     snprintf(g->map_name, sizeof g->map_name, "%s", "map1");
-    g->spawn_yaw = 3.14159f;
-    g->spawn_pitch = -0.5f;
+    player_init(&g->player);
 }
 
 Game *game_instance(void)
@@ -172,15 +178,7 @@ static void demo_step(const WorldState *w, float t, CameraParams *cam)
 void game_apply_spawn(Game *g, const float pos[3], float yaw, float pitch)
 {
     if (!g->cam) return;
-    g->cam->cam.pos[0] = pos[0];
-    g->cam->cam.pos[1] = pos[1];
-    g->cam->cam.pos[2] = pos[2];
-    g->cam->cam.yaw = yaw;
-    g->cam->cam.pitch = pitch;
-    g->cam->cam.vx = g->cam->cam.vy = g->cam->cam.vz = 0.0f;
-    g->cam->cam.fly = 0;
-    SDL_Log("Spawn: %.1f %.1f %.1f yaw=%.2f pitch=%.2f",
-            pos[0], pos[1], pos[2], yaw, pitch);
+    player_teleport(&g->player, &g->cam->cam, pos, yaw, pitch);
 }
 
 // --- Демо-сцена (клавиша Q) ----------------------------------------------------
@@ -239,13 +237,17 @@ void game_demo_tick(Game *g, float dt, float inst_fps)
 
 // --- Интерактив и триггеры карты -----------------------------------------------
 // Выполняет действие карты: команды, сообщение, звук (позиционно из pos),
-// телепорт
+// телепорт. ВАЖНО: console_exec может выгрузить мир (команда "map X") — после
+// него НЕЛЬЗЯ трогать g->cam (он освобождён в scene_teardown). Поэтому позицию
+// передаём копией, а доступ к камере — только при живом мире.
 static void map_action_run(Game *g, const char commands[MAP_ACTIONS_MAX][MAP_CMD_LEN],
                            int cmd_n, const char *message, const char *sound,
                            const float pos[3], const float *tp, int has_tp)
 {
-    for (int i = 0; i < cmd_n; i++)
+    for (int i = 0; i < cmd_n; i++) {
         console_exec(commands[i]);
+        if (!g->world_loaded) return;   // команда выгрузила мир — действие прервано
+    }
     if (message && message[0]) {
         snprintf(g->ui_msg, sizeof g->ui_msg, "%s", message);
         g->ui_msg_t = 4.0f;
@@ -255,7 +257,7 @@ static void map_action_run(Game *g, const char commands[MAP_ACTIONS_MAX][MAP_CMD
         if (s)
             audio_3d_play_once(s, 0.4f * cvar_get("snd_dialog"), pos, 30.0f);
     }
-    if (has_tp && tp)
+    if (has_tp && tp && g->cam)
         game_apply_spawn(g, tp, g->cam->cam.yaw, g->cam->cam.pitch);
 }
 
@@ -268,14 +270,17 @@ static void map_actions_update(Game *g)
     s_use_prev = use_now;
 
     if (!g->cam) return;
-    const float *p = g->cam->cam.pos;
+    // Позиция — КОПИЕЙ: консольная команда триггера может выгрузить мир
+    // (команда "map ..."), и указатель на камеру повиснет (use-after-free).
+    float px = g->cam->cam.pos[0];
+    float pz = g->cam->cam.pos[2];
 
     // --- Триггеры: вошёл в область -> действие ---
     for (int i = 0; i < mapdata_trigger_count(); i++) {
         const MapTrigger *t = mapdata_trigger(i);
         if (!t) continue;
-        int inside = fabsf(p[0] - t->pos[0]) <= t->size[0] * 0.5f &&
-                     fabsf(p[2] - t->pos[2]) <= t->size[1] * 0.5f;
+        int inside = fabsf(px - t->pos[0]) <= t->size[0] * 0.5f &&
+                     fabsf(pz - t->pos[2]) <= t->size[1] * 0.5f;
         int edge = inside && !t->entered;
         MapTrigger *mt = (MapTrigger *)t;
         mt->entered = inside;
@@ -285,6 +290,8 @@ static void map_actions_update(Game *g)
         SDL_Log("Trigger: %s", t->name[0] ? t->name : "(без имени)");
         map_action_run(g, t->commands, t->cmd_n, t->message, t->sound,
                        t->pos, t->teleport, t->has_tp);
+        if (!g->world_loaded) return;   // мир сменился — триггеры новой карты
+                                        // обработает следующий кадр
     }
 
     // --- Взаимодействие E: ближайший объект с use в радиусе 4.5 м ---
@@ -294,8 +301,8 @@ static void map_actions_update(Game *g)
     for (int i = 0; i < mapdata_object_count(); i++) {
         const MapObject *o = mapdata_object(i);
         if (!o || !o->use.set || o->use.used) continue;
-        float dx = p[0] - o->pos[0];
-        float dz = p[2] - o->pos[2];
+        float dx = px - o->pos[0];
+        float dz = pz - o->pos[2];
         float d = dx * dx + dz * dz;
         if (d < best_d) { best_d = d; best = o; }
     }
@@ -311,7 +318,7 @@ static void map_actions_update(Game *g)
 // Порядок зафиксирован: world_load_geometry -> scene_build -> map_apply ->
 // audio_load_map. Выгрузка — строгий инверс (см. game_unload_world).
 
-// Фаза 1. Геометрия мира: карта-пак, map.json, высоты/нормали, поле пшеницы.
+//  Фаза 1. Геометрия мира: карта-пак, map.json, высоты/нормали, поле пшеницы.
 static int world_load_geometry(Game *g, WorldTextures *wt)
 {
     WorldState *w = &g->world;
@@ -322,15 +329,18 @@ static int world_load_geometry(Game *g, WorldTextures *wt)
         snprintf(path, sizeof path, "maps/%s.zip", g->map_name);
         if (!resources_pak_open(path)) {
             snprintf(path, sizeof path, "../maps/%s.zip", g->map_name);
-            if (!resources_pak_open(path)) return -1;
+            if (!resources_pak_open(path)) return -1;   // пак не открыт — чистить нечего
         }
     }
     // Всё про карту — в её корне: map/map.json или map.json (внутри zip)
     if (mapdata_load(map_is_zip(g) ? "map.json" : "map/map.json") != 0) {
-        resources_pak_close();
+        mapdata_free();            // частично загруженный json — убрать
+        resources_pak_close();     // ~ resources_pak_open
         return -1;
     }
     if (world_load(w, wt) != 0) {
+        mapdata_free();            // фаза 1 откатывается целиком
+        world_free(w);             // частичные высоты/текстуры
         resources_pak_close();
         return -1;
     }
@@ -363,6 +373,28 @@ static int world_load_geometry(Game *g, WorldTextures *wt)
         w->field_d = w->world_d;
     }
     return 0;
+}
+
+// Подключает к корню все созданные узлы сцены (не-созданные — пропускает).
+static void scene_attach_nodes(Game *g)
+{
+    if (!g->root) return;
+#define FR_ATTACH(n) if (g->n) node_add(g->root, g->n)
+    FR_ATTACH(sky_node);
+    FR_ATTACH(sun_node);
+    FR_ATTACH(terr_node);
+    FR_ATTACH(wheat_node);
+    FR_ATTACH(obj_node);
+    FR_ATTACH(fauna_node);
+    FR_ATTACH(particles_node);
+    FR_ATTACH(decals_node);
+    FR_ATTACH(water_node);
+    FR_ATTACH(field_node);
+    FR_ATTACH(sel_node);
+    FR_ATTACH(cam_node);
+    FR_ATTACH(mm_node);
+    FR_ATTACH(hud_node);
+#undef FR_ATTACH
 }
 
 // Фаза 2. Сцена: тени, дерево узлов, сущности, FBO рендера, первый кадр.
@@ -399,18 +431,21 @@ static int scene_build(Game *g, const WorldTextures *wt)
     }
     g->cam_node = camera_make_node(w, start_pos, start_yaw, start_pitch,
                                    start_fov, 0.1f, w->world_w * 1.5f);
-    if (!sun_node || !g->cam_node) return -1;
+    if (!sun_node || !g->cam_node) {
+        // Чистим за собой: созданные узлы + корень + тени (сцена не собрана).
+        scene_attach_nodes(g);
+        scene_teardown(g);
+        return -1;
+    }
     g->cam = g->cam_node->params;
 
     // fov из map.json — как значение по умолчанию, затем config.cfg поверх
     cvar_set("fov", g->cam->fov_deg);
     console_autoload();
 
-    g->spawn_pos[0] = g->cam->cam.pos[0];
-    g->spawn_pos[1] = g->cam->cam.pos[1];
-    g->spawn_pos[2] = g->cam->cam.pos[2];
-    g->spawn_yaw = g->cam->cam.yaw;
-    g->spawn_pitch = g->cam->cam.pitch;
+        // Спавн: стартовая точка/взгляд игрока (для «Новой игры»)
+    player_set_spawn(&g->player, g->cam->cam.pos, g->cam->cam.yaw,
+                     g->cam->cam.pitch);
 
     // Узлы сцены получают единый рендер-контекст (renderer.c) вместо cam/sun
     const RendererContext *rc = renderer_context();
@@ -425,28 +460,20 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->fauna_node = fauna_make_node(rc);
     g->particles_node = particles_make_node(w, rc);
     g->decals_node = decals_make_node(w, rc);
+    g->water_node = water_make_node(w, wt, rc);
     if (!g->sky_node || !g->terr_node || !g->wheat_node || !g->field_node ||
         !g->sel_node || !g->mm_node || !g->hud_node) {
         SDL_Log("Failed to create a scene node (missing texture/shader?)");
+        // Сцена не собрана начисто: освобождаем созданные узлы и тени.
+        scene_attach_nodes(g);
+        scene_teardown(g);
         return -1;
     }
     g->mm = g->mm_node->params;
     g->hud = g->hud_node->params;
     selection_set_on(0);             // рамки выделения — только по H (дебаг)
 
-    node_add(g->root, g->sky_node);
-    node_add(g->root, sun_node);
-    node_add(g->root, g->terr_node);
-    node_add(g->root, g->wheat_node);
-    if (g->obj_node) node_add(g->root, g->obj_node);
-    if (g->fauna_node) node_add(g->root, g->fauna_node);
-    if (g->particles_node) node_add(g->root, g->particles_node);
-    if (g->decals_node) node_add(g->root, g->decals_node);
-    node_add(g->root, g->field_node);
-    node_add(g->root, g->sel_node);
-    node_add(g->root, g->cam_node);
-    node_add(g->root, g->mm_node);
-    node_add(g->root, g->hud_node);
+    scene_attach_nodes(g);
 
     // Сущности: классы, мир, игрок, объекты карты
     {
@@ -545,13 +572,21 @@ int game_load_world(Game *g)
 {
     WorldTextures wt;
     if (world_load_geometry(g, &wt) != 0) return -1;   // фаза 1: данные карты
-    if (scene_build(g, &wt) != 0) return -1;           // фаза 2: сцена
+    if (scene_build(g, &wt) != 0) {
+        // scene_build уже освободила частичную сцену (scene_teardown внутри);
+        // здесь — откат данных фазы 1, иначе они утекают.
+        world_unload_geometry(g);
+        SDL_Log("World load failed: scene_build");
+        return -1;                                       // фаза 2: сцена
+    }
     map_apply();                                       // фаза 3: cvar'ы/команды
     audio_load_map(g);                                 // фаза 4: звук карты
 
     // Статические тени (режим 2): готовим карту теней сразу при загрузке
     if (cvar_get("r_shadows_mode") == 2.0f)
         terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
+    // Мокрость: запечённая маска "под крышей" (всегда, полезна для мокрости)
+    terrain_wetness_mask_bake(&g->world);
     SDL_Log("World loaded (%.0fx%.0f m)", g->world.world_w, g->world.world_d);
 
     // Скрипт карты (lua/maps/<карта>.lua): после сцены и сущностей
@@ -581,6 +616,7 @@ static void scene_teardown(Game *g)
     if (g->fauna_node) fauna_cleanup(g->fauna_node);
     if (g->particles_node) particles_cleanup(g->particles_node);
     if (g->decals_node) decals_cleanup(g->decals_node);
+    if (g->water_node) water_cleanup(g->water_node);
     if (g->obj_node) objects_cleanup(g->obj_node);
     veg_cleanup(g->wheat_node);
     terrain_cleanup(g->terr_node);
@@ -590,7 +626,7 @@ static void scene_teardown(Game *g)
     g->root = NULL;
     g->cam_node = g->sun_node = g->sky_node = g->terr_node = g->wheat_node = NULL;
     g->obj_node = g->field_node = g->sel_node = g->mm_node = g->hud_node = NULL;
-    g->fauna_node = g->particles_node = g->decals_node = NULL;
+    g->fauna_node = g->particles_node = g->decals_node = g->water_node = NULL;
     g->cam = NULL;
     g->mm = NULL;
     g->hud = NULL;
@@ -613,6 +649,7 @@ void game_unload_world(Game *g)
     audio_stop_map();            // фаза 4: звук карты
     scene_teardown(g);           // фаза 2: сцена
     world_unload_geometry(g);    // фаза 1: данные карты
+    material_clear_all();        // материалы карты не перетекают в следующую
     SDL_Log("World unloaded");
 }
 
@@ -630,10 +667,31 @@ void game_map_config_load(Game *g)
 
 void game_map_config_save(Game *g)
 {
-    FILE *f = fopen("config.cfg", "a");
-    if (f) {
-        fprintf(f, "map_name %s\n", g->map_name);
-        fclose(f);
+    // Раньше map_name дописывался в конец (append) — при каждом выходе строка
+    // копилась, файл рос. Теперь: читаем config.cfg (его до этого обновил
+    // console_save_config), выкидываем все старые map_name и пишем ровно одну.
+    char keep[4096] = { 0 };
+    int n = 0;
+    FILE *r = fopen("config.cfg", "r");
+    if (r) {
+        char line[128];
+        while (fgets(line, sizeof line, r)) {
+            char mname[64];
+            if (sscanf(line, "map_name %63s", mname) == 1) continue;  // старую — вон
+            size_t l = strlen(line);
+            if (n + (int)l < (int)sizeof keep - 1) {
+                memcpy(keep + n, line, l);
+                n += (int)l;
+                keep[n] = 0;
+            }
+        }
+        fclose(r);
+    }
+    FILE *w = fopen("config.cfg", "w");
+    if (w) {
+        fputs(keep, w);
+        fprintf(w, "map_name %s\n", g->map_name);
+        fclose(w);
     }
 }
 

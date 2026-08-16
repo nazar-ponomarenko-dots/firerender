@@ -24,8 +24,7 @@ engine.after(2.0, function()
     engine.log("[map1] высота под игроком: " .. string.format("%.1f", engine.terrain_height(x, z)))
 end)
 
--- Через 8с: приветствие на экране и телепорт на спавн (демо биндингов)
+-- Через 8с: приветствие на экране
 engine.after(8.0, function()
     engine.msg("Добро пожаловать в map1! (из Lua)")
-    engine.teleport(1000, 5, 562, 3.1416, -0.5)
 end)

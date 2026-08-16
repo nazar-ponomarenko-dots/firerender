@@ -62,6 +62,7 @@ void field_node_render(SceneNode *n, float dt)
 
 void field_cleanup(SceneNode *n)
 {
+    if (!n) return;   // error-path scene_build: узел мог не создаться
     FieldParams *p = n->params;
     resources_program_release(p->prog);
     glDeleteBuffers(1, &p->vbo);

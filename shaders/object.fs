@@ -19,6 +19,12 @@ uniform vec3 uTint;              // тон объекта (по умолчани
 //   1 = обычный блендинг, 2 = аддитивный, 3 = непрозрачный.
 uniform int uBlend;
 uniform float uAlpha;
+uniform float uWetness;        // мокрость 0..1 (fx.c)
+// Кубомап отражений воды (юнит 9, scene_uniforms_bind): мокрые деревья
+// (биллборды) глянцуют и отражают окружение.
+uniform samplerCube uReflection;
+// Шум мокрости (img/noise.png, юнит 11): пятна "мокрее / почти сухо"
+uniform sampler2D uNoise;
 
 // Свет: все направленные из map.json (индекс 0 — солнце, у него тени)
 #define SUN_MAX_LIGHTS 4
@@ -120,6 +126,13 @@ void main() {
     }
     vec3 N = normalize(uCamPos - vWorldPos);   // биллборд смотрит на камеру
     vec3 V = N;
+    float wet = clamp(uWetness, 0.0, 1.0);
+    // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
+    // ≈ 6 м / 1.25 м): каждое дерево в своём пятне мокроты.
+    float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
+                + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
+    wet *= mix(0.05, 1.8, noise * noise);
+    c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
 
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
@@ -162,6 +175,24 @@ void main() {
     light = min(light, vec3(1.0));       // не выгорает в белый, как у пшеницы
     vec3 col = c.rgb * uTint * light;
 
+    // мокрость: добавить спекулярный блик на влажных поверхностях (ビルボード ориентирован по V)
+    if (wet > 0.0) {
+        for (int i = 0; i < uLightCount; i++) {
+            vec3 li = normalize(uLightDir[i]);
+            vec3 H = normalize(li + V);
+            float s = pow(max(dot(N, H), 0.0), 64.0);
+            col += uLightColor[i] * uLightIntensity[i] * s * wet * 1.5;
+        }
+        // мокрый глянец: кубомап отражений. Нормаль биллборда всегда в
+        // камеру — для отражения берём «листовую» нормаль: вверх (крона)
+        // с примесью вида, тогда мокрые листья отражают небо и окружение.
+        vec3 leafN = normalize(vec3(0.0, 1.0, 0.0) * 0.65 + N * 0.35);
+        vec3 reflDir = reflect(-V, leafN);
+        vec3 reflCol = texture(uReflection, reflDir).rgb;
+        float fres = pow(1.0 - max(dot(leafN, V), 0.0), 3.0);
+        col = mix(col, reflCol, wet * (0.08 + 0.35 * fres));
+    }
+
     // СВЕТЯЩАЯСЯ ОБВОДКА при КОНТРОВОМ СВЕТЕ (как у пшеницы): смотрим
     // на дерево с теневой стороны, солнце за ним — по силуэту светится
     // обводка. Два слоя: резкое кольцо (~1.5 текселя) + мягкий ореол
@@ -170,7 +201,9 @@ void main() {
     float dist = distance(uCamPos, vWorldPos);
     if (uLightCount > 0 && length(L) > 0.5) {
         float near_fade = 1.0 - smoothstep(40.0, 180.0, dist);
-        float backlit = (1.0 - smoothstep(-0.1, 0.55, dot(L, V))) * near_fade;
+        // В ДОЖДЬ rim-обводка деревьев выключена (мокрая сцена без свечения)
+        float backlit = (1.0 - smoothstep(-0.1, 0.55, dot(L, V))) * near_fade
+                      * (1.0 - clamp(wet, 0.0, 1.0));
         if (backlit > 0.001) {
             vec2 tv = 1.5 / vec2(textureSize(uTex, 0).xy);
             vec2 tv2 = tv * 2.0;

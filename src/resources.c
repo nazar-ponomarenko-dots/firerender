@@ -226,12 +226,20 @@ static void cache_purge_pak(void)
     while (*pp) {
         ResEntry *e = *pp;
         if (e->from_pak) {
-            // GL-ресурсы уже удалены через refcount в scene_teardown,
-            // поэтому tex#/prog# удаляются без glDelete* (и мог случиться
-            // double-free, т.к. GL id были переиспользованы). А вот данные
-            // img# (stbi-пиксели) принадлежат кешу — их освобождаем.
-            if (strncmp(e->key, "img#", 4) == 0)
+            // Пак карты закрывается — его GL-объекты больше недействительны.
+            // Обычно scene_teardown до этого освободил их через refcount
+            // (resources_*_release: refs->0 + glDelete + cache_remove), и в
+            // кеше их уже нет. Если запись ещё здесь (refs > 0 — кто-то не
+            // дал release), освобождаем объект принудительно, иначе он
+            // утекает навсегда. img# (stbi-пиксели) принадлежат кешу.
+            if (strncmp(e->key, "tex#", 4) == 0) {
+                GLuint t = (GLuint)(uintptr_t)e->data;
+                glDeleteTextures(1, &t);
+            } else if (strncmp(e->key, "prog#", 5) == 0) {
+                glDeleteProgram((GLuint)(uintptr_t)e->data);
+            } else if (strncmp(e->key, "img#", 4) == 0) {
                 stbi_image_free(e->data);
+            }
             *pp = e->next;
             free(e);
         } else {
@@ -477,6 +485,41 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
 static ReshadeFn s_reshade[RESHADE_MAX];
 static int s_reshade_n = 0;
 
+// Отложенное удаление старых программ после hot-reload. Старую программу НЕЛЬЗЯ
+// удалять сразу: её id ещё держат живые узлы (glb/mesh/anim не слушают reshade),
+// и они продолжают её рисовать. Держим до тех пор, пока ВСЕ держатели не вернут
+// её через resources_program_release (remaining — сколько релизов осталось).
+typedef struct { GLuint prog; int remaining; } PendingProg;
+#define PROG_PENDING_MAX 128
+static PendingProg s_prog_pending[PROG_PENDING_MAX];
+static int s_prog_pending_n = 0;
+
+static void prog_pending_add(GLuint prog, int remaining)
+{
+    if (remaining <= 0) { glDeleteProgram(prog); return; }   // держателей нет
+    // Уже есть такой id (повторный reload до релиза) — складываем релизы
+    for (int i = 0; i < s_prog_pending_n; i++)
+        if (s_prog_pending[i].prog == prog) { s_prog_pending[i].remaining += remaining; return; }
+    if (s_prog_pending_n >= PROG_PENDING_MAX) { glDeleteProgram(prog); return; } // предохранитель
+    s_prog_pending[s_prog_pending_n].prog = prog;
+    s_prog_pending[s_prog_pending_n].remaining = remaining;
+    s_prog_pending_n++;
+}
+
+// Возвращает 1, если id найден в отложенных и обработан (релиз засчитан).
+static int prog_pending_release(GLuint prog)
+{
+    for (int i = 0; i < s_prog_pending_n; i++) {
+        if (s_prog_pending[i].prog != prog) continue;
+        if (--s_prog_pending[i].remaining <= 0) {
+            glDeleteProgram(prog);
+            s_prog_pending[i] = s_prog_pending[--s_prog_pending_n];
+        }
+        return 1;
+    }
+    return 0;
+}
+
 void resources_on_reshade(ReshadeFn fn)
 {
     if (!fn || s_reshade_n >= RESHADE_MAX) return;
@@ -494,11 +537,19 @@ int resources_shader_reload(void)
         long mt0 = file_mtime(e->vs);
         long mt1 = file_mtime(e->fs);
         if (mt0 == e->vs_mt && mt1 == e->fs_mt) continue;
-        // Перекомпиляция: новый id встаёт в кеш, старую программу удаляем
+        // Перекомпиляция: новый id встаёт в кеш, а старую программу отдаём в
+        // отложенное удаление — её ещё рисуют узлы, не слушающие reshade.
+        // ВАЖНО: refcount счёта СТАРОЙ программы уходит в pending, поэтому для
+        // нового id счётчик обнуляем: узлы, слушающие reshade, пере-запрашивают
+        // его через make_program (+1 ref), а старые держатели релизят свой
+        // старый id через отложенный список. Не обнулим — новый id унаследует
+        // чужой счёт и никогда не удалится.
         GLuint prog = program_link(e->vs, e->fs);
         if (!prog) continue;
-        glDeleteProgram((GLuint)(uintptr_t)e->data);
+        GLuint old = (GLuint)(uintptr_t)e->data;
+        prog_pending_add(old, e->refs);
         e->data = (void *)(uintptr_t)prog;
+        e->refs = 0;                 // новый id: держатели пере-запросят
         e->vs_mt = mt0;
         e->fs_mt = mt1;
         SDL_Log("shader reloaded: %s + %s", e->vs, e->fs);
@@ -512,6 +563,9 @@ int resources_shader_reload(void)
 
 void resources_program_release(GLuint prog)
 {
+    if (!prog) return;
+    // Сначала — отложенные (старые после hot-reload) программы
+    if (prog_pending_release(prog)) return;
     for (ResEntry *e = s_cache; e; e = e->next) {
         if (strncmp(e->key, "prog#", 5) != 0) continue;
         if ((GLuint)(uintptr_t)e->data != prog) continue;
@@ -524,6 +578,22 @@ void resources_program_release(GLuint prog)
     SDL_Log("resources: release of unknown program %u", prog);
 }
 
+// Перезапрос программы для hot-reload: берёт свежую ссылку на текущую
+// программу пары и только потом отдаёт старую. Именно это балансирует
+// refcount при reload: без release(old) каждый hot-reload утекал по одной
+// ссылке на программу у каждого слушателя reshade.
+// Порядок важен: сперва запрашиваем новую (если пара не собралась — старый
+// id остаётся у узла жив и невредим), релиз старой — после успеха.
+// old == 0 (первый вызов из *_init) — release пропускается.
+GLuint resources_program_replace(GLuint old, const char *vs_path,
+                                 const char *fs_path)
+{
+    GLuint prog = resources_program(vs_path, fs_path);
+    if (!prog) return 0;                 // не собралась — старую не трогаем
+    if (old) resources_program_release(old);
+    return prog;
+}
+
 // --- Жизненный цикл -----------------------------------------------------------
 void resources_init(void)
 {
@@ -532,6 +602,11 @@ void resources_init(void)
 
 void resources_shutdown(void)
 {
+    // Отложенные программы (старые id после hot-reload): их держатели могли
+    // не дожить до shutdown — на выходе удаляем всё разом.
+    for (int i = 0; i < s_prog_pending_n; i++)
+        glDeleteProgram(s_prog_pending[i].prog);
+    s_prog_pending_n = 0;
     int n = 0;
     ResEntry *e = s_cache;
     while (e) {

@@ -9,6 +9,7 @@
 #include "linalg.h"
 #include "world.h"
 #include "objects.h"
+#include "water.h"
 
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -87,10 +88,43 @@ void camera_update(Camera *cam, const WorldState *w,
     // Мышь вправо (dx>0) — поворачиваем взгляд вправо. В нашей системе
     // yaw растёт ВЛЕВО (forward = (sin yaw, 0, cos yaw)), поэтому минус.
     // m_invert — инверсия вертикали (меню: Управление).
+    // Интерполяция взгляда (cvar m_smooth, 0..1): 0 — сырое движение как
+    // раньше, 1 — сильное сглаживание. Целевые yaw/pitch копят ввод, а
+    // текущий взгляд догоняет их экспоненциально (независимо от FPS).
     float inv = cvar_get("m_invert") > 0.5f ? -1.0f : 1.0f;
-    cam->yaw   -= dx * sens;
-    cam->pitch -= dy * sens * inv;        // мышь вверх — смотрим вверх
+    static float s_want_yaw = 0.0f, s_want_pitch = 0.0f;
+    static int s_smooth_init = 0;
     float lim = 3.14159f / 2.0f - 0.01f;
+    if (!s_smooth_init) {
+        s_want_yaw = cam->yaw;
+        s_want_pitch = cam->pitch;
+        s_smooth_init = 1;
+    }
+    // Телепорт/новая игра/загрузка: взгляд сбросили извне — догонять
+    // старую цель нельзя (поедет камера). Привязываем цели к текущему.
+    if (fabsf(cam->yaw - s_want_yaw) > 3.0f ||
+        fabsf(cam->pitch - s_want_pitch) > 3.0f) {
+        s_want_yaw = cam->yaw;
+        s_want_pitch = cam->pitch;
+    }
+    s_want_yaw  -= dx * sens;
+    s_want_pitch -= dy * sens * inv;       // мышь вверх — смотрим вверх
+    if (s_want_pitch >  lim) s_want_pitch =  lim;
+    if (s_want_pitch < -lim) s_want_pitch = -lim;
+    float smooth = cvar_get("m_smooth");
+    if (smooth < 0.0f) smooth = 0.0f;
+    if (smooth > 1.0f) smooth = 1.0f;
+    if (smooth < 0.001f) {                 // 0 — мгновенно, как раньше
+        cam->yaw = s_want_yaw;
+        cam->pitch = s_want_pitch;
+    } else {
+        // Доля приближения за кадр на 60 FPS: smooth=1 -> 0.05 («дикая»
+        // интерполяция, сильный дрейф), smooth->0 -> ~1 (почти мгновенно)
+        float k = 0.05f + 0.95f * (1.0f - smooth);
+        float f = 1.0f - powf(1.0f - k, 60.0f * dt);
+        cam->yaw   += (s_want_yaw  - cam->yaw) * f;
+        cam->pitch += (s_want_pitch - cam->pitch) * f;
+    }
     if (cam->pitch >  lim) cam->pitch =  lim;   // не даём уйти "за голову"
     if (cam->pitch < -lim) cam->pitch = -lim;
 
@@ -140,6 +174,39 @@ void camera_update(Camera *cam, const WorldState *w,
         bool want_move = wlen > 1e-4f;
         if (want_move) { wishx /= wlen; wishz /= wlen; }
 
+        // Твёрдый рельеф (sv_maxslope): склон круче maxкрутизны — как стена.
+        // Скользим вдоль контура равной высоты вместо лезния вверх по круче склону.
+        if (want_move && !cam->fly) {
+            float max_slope = cvar_get("sv_maxslope");
+            if (max_slope > 0.0f && max_slope < 90.0f) {
+                float e = 0.75f;   // радиус сэмпла градиента, м
+                float hx = sample_height(w, cam->pos[0] + e, cam->pos[2])
+                         - sample_height(w, cam->pos[0] - e, cam->pos[2]);
+                float hz = sample_height(w, cam->pos[0], cam->pos[2] + e)
+                         - sample_height(w, cam->pos[0], cam->pos[2] - e);
+                float glen = sqrtf(hx*hx + hz*hz);          // |градиент высоты|
+                float slope_sin = glen / sqrtf(glen*glen + 4.0f*e*e); // sin угла наклона
+                float step_up = wishx*hx + wishz*hz;        // идём ли вверх по склону
+                if (step_up > 0.0f && slope_sin > sinf(max_slope * (float)M_PI / 180.0f)) {
+                    // движение вверх по слишком крутому склону: спроецируем
+                    // вдоль контура равной высоты (перпендикулярно градиенту)
+                    float cx = -hz, cz = hx;                // вдоль контура
+                    float clen = sqrtf(cx*cx + cz*cz);
+                    if (clen > 1e-5f) {
+                        cx /= clen; cz /= clen;
+                        float along = wishx*cx + wishz*cz;
+                        wishx = cx * along;
+                        wishz = cz * along;
+                        wlen = fabsf(along);
+                    } else {
+                        wishx = wishz = 0.0f;
+                        wlen = 0.0f;
+                    }
+                    want_move = wlen > 1e-4f;
+                }
+            }
+        }
+
         // ускорение к желаемой скорости (в воздухе — слабее)
         if (want_move) {
             float dot = cam->vx*wishx + cam->vz*wishz;
@@ -171,7 +238,27 @@ void camera_update(Camera *cam, const WorldState *w,
         float gravity = cvar_get("sv_gravity");
         if (gravity <= 0.0f) gravity = GRAVITY;
         cam->vy -= gravity * dt;                 // гравитация
+
+        // Вода: если точка покрыта водоёмом и глаза под поверхностью
+        // (вода глубже роста) — плаваем. Плавучесть выталкивает к
+        // поверхности, а течение реки (water_flow_at) сносит игрока.
+        float wl = water_surface_at(w, cam->pos[0], cam->pos[2]);
+        bool in_water = wl > ground - 0.05f;     // поверхность выше "дна"
+        if (in_water && cam->pos[1] < wl - 0.05f) {   // глаза под водой
+            // Плавучесть: под водой гравитация гасится, выталкивание
+            // превышает её (24 > 20) — игрок всплывает к поверхности,
+            // а не тонет на дно (там вода была не видна "вблизи").
+            cam->vy += (24.0f - gravity * 0.5f) * dt;
+            cam->vy *= 0.98f;                    // вязкое сопротивление
+            float flo[2];
+            if (water_flow_at(w, cam->pos[0], cam->pos[2], flo)) {
+                cam->vx += flo[0] * 3.5f * dt;   // течение реки несёт
+                cam->vz += flo[1] * 3.5f * dt;
+            }
+        }
+
         float ny = cam->pos[1] + cam->vy * dt;
+        if (in_water && ny > wl) ny = wl;        // не выныривать в воздух
         if (ny <= ground) {                      // приземлились (или уже стоим)
             float fall = cam->vy;
             cam->pos[1] = ground;
@@ -200,7 +287,7 @@ void camera_update(Camera *cam, const WorldState *w,
         // Шаги: движение по земле (не в полёте, не падаем). Таймер зависит
         // от скорости: бег — чаще. Присед — тише.
         float vsp2 = cam->vx * cam->vx + cam->vz * cam->vz;
-        if (cam->vy <= 0.1f && vsp2 > 0.5f) {
+        if (!in_water && cam->vy <= 0.1f && vsp2 > 0.5f) {
             s_step_timer -= dt;
             if (s_step_timer <= 0.0f) {
                 float spd = sqrtf(vsp2);
@@ -213,7 +300,7 @@ void camera_update(Camera *cam, const WorldState *w,
 
         // Шуршание: только при движении сквозь пшеницу (поле). Трава/кусты
         // звука не дают. Три варианта шелеста чередуются (как шаги).
-        if (cam->vy <= 0.1f && vsp2 > 0.5f) {
+        if (!in_water && cam->vy <= 0.1f && vsp2 > 0.5f) {
             bool in_field =
                 cam->pos[0] >= w->field_x0 && cam->pos[0] <= w->field_x0 + w->field_w &&
                 cam->pos[2] >= w->field_z0 && cam->pos[2] <= w->field_z0 + w->field_d;
@@ -241,6 +328,40 @@ void camera_update(Camera *cam, const WorldState *w,
     s_player_pos[0] = cam->pos[0];
     s_player_pos[1] = cam->pos[1];
     s_player_pos[2] = cam->pos[2];
+}
+
+// --- Raycast: луч из камеры вниз до рельефа --------------------------------
+// Возвращает 1 если луч попал в рельеф, 0 если вышел за мир.
+// out_x, out_z — точка попадания; out_y — высота рельефа в точке.
+int camera_raycast_terrain(const Camera *cam, const WorldState *w,
+                           float max_dist, float *out_x, float *out_y, float *out_z)
+{
+    if (!cam || !w) return 0;
+    float fwd[3];
+    camera_dirs(cam, fwd, NULL);
+    float x = cam->pos[0];
+    float y = cam->pos[1];
+    float z = cam->pos[2];
+    float step = 0.2f;   // шаг марша (м)
+    float dist = 0.0f;
+    while (dist < max_dist) {
+        x += fwd[0] * step;
+        y += fwd[1] * step;
+        z += fwd[2] * step;
+        dist += step;
+        // Проверка выхода за мир
+        if (x < 1.0f || x > w->world_w - 1.0f ||
+            z < 1.0f || z > w->world_d - 1.0f)
+            return 0;
+        float h = sample_height(w, x, z);
+        if (y <= h + 0.1f) {
+            if (out_x) *out_x = x;
+            if (out_y) *out_y = h;
+            if (out_z) *out_z = z;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 SceneNode *camera_make_node(const WorldState *w, const float *start_pos,

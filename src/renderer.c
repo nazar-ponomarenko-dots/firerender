@@ -19,19 +19,40 @@
 #include "linalg.h"
 #include "mapdata.h"
 #include "profiler.h"
+#include "resources.h"
 #include "sky.h"
+#include "ssr.h"
 #include "voxfog.h"
+#include "water.h"
 #include "world.h"
+#include "fx.h"
 
 #include <SDL3/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/stat.h>
+
+#include "png.h"
+#include "stb_image.h"
 
 // FBO сцены и тумана: создаются при загрузке мира (renderer_setup)
 static BloomParams s_bloom;
+// SSR — отражения экранного пространства (рельеф в дождь): сцена+отражение.
+static SsrParams s_ssr;
+// Кубомап отражений воды (6 граней, рендер от игрока — см. renderer_cubemap_pass)
+static GLuint s_refl_cubemap = 0;
+static GLuint s_refl_cubemap_fbo[6] = {0};
+static GLuint s_refl_cubemap_depth = 0;
+static int s_refl_cubemap_size = 256; // размер каждой грани
+static float s_cubemap_pos[3] = { 0, 0, 0 };  // центр последнего кубомапа
+static int s_cubemap_valid = 0;               // кубомап ещё не рендерился
+// Кубомап рендерится КАЖДЫЙ КАдр (реалтайм): отражения всегда свежие,
+// без запаздывания при движении. 6 рендеров сцены 256x256 за кадр.
 static int s_active = 0;       // мир загружен: FBO существуют
 static int s_wire = 0;         // каркасный режим (cvar r_wireframe)
+static GLuint s_noise_tex = 0; // img/noise.png: неравномерность мокрости/дымки
 static int s_vw = 1280, s_vh = 720;   // размер окна в пикселях
 
 int renderer_vw(void) { return s_vw; }
@@ -42,8 +63,130 @@ void renderer_set_viewport(int vw, int vh)
     if (vw > 0 && vh > 0) { s_vw = vw; s_vh = vh; }
 }
 
+// --- Cubemap reflection FBO ----------------------------------------------------
+static GLuint make_cubemap_color_tex(int size)
+{
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+    for (int face = 0; face < 6; face++) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8,
+                     size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    return id;
+}
+
+static GLuint load_cubemap_from_files(const char *dir, int *out_size)
+{
+    static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
+    GLuint id = 0;
+    int size = 0;
+    int first = 1;
+
+    // PNG хранит строки сверху вниз (в capture флип по Y), а glTexImage2D
+    // считает строку 0 низом — без обратного флипа отражения были бы
+    // перевёрнуты и ложились "криво". Флипаем при загрузке.
+    stbi_set_flip_vertically_on_load(1);
+    for (int face = 0; face < 6; face++) {
+        char pattern[256];
+        snprintf(pattern, sizeof pattern, "cubemap_*_%s.png", face_names[face]);
+        int count = 0;
+        char **files = SDL_GlobDirectory(dir, pattern, 0, &count);
+        if (!files || count == 0) {
+            if (files) SDL_free(files);
+            continue;
+        }
+        // Take the most recent (last in list)
+        char *latest = files[0];
+        for (int i = 1; i < count; i++) {
+            if (strcmp(files[i], latest) > 0) latest = files[i];
+        }
+        SDL_free(files);
+
+        char fullpath[512];
+        snprintf(fullpath, sizeof fullpath, "%s/%s", dir, latest);
+        int w, h, ch;
+        unsigned char *px = stbi_load(fullpath, &w, &h, &ch, 3);
+        if (!px) {
+            SDL_Log("Failed to load cubemap face %s: %s", latest, stbi_failure_reason());
+            continue;
+        }
+        if (first) {
+            glGenTextures(1, &id);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+            size = w;
+            first = 0;
+        }
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB8,
+                     w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
+        stbi_image_free(px);
+    }
+
+    if (id) {
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        if (out_size) *out_size = size;
+        SDL_Log("Loaded static cubemap from %s (%dx%d)", dir, size, size);
+    }
+    return id;
+}
+
+static void make_cubemap_fbo(int size)
+{
+    if (size <= 0) return;
+    if (s_refl_cubemap) {
+        glDeleteTextures(1, &s_refl_cubemap);
+        glDeleteFramebuffers(6, s_refl_cubemap_fbo);
+        glDeleteTextures(1, &s_refl_cubemap_depth);
+    }
+    s_refl_cubemap_size = size;
+    // Try to load static cubemap from cubemaps/ directory
+    s_refl_cubemap = load_cubemap_from_files("cubemaps", &size);
+    if (!s_refl_cubemap) {
+        // Fallback: create empty cubemap texture
+        s_refl_cubemap = make_cubemap_color_tex(size);
+        SDL_Log("Cubemap reflection FBO created (empty): %dx%d", size, size);
+    } else {
+        SDL_Log("Using static cubemap from cubemaps/ (%dx%d)", size, size);
+    }
+    // Глубина (общая для всех граней) - still needed for capture
+    glGenTextures(1, &s_refl_cubemap_depth);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, s_refl_cubemap_depth);
+    for (int face = 0; face < 6; face++) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24,
+                     size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    // FBO для каждой грани (still needed for capture command)
+    for (int face = 0; face < 6; face++) {
+        glGenFramebuffers(1, &s_refl_cubemap_fbo[face]);
+        glBindFramebuffer(GL_FRAMEBUFFER, s_refl_cubemap_fbo[face]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, s_refl_cubemap, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, s_refl_cubemap_depth, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            SDL_Log("Cubemap FBO face %d incomplete!", face);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 // --- Рендер-контекст: единое кадровое состояние сцены --------------------------
 static RendererContext s_rc;
+
+static void cubemap_center_pos(Game *g, float out[3]);   // fwd decl (ниже)
 
 const RendererContext *renderer_context(void)
 {
@@ -78,16 +221,36 @@ static void renderer_ctx_fill(Game *g)
         vec3_normalize(rc->cam_up);
         frustum_build(&rc->frustum, rc->viewproj);   // culling цветного прохода
     }
+    // Мокрость (дождь) — плавный 0..1 из fx.c (нарастает/высыхает секундами).
+    // В дождь оригинальные источники света не выключаются, а гаснут до 20%
+    // яркости; сверху добавляется яркий рассеянный «свет от неба», который
+    // компенсирует потерянные 80% освещённости.
+    rc->wetness = fx_wetness();
+    float light_dim = 1.0f - 0.8f * rc->wetness;   // 1.0 -> 0.20
     // Свет: направленные источники (0 = солнце)
+    float dir_sum = 0.0f;
     if (g->sun_node) {
         const SunParams *sun = g->sun_node->params;
         int n = sun->light_count > SUN_MAX_LIGHTS ? SUN_MAX_LIGHTS : sun->light_count;
         for (int i = 0; i < n; i++) {
             memcpy(rc->light_dir[i], sun->light_dir[i], 3 * sizeof(float));
             memcpy(rc->light_color[i], sun->light_color[i], 3 * sizeof(float));
-            rc->light_intensity[i] = sun->light_intensity[i];
+            rc->light_intensity[i] = sun->light_intensity[i] * light_dim;
+            dir_sum += sun->light_intensity[i];
         }
         rc->light_count = n;
+    }
+    // Свет от неба (только в дождь): светит ровно вниз, цвет пасмурного
+    // неба; яркость растёт с мокротой до 80% суммарной яркости солнца.
+    if (rc->wetness > 0.001f && dir_sum > 0.0f && rc->light_count < SUN_MAX_LIGHTS) {
+        int k = rc->light_count++;
+        rc->light_dir[k][0] = 0.0f;
+        rc->light_dir[k][1] = 1.0f;
+        rc->light_dir[k][2] = 0.0f;
+        rc->light_color[k][0] = 0.62f;
+        rc->light_color[k][1] = 0.68f;
+        rc->light_color[k][2] = 0.80f;
+        rc->light_intensity[k] = 0.8f * dir_sum * rc->wetness;
     }
     // Точечные и прожекторные источники (map.json lights[]: point/spot)
     rc->point_count = rc->spot_count = 0;
@@ -122,6 +285,20 @@ static void renderer_ctx_fill(Game *g)
         rc->fog_end = g->world.world_w * tc.fog_end;
     }
     rc->fog_on = cvar_get("r_fog_mode") > 0.5f;
+    // Видимость солнца (в дождь диск скрыт облаками — гаснет вместе с мокротой).
+    // Мокрость уже посчитана выше (rc->wetness) — она же гасит источник света.
+    rc->sun_glow = 1.0f - rc->wetness;
+    if (rc->sun_glow < 0.0f) rc->sun_glow = 0.0f;
+    if (rc->sun_glow > 1.0f) rc->sun_glow = 1.0f;
+    // Вьюпорт текущего прохода (проходы кубомапа переопределяют его)
+    rc->view_vp[0] = 0;
+    rc->view_vp[1] = 0;
+    rc->view_vp[2] = s_vw;
+    rc->view_vp[3] = s_vh;
+    // Кубомап отражений — статический: загружается из cubemaps/ при старте.
+    // refl_cubemap_dirty оставлен для совместимости, но не используется.
+    if (g->cam && g->world_loaded)
+        rc->refl_cubemap_dirty = 0;
     // Каскадные тени: текстуры и производные (матрицы свежит shadow.c)
     {
         const float boxes[SHADOW_CASCADES] = {
@@ -142,7 +319,7 @@ static void renderer_ctx_fill(Game *g)
             rc->shadow_box[c] = boxes[c];
             rc->shadow_depth[c] = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
             // bias рельефа: shadow_bias латеральных текселей (из map.json),
-            // на дальнем каскаде — 1/4 (иначе тень отрывается от гор)
+            // на дальнем каскаде — вдвое меньше (иначе тень отрывается от гор)
             float bias_world = (c == 3 ? 0.5f : 1.0f) * bias * boxes[c] / g_shadow_size[c];
             rc->shadow_bias[c] = bias_world / rc->shadow_depth[c];
             rc->shadow_grad[c] = 10.0f / rc->shadow_depth[c];
@@ -194,6 +371,9 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     su->u_fogend   = glGetUniformLocation(prog, "uFogEnd");
     su->u_fogon    = glGetUniformLocation(prog, "uFogOn");
     su->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
+    su->u_wetness = glGetUniformLocation(prog, "uWetness");
+    su->u_reflection = glGetUniformLocation(prog, "uReflection");
+    su->u_noise = glGetUniformLocation(prog, "uNoise");
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         char a[64], b[64];
         snprintf(a, sizeof a, "uShadowMap%d", c);
@@ -253,6 +433,23 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     if (su->u_fogon >= 0)    glUniform1f(su->u_fogon, rc->fog_on ? 1.0f : 0.0f);
     if (su->u_shadow_on >= 0)
         glUniform1f(su->u_shadow_on, rc->shadow_on ? 1.0f : 0.0f);
+    if (su->u_wetness >= 0)
+        glUniform1f(su->u_wetness, rc->wetness);
+    // Кубомап отражений воды на юните 9 (для мокрой земли/деревьев; вода
+    // держит его на юните 7 отдельно — не конфликтует). Внутри прохода
+    // граней кубомапа его НЕ биндим: текстура прикреплена к текущему FBO —
+    // сэмплинг был бы фидбек-лупом (UB).
+    if (su->u_reflection >= 0 && s_refl_cubemap && rc->pass != RP_CUBEMAP_FACE) {
+        glActiveTexture(GL_TEXTURE9);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, s_refl_cubemap);
+        glUniform1i(su->u_reflection, 9);
+    }
+    // Шум мокрости/дымки (img/noise.png, REPEAT) — юнит 11
+    if (su->u_noise >= 0 && s_noise_tex) {
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_2D, s_noise_tex);
+        glUniform1i(su->u_noise, 11);
+    }
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         // Каскады на текстурных юнитах 3..6 (семплеры назначены при init)
         if (su->u_shadowmap[c] >= 0 && rc->shadow_tex[c]) {
@@ -274,7 +471,11 @@ void renderer_setup(const WorldState *w, int vw, int vh)
 {
     memset(&s_bloom, 0, sizeof s_bloom);
     bloom_init(&s_bloom, vw, vh);
+    ssr_init(&s_ssr, vw, vh);
     voxfog_init(w, vw, vh);
+    make_cubemap_fbo(256); // кубомап фиксированного размера
+    s_cubemap_valid = 0;
+    s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
     s_active = 1;
     // Каркасный режим из config.cfg: sync_cvars срабатывает на изменение.
     s_wire = cvar_get("r_wireframe") > 0.5f;
@@ -284,6 +485,7 @@ void renderer_resize(int vw, int vh)
 {
     if (!s_active) return;
     bloom_resize(&s_bloom, vw, vh);
+    ssr_resize(&s_ssr, vw, vh);
     voxfog_resize(vw, vh);
 }
 
@@ -291,13 +493,30 @@ void renderer_teardown(void)
 {
     if (!s_active) return;
     bloom_cleanup(&s_bloom);
+    ssr_cleanup(&s_ssr);
     voxfog_cleanup();
+    if (s_refl_cubemap) {
+        glDeleteTextures(1, &s_refl_cubemap);
+        glDeleteFramebuffers(6, s_refl_cubemap_fbo);
+        glDeleteTextures(1, &s_refl_cubemap_depth);
+        s_refl_cubemap = 0;
+    }
+    if (s_noise_tex) {
+        resources_texture_release(s_noise_tex);
+        s_noise_tex = 0;
+    }
+    s_cubemap_valid = 0;
     s_active = 0;
 }
 
 void renderer_set_wireframe(int on)
 {
     s_wire = on ? 1 : 0;
+}
+
+GLuint renderer_refl_cubemap(void)
+{
+    return s_refl_cubemap;
 }
 
 // --- Обход дерева сцены --------------------------------------------------------
@@ -361,11 +580,134 @@ void renderer_begin(void)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
+// --- Cubemap reflection pass ---------------------------------------------------
+// 6 направлений/вверх-векторов граней кубомапа (стандартная ориентация GL:
+// рендер каждой грани развёрнут, чтобы samplerCube читал её по спеке).
+static const float s_face_dirs[6][3] = {
+    { 1,  0,  0},   // +X
+    {-1,  0,  0},   // -X
+    { 0,  1,  0},   // +Y
+    { 0, -1,  0},   // -Y
+    { 0,  0,  1},   // +Z
+    { 0,  0, -1},   // -Z
+};
+static const float s_face_ups[6][3] = {
+    { 0, -1,  0},   // +X
+    { 0, -1,  0},   // -X
+    { 0,  0,  1},   // +Y
+    { 0,  0, -1},   // -Y
+    { 0, -1,  0},   // +Z
+    { 0, -1,  0},   // -Z
+};
+
+// Центр кубомапа отражений: x/z игрока, y — уровень воды под игроком
+// (если воды нет — высота камеры: куб описывает окружение игрока).
+static void cubemap_center_pos(Game *g, float out[3])
+{
+    const Camera *cam = &g->cam->cam;
+    out[0] = cam->pos[0];
+    out[2] = cam->pos[2];
+    float ws = water_surface_at(&g->world, cam->pos[0], cam->pos[2]);
+    out[1] = (ws > -1e8f) ? ws : cam->pos[1];
+}
+
+// Рендер всех 6 граней кубомапа отражений из точки pos. Сохраняет/восстанавливает
+// камеру контекста: узлы сцены (небо, биллборды, фрустум) должны видеть
+// текущую грань, а не основную камеру. dt = 0 — время анимаций не крутим.
+static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *pos)
+{
+    if (!s_refl_cubemap || !g || !g->cam || !world) return;
+
+    RendererContext *rc = &s_rc;
+    // Сохраняем текущее состояние контекста
+    float orig_viewproj[16];
+    memcpy(orig_viewproj, rc->viewproj, sizeof orig_viewproj);
+    int orig_pass = rc->pass;
+    float orig_pos[3], orig_fwd[3], orig_right[3], orig_up[3];
+    memcpy(orig_pos, rc->cam_pos, sizeof orig_pos);
+    memcpy(orig_fwd, rc->cam_fwd, sizeof orig_fwd);
+    memcpy(orig_right, rc->cam_right, sizeof orig_right);
+    memcpy(orig_up, rc->cam_up, sizeof orig_up);
+    float orig_fov = rc->cam_fov_deg, orig_aspect = rc->cam_aspect;
+    int orig_vp[4];
+    memcpy(orig_vp, rc->view_vp, sizeof orig_vp);
+    Frustum orig_frustum;
+    memcpy(&orig_frustum, &rc->frustum, sizeof orig_frustum);
+    GLint orig_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &orig_fbo);
+
+    float proj[16];
+    mat4_perspective(proj, 90.0f * 3.14159f / 180.0f, 1.0f, rc->znear, rc->zfar);
+
+    // Проход грани: камера в центре куба; клип отрезает всё ниже центра
+    // (подводный/подземный мусор в отражениях не нужен).
+    rc->pass = RP_CUBEMAP_FACE;
+    memcpy(rc->cam_pos, pos, sizeof rc->cam_pos);
+    rc->cam_fov_deg = 90.0f;
+    rc->cam_aspect = 1.0f;
+    rc->view_vp[0] = 0;
+    rc->view_vp[1] = 0;
+    rc->view_vp[2] = s_refl_cubemap_size;
+    rc->view_vp[3] = s_refl_cubemap_size;
+
+    for (int face = 0; face < 6; face++) {
+        float view[16], viewproj[16], target[3];
+        target[0] = pos[0] + s_face_dirs[face][0];
+        target[1] = pos[1] + s_face_dirs[face][1];
+        target[2] = pos[2] + s_face_dirs[face][2];
+        mat4_lookat(view, pos, target, s_face_ups[face]);
+        mat4_mul(viewproj, proj, view);
+
+        memcpy(rc->viewproj, viewproj, sizeof rc->viewproj);
+        // Базис взгляда грани: небо (sky.fs) и биллборды (particle.vs)
+        // восстанавливают направление луча из cam_fwd/right/up.
+        memcpy(rc->cam_fwd, s_face_dirs[face], sizeof rc->cam_fwd);
+        memcpy(rc->cam_up, s_face_ups[face], sizeof rc->cam_up);
+        vec3_cross(rc->cam_fwd, rc->cam_up, rc->cam_right);
+        vec3_normalize(rc->cam_right);
+        vec3_cross(rc->cam_right, rc->cam_fwd, rc->cam_up);
+        vec3_normalize(rc->cam_up);
+        frustum_build(&rc->frustum, viewproj);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, s_refl_cubemap_fbo[face]);
+        glViewport(0, 0, s_refl_cubemap_size, s_refl_cubemap_size);
+        glClearColor(0.10f, 0.10f, 0.15f, 1.0f);
+        glDepthMask(GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        render_part(world, 0.0f, 0);   // dt = 0: время сцены не двигать
+    }
+
+    // Восстанавливаем контекст
+    memcpy(rc->viewproj, orig_viewproj, sizeof rc->viewproj);
+    rc->pass = orig_pass;
+    memcpy(rc->cam_pos, orig_pos, sizeof rc->cam_pos);
+    memcpy(rc->cam_fwd, orig_fwd, sizeof rc->cam_fwd);
+    memcpy(rc->cam_right, orig_right, sizeof rc->cam_right);
+    memcpy(rc->cam_up, orig_up, sizeof rc->cam_up);
+    rc->cam_fov_deg = orig_fov;
+    rc->cam_aspect = orig_aspect;
+    memcpy(rc->view_vp, orig_vp, sizeof rc->view_vp);
+    memcpy(&rc->frustum, &orig_frustum, sizeof rc->frustum);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)orig_fbo);
+    glViewport(orig_vp[0], orig_vp[1], orig_vp[2], orig_vp[3]);
+
+    memcpy(s_cubemap_pos, pos, sizeof s_cubemap_pos);
+    s_cubemap_valid = 1;
+}
+
 void renderer_frame(Game *g, float dt, int draw_3d)
 {
     renderer_ctx_fill(g);        // единый контекст сцены на этот кадр
     SceneNode *world = g->root;
     int did_3d = 0;
+
+    // Кубомап отражений — статический (загружен из cubemaps/ при старте).
+    // Рендер в реальном времени отключён для производительности.
+    // Для обновления используйте консольную команду cubemap_capture.
+
     // В игре и в паузе — рисуем сцену (пауза затемняет её меню).
     // В главном меню с фоткой-фоном сцену не рисуем вовсе (draw_3d = 0).
     if (world && draw_3d) {
@@ -394,10 +736,25 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();
+        // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
+        // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
+        GLuint scene_for_post = bloom_scene_tex(&s_bloom);
+        if (cvar_get("r_ssr") >= 0.5f &&
+            (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
+            cvar_get("r_ssr_strength") > 0.0f) {
+            Uint64 ts = SDL_GetPerformanceCounter();
+            prof_gpu_begin(PROF_SSR);
+            ssr_render(&s_ssr, bloom_scene_tex(&s_bloom),
+                       bloom_scene_depth(&s_bloom), &s_rc);
+            prof_gpu_end(PROF_SSR);
+            Uint64 te = SDL_GetPerformanceCounter();
+            prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
+            scene_for_post = ssr_tex(&s_ssr);
+        }
         if (voxfog_is_on()) {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, bloom_scene_tex(&s_bloom), voxfog_fbo());
+            bloom_render(&s_bloom, scene_for_post, voxfog_fbo());
             prof_gpu_end(PROF_BLOOM);
             Uint64 t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
@@ -411,7 +768,7 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         } else {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, bloom_scene_tex(&s_bloom), 0);
+            bloom_render(&s_bloom, scene_for_post, 0);
             prof_gpu_end(PROF_BLOOM);
             Uint64 t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
@@ -425,22 +782,17 @@ void renderer_frame(Game *g, float dt, int draw_3d)
 
 void renderer_end(Game *g, float dt)
 {
-    // Прицел-крест в центре (HL-стиль) — в игре, без консоли
-    if (g->world_loaded && app_state() == APP_PLAY && !console_active()) {
+    // Прицел — простая белая точка в центре (в игре, без консоли,
+    // cvar r_crosshair; консоль: toggle_crosshair)
+    if (g->world_loaded && app_state() == APP_PLAY && !console_active()
+        && cvar_get("r_crosshair") > 0.5f) {
         const float cx = s_vw * 0.5f, cy = s_vh * 0.5f;
-        const float cw4[4] = { 0.92f, 0.96f, 1.0f, 0.9f };
-        const float sh[4] = { 0.0f, 0.0f, 0.0f, 0.5f };
+        const float white[4] = { 1.0f, 1.0f, 1.0f, 0.9f };
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        // тень креста
-        hud_rect_draw(s_vw, s_vh, cx - 1.5f + 1.0f, cy - 1.0f + 1.0f, 3.0f, 2.0f, sh);
-        // горизонталь: два луча
-        hud_rect_draw(s_vw, s_vh, cx - 10.0f, cy - 1.0f, 7.0f, 2.0f, cw4);
-        hud_rect_draw(s_vw, s_vh, cx + 3.0f, cy - 1.0f, 7.0f, 2.0f, cw4);
-        // вертикаль: два луча
-        hud_rect_draw(s_vw, s_vh, cx - 1.0f, cy - 10.0f, 2.0f, 7.0f, cw4);
-        hud_rect_draw(s_vw, s_vh, cx - 1.0f, cy + 3.0f, 2.0f, 7.0f, cw4);
+        // точка 3x3 px в центре
+        hud_rect_draw(s_vw, s_vh, cx - 1.5f, cy - 1.5f, 3.0f, 3.0f, white);
     }
 
     // Сообщение карты (message из триггеров/use) — по центру экрана.
@@ -522,4 +874,66 @@ void renderer_end(Game *g, float dt)
             y += fh;
         }
     }
+}
+
+// --- Cubemap capture: рендер 6 граней в позиции и сохранение PNG --------------
+// Рендерит кубомап отражений из точки pos (размер size, лимит 512) той же
+// корректной логикой, что и живой прохождение отражений (renderer_cubemap_render_at),
+// и тут же читает каждую грань обратно, сохраняя 6 PNG в cubemaps/ (px..nz).
+// Заодно этот кубомап становится живым (вода начнёт отражать его).
+void renderer_cubemap_capture_at(Game *g, const float *pos, int size)
+{
+    if (!s_refl_cubemap || size <= 0 || !g || !pos) return;
+    if (size > 512) size = 512;   // лимит
+    if (size < 16) size = 16;
+
+    // Если размер отличается от текущего живого кубомапа — пересоздать под него
+    if (size != s_refl_cubemap_size)
+        make_cubemap_fbo(size);
+
+    // Рендер 6 граней из точки pos (корректная ориентация/клип/без солнца-в-дождь)
+    renderer_cubemap_render_at(g, g->root, pos);
+
+    static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
+
+    // Читаем каждую грань обратно из её FBO и сохраняем PNG
+    GLint orig_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &orig_fbo);
+    for (int face = 0; face < 6; face++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, s_refl_cubemap_fbo[face]);
+        glViewport(0, 0, size, size);
+        unsigned char *px = malloc((size_t)size * size * 3);
+        unsigned char *flip = malloc((size_t)size * size * 3);
+        if (px && flip) {
+            glReadPixels(0, 0, size, size, GL_RGB, GL_UNSIGNED_BYTE, px);
+            // PNG хранит строки сверху вниз, GL возвращает снизу вверх — флип по Y
+            size_t row = (size_t)size * 3;
+            for (int y = 0; y < size; y++)
+                memcpy(flip + (size_t)y * row, px + (size_t)(size - 1 - y) * row, row);
+
+            char path[256];
+            time_t now = time(NULL);
+            struct tm *tm = localtime(&now);
+            snprintf(path, sizeof path, "cubemaps/cubemap_%04d%02d%02d_%02d%02d%02d_%s.png",
+                     tm ? tm->tm_year + 1900 : 2026, tm ? tm->tm_mon + 1 : 1,
+                     tm ? tm->tm_mday : 1, tm ? tm->tm_hour : 0,
+                     tm ? tm->tm_min : 0, tm ? tm->tm_sec : 0,
+                     face_names[face]);
+#ifdef _WIN32
+            _mkdir("cubemaps");
+#else
+            mkdir("cubemaps", 0755);
+#endif
+            if (png_save(path, size, size, flip) == 0)
+                SDL_Log("cubemap_capture: saved %s (%dx%d)", path, size, size);
+            else
+                SDL_Log("cubemap_capture: failed to save %s", path);
+        }
+        free(px);
+        free(flip);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)orig_fbo);
+    glViewport(s_rc.view_vp[0], s_rc.view_vp[1], s_rc.view_vp[2], s_rc.view_vp[3]);
+
+    SDL_Log("cubemap_capture: done at (%.0f, %.0f, %.0f) size %d", pos[0], pos[1], pos[2], size);
 }

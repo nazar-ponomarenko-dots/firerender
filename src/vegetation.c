@@ -35,6 +35,7 @@
 #include "shadow.h"
 #include "sky.h"
 #include "world.h"
+#include "fx.h"
 
 #include "stb_image.h"
 #include <limits.h>
@@ -98,15 +99,14 @@ static int g_veg_shadow_cnt[4];
 // раньше жил в shadow.c, теперь принадлежит растительности.
 static GLuint s_shadowveg_prog = 0;
 static GLint u_veg_viewproj, u_veg_veg, u_veg_thin, u_veg_time;
-static GLint u_veg_campos, u_veg_dyn, u_veg_walk;
+static GLint u_veg_campos, u_veg_dyn, u_veg_walk, u_veg_windboost;
 static VegParams *s_veg = NULL;   // для hot-reload (shader_on_reshade)
 
-// Пересоздаёт программы, ищет uniform'ы и статичные uniform'ы (для hot-reload)
+// Проги создаются СНАРУЖИ (make_node / reshade: refcount балансируется там).
+// Здесь — только uniform'ы для ТЕКУЩИХ id (p->prog и s_shadowveg_prog).
 static void veg_prog_init(VegParams *p)
 {
     GLuint prog = p->prog;
-    // Теневой шейдер (глубина): прореживание уже сделано на CPU
-    s_shadowveg_prog = make_program("shaders/shadowveg.vs", "shaders/shadowveg.fs");
     u_veg_viewproj = glGetUniformLocation(s_shadowveg_prog, "uViewProj");
     u_veg_veg      = glGetUniformLocation(s_shadowveg_prog, "uVeg");
     u_veg_thin     = glGetUniformLocation(s_shadowveg_prog, "uThin");
@@ -114,11 +114,13 @@ static void veg_prog_init(VegParams *p)
     u_veg_campos   = glGetUniformLocation(s_shadowveg_prog, "uCamPos");
     u_veg_dyn      = glGetUniformLocation(s_shadowveg_prog, "uDyn");
     u_veg_walk     = glGetUniformLocation(s_shadowveg_prog, "uWalk");
+    u_veg_windboost = glGetUniformLocation(s_shadowveg_prog, "uWindBoost");
 
     scene_uniforms_init(&p->su, prog);    // общий набор сцены
     p->u_dyn      = glGetUniformLocation(prog, "uDyn");
     p->u_time     = glGetUniformLocation(prog, "uTime");   // ветер
     p->u_walk     = glGetUniformLocation(prog, "uWalk");
+    p->u_windboost = glGetUniformLocation(prog, "uWindBoost");
 
     // Статичные uniform'ы растительности
     glUseProgram(prog);
@@ -135,9 +137,21 @@ static void veg_prog_init(VegParams *p)
 }
 
 // Hot-reload: пересоздать программы и uniform'ы текущего узла
+// Hot-reload: пересоздать программы и uniform'ы текущего узла (replace
+// балансирует refcount; 0 — пара не собралась, остаётся прежний id).
 static void veg_reshade(void)
 {
-    if (s_veg) veg_prog_init(s_veg);
+    if (!s_veg) return;
+    GLuint prog = resources_program_replace(s_veg->prog,
+                                            "shaders/wheat.vs", "shaders/wheat.fs");
+    if (prog) s_veg->prog = prog;
+    else SDL_Log("veg: reshade failed, keeping old program");
+    GLuint sp = resources_program_replace(s_shadowveg_prog,
+                                          "shaders/shadowveg.vs",
+                                          "shaders/shadowveg.fs");
+    if (sp) s_shadowveg_prog = sp;
+    else SDL_Log("veg: shadow program reshade failed, keeping old");
+    veg_prog_init(s_veg);
 }
 static float g_veg_time;         // время симуляции (ветер)
 static int g_veg_visible = 1;    // тестовый тумблер отрисовки (perf-харнесс)
@@ -483,8 +497,13 @@ static void veg_update(const float cam_pos[3], VegParams *p)
         float dx = (float)(i * 16 + 8) - cam_pos[0];
         float dz = (float)(j * 16 + 8) - cam_pos[2];
         float r = sqrtf(dx*dx + dz*dz);
-        float tgd = veg_density(r, s_grass_density, s_grass_floor);  // целевая плотность
-        float twd = veg_density(r, s_wheat_density, s_wheat_floor);
+        float tgd = veg_density(r, cvar_get("r_grass_density"), s_grass_floor);
+        float twd = veg_density(r, cvar_get("r_wheat_density"), s_wheat_floor);
+        // ВАЖНО: та же формула плотности, что пишет veg_gen_chunk (из cvar'ов).
+        // Раньше цель считалась из map.json-констант (s_*_density), а чанк
+        // запоминал плотность из cvar'ов — из-за рассогласования КАЖДЫЙ чанк
+        // не проходил допуск, и вся растительность пересоздавалась на каждом
+        // переходе чанка (regen storm).
         bool need_gen = (!c->g && !c->w) ||
                         fabsf(c->dg_d - tgd) > VEG_REGEN_TOL ||
                         fabsf(c->dw_d - twd) > VEG_REGEN_TOL;
@@ -618,6 +637,7 @@ static void veg_shadow_draw(const RendererContext *rc)
     glUniform1f(u_veg_time, g_veg_time);
     glUniform3f(u_veg_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
     glUniform1f(u_veg_walk, rc->cam_fly ? 0.0f : 1.0f);
+    glUniform1f(u_veg_windboost, rc->wetness);   // тени синхронны с ветром
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, g_veg_tex);
     glUniform1i(u_veg_thin, 0);    // прореживание уже сделано на CPU
@@ -706,7 +726,7 @@ void veg_node_render(SceneNode *n, float dt)
         veg_shadow_draw(rc);
         return;
     }
-    g_veg_time += dt;                // время для ветра
+    g_veg_time += dt * (1.0f + fx_wetness());   // ветер: в дождь вдвое быстрее
     // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
     // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
     {
@@ -738,6 +758,7 @@ void veg_node_render(SceneNode *n, float dt)
     }
     glUniform1f(p->u_time, g_veg_time);
     glUniform1f(p->u_walk, rc->cam_fly ? 0.0f : 1.0f);
+    glUniform1f(p->u_windboost, rc->wetness);   // ветер: дождь сильнее
     // Frustum-отсечение статики: 6 плоскостей конуса из viewproj (метод
     // Gribb-Hartmann, матрицы column-major — строки m[c*4+r]).
     frustum_extract(rc->viewproj);
@@ -935,7 +956,17 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     p->vbo_dg = g_veg_vb[2];
     p->vbo_dw = g_veg_vb[3];
     p->tex = tex;
-    veg_prog_init(p);              // uniform'ы + статичные + теневая программа
+    // Теневой шейдер (глубина с прореживанием): после veg_cleanup() == 0,
+    // поэтому replace здесь эквивалентен plain-загрузке.
+    s_shadowveg_prog = resources_program_replace(s_shadowveg_prog,
+                                                 "shaders/shadowveg.vs",
+                                                 "shaders/shadowveg.fs");
+    if (!s_shadowveg_prog) {
+        resources_program_release(p->prog);
+        // ... остальное освободит вег_cleanup сцены (VBO/VAO уже в GL)
+        return NULL;
+    }
+    veg_prog_init(p);              // uniform'ы + статичные
     s_veg = p;                     // для hot-reload
     shader_on_reshade(veg_reshade);
 
@@ -965,7 +996,9 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
 
 void veg_cleanup(SceneNode *n)
 {
+    if (!n) return;   // безопасно при частичном построении сцены (error-path)
     VegParams *p = n->params;
+    if (!p) return;
     if (g_veg_chunks) {
         for (int i = 0; i < g_map_w * g_map_d; i++) {
             free(g_veg_chunks[i].g);
@@ -986,6 +1019,10 @@ void veg_cleanup(SceneNode *n)
     free(g_sc_shcnt[0]); free(g_sc_shcnt[1]);
     free(g_sc_shoff[0]); free(g_sc_shoff[1]);
     g_sc_cnt_g = g_sc_cnt_w = NULL;
+    g_sc_off_g = g_sc_off_w = NULL;
+    g_sc_cx = g_sc_cz = NULL;
+    g_sc_shcnt[0] = g_sc_shcnt[1] = NULL;
+    g_sc_shoff[0] = g_sc_shoff[1] = NULL;
     glDeleteBuffers(1, &g_veg_mesh_vbo);
     glDeleteBuffers(1, &g_veg_mesh_ibo);
     for (int q = 0; q < 4; q++) {

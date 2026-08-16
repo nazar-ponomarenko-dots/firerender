@@ -26,8 +26,4 @@ typedef enum {
 // Текущее состояние действий (меняют "+команды")
 extern bool g_act[A_COUNT];
 
-// Регистрирует +forward/-forward и прочие +/-команды в консоли.
-// Вызывать после console_init (один раз).
-void actions_register_commands(void);
-
 #endif

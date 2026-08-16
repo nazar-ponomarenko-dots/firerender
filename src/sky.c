@@ -18,7 +18,7 @@ typedef struct {
     GLuint prog, vao, vbo;         // программа и треугольник на весь экран
     GLuint tex;                    // панорама неба (img/skybox.png)
     GLint u_forward, u_right, u_up, u_tanfov, u_aspect;
-    GLint u_sundir, u_suncolor;
+    GLint u_sundir, u_suncolor, u_sunglow;
     const RendererContext *rc;     // базис камеры и солнце (renderer.c)
 } SkyParams;
 static SkyParams *s_sky = NULL;   // для hot-reload (shader_on_reshade)
@@ -37,8 +37,10 @@ SceneNode *sky_make_node(const RendererContext *rc)
     if (!prog || !img) return NULL;
 
     // Небо: REPEAT по X убирает шов панорамы на стыке 360 градусов.
+    // LINEAR (последний аргумент 1) — без полос/пикселизации на куполе
+    // (панорама 512x128 даёт ~1.4px/градус — NEAREST выглядел грязно).
     // Текстура — через кеш ресурсов (пиксели уже загружены для цвета тумана).
-    GLuint tex = resources_texture(sc.tex, 3, GL_REPEAT, 0);
+    GLuint tex = resources_texture(sc.tex, 3, GL_REPEAT, 1);
 
     // Цвет тумана берём из середины панорамы неба — горизонт сходится с небом
     float fr = 0, fg = 0, fb = 0, fn = 0;
@@ -80,6 +82,7 @@ SceneNode *sky_make_node(const RendererContext *rc)
     p->u_aspect  = glGetUniformLocation(prog, "uAspect");
     p->u_sundir  = glGetUniformLocation(prog, "uSunDir");
     p->u_suncolor = glGetUniformLocation(prog, "uSunColor");
+    p->u_sunglow  = glGetUniformLocation(prog, "uSunGlow");
 
     glUseProgram(prog);
     glUniform1i(glGetUniformLocation(prog, "uSky"), 0);
@@ -95,12 +98,16 @@ SceneNode *sky_make_node(const RendererContext *rc)
     return node_new("Sky", "Skybox3D", NULL, size, p, NULL, sky_node_render);
 }
 
-// Hot-reload: пересоздать программу и uniform'ы неба
+// Hot-reload: пересоздать программу и uniform'ы неба.
+// replace балансирует refcount (release старого + новая ссылка); если пара
+// не пересобралась — 0, продолжаем рисовать прежнюю программу.
 static void sky_reshade(void)
 {
     SkyParams *p = s_sky;
     if (!p) return;
-    p->prog = make_program("shaders/sky.vs", "shaders/sky.fs");
+    GLuint prog = resources_program_replace(p->prog,
+                                            "shaders/sky.vs", "shaders/sky.fs");
+    if (prog) p->prog = prog;
     p->u_forward = glGetUniformLocation(p->prog, "uForward");
     p->u_right   = glGetUniformLocation(p->prog, "uRight");
     p->u_up      = glGetUniformLocation(p->prog, "uUp");
@@ -108,6 +115,7 @@ static void sky_reshade(void)
     p->u_aspect  = glGetUniformLocation(p->prog, "uAspect");
     p->u_sundir  = glGetUniformLocation(p->prog, "uSunDir");
     p->u_suncolor = glGetUniformLocation(p->prog, "uSunColor");
+    p->u_sunglow  = glGetUniformLocation(p->prog, "uSunGlow");
     glUseProgram(p->prog);
     glUniform1i(glGetUniformLocation(p->prog, "uSky"), 0);
     glUniform3f(glGetUniformLocation(p->prog, "uFogColor"),
@@ -137,6 +145,7 @@ void sky_node_render(SceneNode *n, float dt)
     // Солнце — первый направленный источник (индекс 0)
     glUniform3f(p->u_sundir, rc->light_dir[0][0], rc->light_dir[0][1], rc->light_dir[0][2]);
     glUniform3f(p->u_suncolor, rc->light_color[0][0], rc->light_color[0][1], rc->light_color[0][2]);
+    glUniform1f(p->u_sunglow, rc->sun_glow);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex);
     glBindVertexArray(p->vao);
@@ -152,6 +161,7 @@ void sky_fog_color(float out[3])
 
 void sky_cleanup(SceneNode *n)
 {
+    if (!n) return;   // безопасно при частичном построении сцены (error-path)
     SkyParams *p = n->params;
     resources_program_release(p->prog);
     resources_texture_release(p->tex);

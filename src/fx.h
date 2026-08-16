@@ -49,10 +49,44 @@ void fx_emitter_stop_all(void);
 // Тикает эмиттеры (вызывать из particles_node_update/particles_update).
 void fx_update(float dt);
 
+// --- Погода (эмиттер, следующий за игроком) ------------------------------------
+// Запускает эмиттер пресета, центр которого каждый кадр копируется из позиции
+// игрока (x,z) с вертикальным смещением y_off (дождь/снег вокруг игрока).
+// stop_name — имя эмиттера (обычно равно name пресета); life<=0 — пока не
+// остановят.
+void fx_weather_start(const char *name, float y_off, const float *ext,
+                      float rate, float life);
+
+// --- Мокрость (wetness) -------------------------------------------------------
+// Возвращает текущий уровень мокрости 0..1 (растёт под дождём, сохнет без него).
+float fx_wetness(void);
+// Целевая мокрость (1.0 под дождём, 0.0 без дождя) — для плавного ramp.
+float fx_wetness_target(void);
+// Принудительная мокрость (тесты/консоль): фиксирует уровень без дождя.
+void fx_force_wetness(float v);
+
+// --- Кинематографичная погода (дождь) -----------------------------------------
+// Интенсивность дождя 0..1: нарастает (морось -> ливень) после запуска погоды.
+float fx_weather_intensity(void);
+
 // --- Управление и консоль -----------------------------------------------------
 // Список пресетов в консоль (fx_list).
 void fx_print_list(void);
-// Регистрирует консольные команды: fx, fx_burst, fx_list, fx_clear.
+// Регистрирует встроенные пресеты эффектов (вызывать при старте ДО команд).
+void fx_register_builtin(void);
+
+// --- Обработчики консольных команд (регистрирует центральный реестр cmdreg) ---
+void cmd_fx(const char *args);
+void cmd_fx_burst(const char *args);
+void cmd_fx_emit(const char *args);
+void cmd_fx_stop(const char *args);
+void cmd_fx_clear(const char *args);
+void cmd_fx_list(const char *args);
+void cmd_weather(const char *args);
+
+// [устаревшее] Раньше регистрировал пресеты И команды. Теперь пресеты —
+// fx_register_builtin(), команды — центральный реестр (cmdreg). Держим для
+// совместимости вызовов: просто зовёт fx_register_builtin().
 void fx_init_console(void);
 
 #endif
