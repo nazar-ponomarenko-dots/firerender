@@ -201,7 +201,9 @@ void main() {
     float dist = distance(uCamPos, vWorldPos);
     if (uLightCount > 0 && length(L) > 0.5) {
         float near_fade = 1.0 - smoothstep(40.0, 180.0, dist);
-        float backlit = (1.0 - smoothstep(-0.1, 0.55, dot(L, V))) * near_fade;
+        // В ДОЖДЬ rim-обводка деревьев выключена (мокрая сцена без свечения)
+        float backlit = (1.0 - smoothstep(-0.1, 0.55, dot(L, V))) * near_fade
+                      * (1.0 - clamp(wet, 0.0, 1.0));
         if (backlit > 0.001) {
             vec2 tv = 1.5 / vec2(textureSize(uTex, 0).xy);
             vec2 tv2 = tv * 2.0;

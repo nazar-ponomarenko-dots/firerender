@@ -69,6 +69,7 @@ static const ConCmdDesc s_cmds[] = {
     // Команды-действия (commands.c) — доступны сразу, в т.ч. в меню
     { "toggle_map",    "показать/скрыть мини-карту", cmd_toggle_map },
     { "toggle_hud",    "показать/скрыть HUD",        cmd_toggle_hud },
+    { "toggle_crosshair","показать/скрыть прицел",   cmd_toggle_crosshair },
     { "toggle_shadows","вкл/выкл тени",              cmd_toggle_shadows },
     { "toggle_fog",    "вкл/выкл объёмный туман",    cmd_toggle_fog },
     { "demo",          "демо-сцена (автополёт, замер FPS)", cmd_demo },

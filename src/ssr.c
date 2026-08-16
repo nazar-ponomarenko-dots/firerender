@@ -63,7 +63,7 @@ void ssr_init(SsrParams *s, int vw, int vh)
     s_ssr_p = s;
     cvar_register_ex("r_ssr",          1.0f, 0.0f, 1.0f,  CVAR_ARCHIVE,
                      "отражения экранного пространства (SSR)");
-    cvar_register_ex("r_ssr_strength", 0.55f, 0.0f, 1.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_ssr_strength", 0.7f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "сила SSR-отражений");
     cvar_register_ex("r_ssr_steps",    16.0f, 4.0f, 32.0f, CVAR_ARCHIVE,
                      "шагов марша SSR (дороже=дальше)");

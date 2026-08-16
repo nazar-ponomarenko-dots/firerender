@@ -782,8 +782,10 @@ void renderer_frame(Game *g, float dt, int draw_3d)
 
 void renderer_end(Game *g, float dt)
 {
-    // Прицел — простая белая точка в центре (в игре, без консоли)
-    if (g->world_loaded && app_state() == APP_PLAY && !console_active()) {
+    // Прицел — простая белая точка в центре (в игре, без консоли,
+    // cvar r_crosshair; консоль: toggle_crosshair)
+    if (g->world_loaded && app_state() == APP_PLAY && !console_active()
+        && cvar_get("r_crosshair") > 0.5f) {
         const float cx = s_vw * 0.5f, cy = s_vh * 0.5f;
         const float white[4] = { 1.0f, 1.0f, 1.0f, 0.9f };
         glDisable(GL_DEPTH_TEST);

@@ -226,10 +226,12 @@ void main() {
         light += uLightColor[i] * uLightIntensity[i]
                * (0.55 + 0.45 * diff) * sh;
         if (i == 0) {
-            // rim-контур против света и тёплый ореол вокруг солнца
-            float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+            // rim-контур против света и тёплый ореол вокруг солнца.
+            // В дождь (wet > 0) — ВЫКЛЮЧЕНЫ: мокрая сцена без контровой
+            // обводки (см. request).
+            float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0) * (1.0 - wet);
             light += uLightColor[0] * uLightIntensity[0]
-                   * (rim * 0.35 + pow(diff, 8.0) * 0.18 * sh);
+                   * (rim * 0.35 + pow(diff, 8.0) * 0.18 * sh * (1.0 - wet));
         }
     }
     // Точечные источники: затухание по дистанции, локальный свет

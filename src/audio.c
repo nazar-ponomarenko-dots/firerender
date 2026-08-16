@@ -36,6 +36,8 @@ static SDL_AudioStream *s_loop = NULL;
 static Sound *s_loop_snd = NULL;
 static float s_loop_vol = 0.0f;
 static Uint32 s_loop_sent = 0;
+// Множитель громкости петли (погода: в дождь ветер громче). 1 = без изменений
+static float s_loop_mul = 1.0f;
 
 // Музыка карты (вторая петля, независимая от ambient)
 static SDL_AudioStream *s_music = NULL;
@@ -209,6 +211,13 @@ void audio_loop_stop(void)
     s_loop_sent = 0;
 }
 
+void audio_loop_mul_volume(float mul)
+{
+    if (mul < 0.0f) mul = 0.0f;
+    if (mul > 4.0f) mul = 4.0f;
+    s_loop_mul = mul;   // gain (vol * mul) применяет audio_update каждый кадр
+}
+
 void audio_music_start(Sound *s, float volume)
 {
     if (!s_dev || !s || !s_music) return;
@@ -342,7 +351,7 @@ void audio_update(void)
     float sfx = snd_gain("snd_sfx");
     float mus = snd_gain("snd_music");
     if (s_loop && s_loop_snd) {
-        SDL_SetAudioStreamGain(s_loop, s_loop_vol * sfx);
+        SDL_SetAudioStreamGain(s_loop, s_loop_vol * s_loop_mul * sfx);
         int queued = SDL_GetAudioStreamQueued(s_loop);
         if (queued < (int)s_loop_snd->len / 2) {
             SDL_PutAudioStreamData(s_loop, s_loop_snd->data,

@@ -768,6 +768,21 @@ static void cmd_profiler(const char *args)
     console_print("profiler = %d", cvar_get("profiler") > 0.5f);
 }
 
+// m_smooth [0..1] — интерполяция взгляда мыши (0 = обычный ввод,
+// 1 = сильное сглаживание). Без аргумента — инверсия вкл/выкл.
+static void cmd_m_smooth(const char *args)
+{
+    float v;
+    if (sscanf(args, "%f", &v) == 1) {
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        cvar_set("m_smooth", v);
+    } else {
+        cvar_set("m_smooth", cvar_get("m_smooth") > 0.5f ? 0.0f : 1.0f);
+    }
+    console_print("m_smooth = %.2f", cvar_get("m_smooth"));
+}
+
 // Снимает обрамляющие кавычки: '"cmd1; cmd2"' -> 'cmd1; cmd2'
 static void strip_quotes(char *s)
 {
@@ -891,7 +906,10 @@ void console_init(void)
     cvar_register_ex("r_shadows_mode", 1.0f, 0, 3, CVAR_ARCHIVE, "тени: 0=выкл, 1=CSM, 2=статические, 3=пятна");
     cvar_register_ex("r_fog_mode", 1.0f, 0, 2, CVAR_ARCHIVE, "туман: 0=выкл, 1=объёмный, 2=простой");
     cvar_register_ex("r_bloom", 1.0f, 0, 1, CVAR_ARCHIVE, "свечение (bloom)");
+    cvar_register_ex("r_crosshair", 1.0f, 0, 1, CVAR_ARCHIVE, "прицел (точка в центре)");
     cvar_register_ex("m_invert", 0.0f, 0, 1, CVAR_ARCHIVE, "инверсия мыши по Y");
+    cvar_register_ex("m_smooth", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "интерполяция взгляда (0 = обычный ввод, 1 = сильное сглаживание)");
     cvar_register_ex("r_fullscreen", 0.0f, 0, 1, CVAR_ARCHIVE, "полноэкранный режим");
     cvar_register_ex("r_vsync", 0.0f, 0, 1, CVAR_ARCHIVE, "вертикальная синхронизация");
     cvar_register_ex("r_wireframe", 0.0f, 0, 1, CVAR_ARCHIVE | CVAR_CHEAT, "каркасный режим (чит)");
@@ -928,6 +946,7 @@ void console_init(void)
     console_add_command("toggle", "toggle <cvar> — инверсия 0/1", cmd_toggle);
     console_add_command("snd_debug", "snd_debug [0|1] — звуки в HUD", cmd_snd_debug);
     console_add_command("profiler", "profiler [0|1] — панель производительности", cmd_profiler);
+    console_add_command("m_smooth", "m_smooth [0..1] — интерполяция взгляда мыши", cmd_m_smooth);
 
     SDL_SetLogOutputFunction(log_hook, NULL);
     console_print("firerender console ready (help — список команд)");

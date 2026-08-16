@@ -80,6 +80,14 @@ void cmd_toggle_hud(const char *args)
     SDL_Log("Debug: %s", g->hud->visible ? "ON" : "OFF");
 }
 
+void cmd_toggle_crosshair(const char *args)
+{
+    (void)args;
+    float on = cvar_get("r_crosshair") > 0.5f ? 0.0f : 1.0f;
+    cvar_set("r_crosshair", on);
+    SDL_Log("Crosshair: %s", on > 0.5f ? "ON" : "OFF");
+}
+
 void cmd_toggle_shadows(const char *args)
 {
     (void)args;

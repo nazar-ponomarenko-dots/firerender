@@ -12,6 +12,7 @@
 void cmd_noclip(const char *args);
 void cmd_toggle_map(const char *args);
 void cmd_toggle_hud(const char *args);
+void cmd_toggle_crosshair(const char *args);
 void cmd_toggle_shadows(const char *args);
 void cmd_toggle_fog(const char *args);
 void cmd_demo(const char *args);

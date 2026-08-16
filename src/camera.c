@@ -88,10 +88,43 @@ void camera_update(Camera *cam, const WorldState *w,
     // Мышь вправо (dx>0) — поворачиваем взгляд вправо. В нашей системе
     // yaw растёт ВЛЕВО (forward = (sin yaw, 0, cos yaw)), поэтому минус.
     // m_invert — инверсия вертикали (меню: Управление).
+    // Интерполяция взгляда (cvar m_smooth, 0..1): 0 — сырое движение как
+    // раньше, 1 — сильное сглаживание. Целевые yaw/pitch копят ввод, а
+    // текущий взгляд догоняет их экспоненциально (независимо от FPS).
     float inv = cvar_get("m_invert") > 0.5f ? -1.0f : 1.0f;
-    cam->yaw   -= dx * sens;
-    cam->pitch -= dy * sens * inv;        // мышь вверх — смотрим вверх
+    static float s_want_yaw = 0.0f, s_want_pitch = 0.0f;
+    static int s_smooth_init = 0;
     float lim = 3.14159f / 2.0f - 0.01f;
+    if (!s_smooth_init) {
+        s_want_yaw = cam->yaw;
+        s_want_pitch = cam->pitch;
+        s_smooth_init = 1;
+    }
+    // Телепорт/новая игра/загрузка: взгляд сбросили извне — догонять
+    // старую цель нельзя (поедет камера). Привязываем цели к текущему.
+    if (fabsf(cam->yaw - s_want_yaw) > 3.0f ||
+        fabsf(cam->pitch - s_want_pitch) > 3.0f) {
+        s_want_yaw = cam->yaw;
+        s_want_pitch = cam->pitch;
+    }
+    s_want_yaw  -= dx * sens;
+    s_want_pitch -= dy * sens * inv;       // мышь вверх — смотрим вверх
+    if (s_want_pitch >  lim) s_want_pitch =  lim;
+    if (s_want_pitch < -lim) s_want_pitch = -lim;
+    float smooth = cvar_get("m_smooth");
+    if (smooth < 0.0f) smooth = 0.0f;
+    if (smooth > 1.0f) smooth = 1.0f;
+    if (smooth < 0.001f) {                 // 0 — мгновенно, как раньше
+        cam->yaw = s_want_yaw;
+        cam->pitch = s_want_pitch;
+    } else {
+        // Доля приближения за кадр на 60 FPS: smooth=1 -> 0.05 («дикая»
+        // интерполяция, сильный дрейф), smooth->0 -> ~1 (почти мгновенно)
+        float k = 0.05f + 0.95f * (1.0f - smooth);
+        float f = 1.0f - powf(1.0f - k, 60.0f * dt);
+        cam->yaw   += (s_want_yaw  - cam->yaw) * f;
+        cam->pitch += (s_want_pitch - cam->pitch) * f;
+    }
     if (cam->pitch >  lim) cam->pitch =  lim;   // не даём уйти "за голову"
     if (cam->pitch < -lim) cam->pitch = -lim;
 

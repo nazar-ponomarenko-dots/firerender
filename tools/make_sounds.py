@@ -121,6 +121,9 @@ def make_wind(seed=7):
     return out
 
 
+# --- Дождь: белый шум с быстрыми модуляциями капель (плотный шум дождя) ---------
+# (Не используется: в дождь движок делает громче петлю ветра — см. fx.c)
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     save("step1.wav", make_step(101, hardness=0.7, noise=0.30), target_rms=2500.0)
@@ -137,6 +140,8 @@ def main():
                                     low=0.28), target_rms=2200.0)
     save("rustle.wav", make_rustle(3), target_rms=2000.0)   # общий (для карт)
     save("wind.wav", make_wind(), target_rms=2400.0)
+    save("rain.wav", make_rain(), target_rms=2600.0)
+    save("thunder.wav", make_thunder(), target_rms=4200.0)
     print("Готово.")
 
 

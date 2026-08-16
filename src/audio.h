@@ -31,6 +31,9 @@ void audio_play(Sound *s, float volume, float pitch);
 // volume 0..1.
 void audio_loop_start(Sound *s, float volume);
 void audio_loop_stop(void);
+// Множитель громкости петли на ходу (погода: в дождь ветер громче).
+// 1.0 — без изменений; применяет audio_update каждый кадр.
+void audio_loop_mul_volume(float mul);
 
 // Музыка карты: вторая независимая петля (не конфликтует с ambient).
 void audio_music_start(Sound *s, float volume);

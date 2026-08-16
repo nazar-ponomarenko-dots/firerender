@@ -308,7 +308,7 @@ static int menu_audio(void)
 
 static int menu_graphics(void)
 {
-    menu_start("ГРАФИКА", 12, 460.0f);
+    menu_start("ГРАФИКА", 13, 460.0f);
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
@@ -338,6 +338,8 @@ static int menu_graphics(void)
     }
     cvar_checkbox(&s_ui, "r_bloom", "Свечение (bloom)");
     cvar_slider(&s_ui, "r_bloom_strength", "Сила свечения", 0.0f, 1.5f, "%.2f");
+    // SSR-отражения на мокром рельефе (сила — не в меню, cvar r_ssr_strength).
+    cvar_checkbox(&s_ui, "r_ssr", "Отражения луж (SSR)");
     cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
     cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
     ui_sep(&s_ui);
@@ -347,8 +349,17 @@ static int menu_graphics(void)
 
 static int menu_controls(void)
 {
-    menu_start("УПРАВЛЕНИЕ", 7, 460.0f);
-    cvar_slider(&s_ui, "cl_sens", "Чувствительность мыши", 0.0001f, 0.05f, "%.4f");
+    menu_start("УПРАВЛЕНИЕ", 9, 460.0f);
+    // Чувствительность мыши в удобных единицах: 1.0 = дефолт (0.0025
+    // рад/пиксель, cvar cl_sens), диапазон x0.1..x10.
+    {
+        float v = cvar_get("cl_sens") / 0.0025f;   // в единицах «дефолта»
+        if (ui_slider(&s_ui, "Чувствительность мыши", &v, 0.1f, 10.0f, "%.2f"))
+            cvar_set("cl_sens", v * 0.0025f);
+    }
+    // Интерполяция взгляда (cvar m_smooth): 0 — обычный ввод, 1 — сильное
+    // сглаживание (плавный «плывущий» взгляд).
+    cvar_slider(&s_ui, "m_smooth", "Сглаживание мыши (интерполяция)", 0.0f, 1.0f, "%.2f");
     cvar_checkbox(&s_ui, "m_invert", "Инверсия мыши (Y)");
     ui_sep(&s_ui);
     if (ui_button(&s_ui, "КЛАВИШИ (переназначить)")) return SCR_KEYS;

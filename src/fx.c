@@ -17,11 +17,13 @@
 // ============================================================================
 #include "fx.h"
 
+#include "audio.h"
 #include "camera.h"
 #include "console.h"
 #include "cvars.h"
 #include "game.h"
 
+#include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -73,13 +75,36 @@ typedef struct {
     int follow;        // 1 = центр следует за камерой (погода)
     float y_off;       // вертикальное смещение центра от камеры (для follow)
     float pos[3], ext[3];
-    float rate;        // частиц/сек
+    float base_ext[3]; // исходный бокс (у дождя растёт с интенсивностью)
+    float rate;        // частиц/сек (текущая; см. base_rate)
+    float base_rate;   // исходная частота (ramp погоды её масштабирует)
     float accum;       // накопитель времени
     float life;        // остаток времени (<0 = бесконечно)
     FxPreset preset;   // копия (чтобы не зависеть от реестра)
 } FxEmitter;
 
 static FxEmitter s_emitters[FX_MAX_EMITTERS];
+
+// --- Кинематографичная погода (дождь) -----------------------------------------
+// Дождь НАРАСТАЕТ: интенсивность 0->1 за ~4 с (плавная s-кривая) — морось
+// переходит в ливень: частота, бокс эмиттера и косой ветер растут вместе с
+// ней. Ветер звучит громче с интенсивностью (audio_loop_mul_volume).
+// У земли — брызги. Без молний, вспышек и грома.
+static float s_weather_time = 0.0f;   // время роста дождя (ramp), с
+static int s_weather_on = 0;          // дождь активен (эмиттер жив)
+static float s_gust_t = 0.0f;         // время для шумов ветра
+static float s_splash_acc = 0.0f;     // накопитель брызг
+
+// Интенсивность дождя 0..1 из времени нарастания (плавный s-изгиб).
+float fx_weather_intensity(void);
+
+float fx_weather_intensity(void)
+{
+    if (!s_weather_on) return 0.0f;
+    float k = s_weather_time / 4.0f;
+    if (k > 1.0f) k = 1.0f;
+    return k * k * (3.0f - 2.0f * k);   // smoothstep 0..1
+}
 
 // --- Wetness state -----------------------------------------------------------
 static float s_wetness = 0.0f;         // текущий уровень мокрости 0..1
@@ -116,7 +141,11 @@ void fx_emitter_start(const char *name, const float *pos, const float *ext,
     e->ext[0] = ext ? ext[0] : 0.0f;
     e->ext[1] = ext ? ext[1] : 0.0f;
     e->ext[2] = ext ? ext[2] : 0.0f;
+    e->base_ext[0] = e->ext[0];
+    e->base_ext[1] = e->ext[1];
+    e->base_ext[2] = e->ext[2];
     e->rate = rate > 0.0f ? rate : 1.0f;
+    e->base_rate = e->rate;
     e->accum = 0.0f;
     e->life = life > 0.0f ? life : -1.0f;
     e->preset = *f;
@@ -139,11 +168,28 @@ void fx_weather_start(const char *name, float y_off, const float *ext,
     fx_emitter_start(name, pos, ext, rate, life);
     FxEmitter *e = emitter_find(name);
     if (e) { e->follow = 1; e->y_off = y_off; }
+    // Дождь: запускаем кинематографичное нарастание (звук — только ветер).
+    if (strcmp(name, "rain") == 0) {
+        s_weather_on = 1;
+        s_weather_time = 0.0f;
+    }
 }
 
 void fx_emitter_stop_all(void)
 {
     for (int i = 0; i < FX_MAX_EMITTERS; i++) s_emitters[i].active = 0;
+}
+
+// Порывы ветра: два синуса + шум дают живые непериодические толчки.
+// Возвращает текущую силу порыва 0..1.
+static float wind_gust(void)
+{
+    float g = 0.6f
+            + 0.25f * sinf(s_gust_t * 0.55f) * sinf(s_gust_t * 0.21f + 1.7f)
+            + 0.15f * sinf(s_gust_t * 1.37f + 0.4f);
+    if (g < 0.0f) g = 0.0f;
+    if (g > 1.0f) g = 1.0f;
+    return g;
 }
 
 void fx_update(float dt)
@@ -155,6 +201,7 @@ void fx_update(float dt)
         camy = g->cam->cam.pos[1];
         camz = g->cam->cam.pos[2];
     }
+    s_gust_t += dt;
 
     // Проверка активного дождя для мокрости
     int rain_active = 0;
@@ -165,6 +212,25 @@ void fx_update(float dt)
             break;
         }
     }
+    if (!rain_active) {
+        // Дождь закончился: сбрасываем нарастание, возвращаем громкость ветра
+        if (s_weather_on) { s_weather_on = 0; s_weather_time = 0.0f; }
+        audio_loop_mul_volume(1.0f);
+    }
+
+    // Кинематографичное нарастание: интенсивность 0->1 за ~4 с
+    float inten = 0.0f;
+    if (rain_active) {
+        if (s_weather_time < 4.0f) s_weather_time += dt;
+        inten = fx_weather_intensity();
+        // Ветер громче с интенсивностью ливня (без отдельного звука дождя)
+        audio_loop_mul_volume(1.0f + 1.2f * inten);
+    }
+
+    // Ветер: базовый + порывы, растёт с интенсивностью дождя
+    float gust = wind_gust() * inten;
+    float wind_x = 3.5f + 3.0f * gust;
+    float wind_z = 1.2f + 1.8f * gust;
 
     for (int i = 0; i < FX_MAX_EMITTERS; i++) {
         FxEmitter *e = &s_emitters[i];
@@ -179,11 +245,23 @@ void fx_update(float dt)
             e->pos[1] = camy + e->y_off;
             e->pos[2] = camz;
         }
+        // Дождь: ramp масштабирует частоту и бокс (морось -> ливень),
+        // плюс косой ветер по текущему порыву.
+        if (strcmp(e->name, "rain") == 0) {
+            e->rate = e->base_rate * (0.15f + 0.85f * inten);
+            float bk = 0.5f + 0.5f * inten;
+            e->ext[0] = e->base_ext[0] * bk;
+            e->ext[2] = e->base_ext[2] * bk;
+        }
         e->accum += e->rate * dt;
         int n = (int)e->accum;
         e->accum -= n;
         // Частицы в области [pos±ext], вертикаль от верха бокса вниз
         ParticleParams pp = e->preset.pp;
+        if (strcmp(e->name, "rain") == 0) {
+            pp.wind[0] = wind_x;
+            pp.wind[2] = wind_z;
+        }
         for (int k = 0; k < n; k++) {
             float rx = e->ext[0] > 0.001f
                        ? (e->pos[0] + (rand() % 1000) / 1000.0f * 2.0f * e->ext[0] - e->ext[0])
@@ -199,9 +277,33 @@ void fx_update(float dt)
         }
     }
 
+    // Брызги у земли: пока идёт дождь и земля рядом, спавним мелкие всплески
+    // на поверхности вокруг игрока (только когда ливень уже сильный — в
+    // морось брызг не видно).
+    if (inten > 0.6f && g && g->cam && g->world_loaded) {
+        s_splash_acc += dt * (18.0f * inten);
+        int ns = (int)s_splash_acc;
+        s_splash_acc -= ns;
+        if (ns > 0) {
+            const FxPreset *sp = fx_find("splash");
+            if (sp) {
+                ParticleParams pp = sp->pp;
+                for (int k = 0; k < ns; k++) {
+                    float rx = camx + ((rand() % 1000) / 1000.0f * 2.0f - 1.0f) * 6.0f;
+                    float rz = camz + ((rand() % 1000) / 1000.0f * 2.0f - 1.0f) * 6.0f;
+                    float h = sample_height(&g->world, rx, rz);
+                    pp.pos[0] = rx; pp.pos[1] = h + 0.03f; pp.pos[2] = rz;
+                    particles_emit(&pp);
+                }
+            }
+        }
+    }
+
     // Wetness ramp: нарастает под дождём, сохнет без.
     // s_wet_force >= 0 — принудительная мокрость (тест, без дождя).
-    s_wetness_target = rain_active ? 1.0f : 0.0f;
+    // Мокрость следует за интенсивностью ливня, а не за фактом запуска —
+    // земля намокает постепенно вместе с усилением дождя.
+    s_wetness_target = rain_active ? inten : 0.0f;
     if (s_wet_force >= 0.0f) s_wetness_target = s_wet_force;
     if (s_wetness < s_wetness_target)
         s_wetness = s_wetness + s_wetness_ramp_up * dt > s_wetness_target ? s_wetness_target : s_wetness + s_wetness_ramp_up * dt;
@@ -340,7 +442,7 @@ void cmd_weather(const char *args)
         console_print("weather: нет пресета \"%s\" (fx_list)", name);
         return;
     }
-    if (rate <= 0.0f) rate = 100.0f;
+    if (rate <= 0.0f) rate = 1000.0f;
     float ext[3] = { 20.0f, 10.0f, 20.0f };
     fx_weather_start(name, 12.0f, ext, rate, 0.0f);
     console_print("weather: %s rate=%g (следует за игроком)", name, rate);
@@ -403,16 +505,29 @@ void fx_register_builtin(void)
             .gravity = -1.0f, .drag = 1.2f, .sway = 0.6f, .blend = 1 };
         fx_register("fire", &pp, 6);
     }
-    // Дождь: тонкие стрики вниз, быстрые, слегка голубые
+    // Дождь: тонкие стрики вниз, быстрые, слегка голубые. Ветер (косые
+    // струи + порывы) подставляется каждый кадр в fx_update из интенсивности.
     {
-        ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.15f,
-            .speed0 = 15.0f, .speed1 = 25.0f,
-            .life0 = 1.0f, .life1 = 1.5f,
-            .size0 = 0.04f, .size1 = 0.03f,
-            .alpha0 = 0.6f, .alpha1 = 0.0f,
+        ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.12f,
+            .speed0 = 18.0f, .speed1 = 30.0f,
+            .life0 = 0.8f, .life1 = 1.4f,
+            .size0 = 0.06f, .size1 = 0.04f,
+            .alpha0 = 0.5f, .alpha1 = 0.0f,
             .r = 0.7f, .g = 0.8f, .b = 1.0f,
-            .gravity = 9.8f, .drag = 0.1f, .streak = 1 };
+            .gravity = 6.0f, .drag = 0.1f, .streak = 1 };
         fx_register("rain", &pp, 1);
+    }
+    // Брызги: мелкие всплески капель о землю (ливень, fx_update спавнит
+    // их на рельефе вокруг игрока); растут и гаснут, аддитивные.
+    {
+        ParticleParams pp = { .dir = {0,1,0}, .spread = 0.6f,
+            .speed0 = 0.3f, .speed1 = 1.0f,
+            .life0 = 0.12f, .life1 = 0.35f,
+            .size0 = 0.05f, .size1 = 0.10f,
+            .alpha0 = 0.5f, .alpha1 = 0.0f,
+            .r = 0.75f, .g = 0.82f, .b = 1.0f,
+            .gravity = 5.0f, .drag = 1.2f };
+        fx_register("splash", &pp, 1);
     }
     // Снег: медленно падает, покачивается
     {
