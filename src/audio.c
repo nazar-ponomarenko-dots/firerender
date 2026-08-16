@@ -169,14 +169,19 @@ void audio_play(Sound *s, float volume, float pitch)
 {
     if (!s_dev || !s) return;
     if (volume <= 0.0f) return;
-    (void)pitch;
+    // pitch = множитель частоты входа: поток пересэмплирует в формат
+    // устройства, сдвигая и тональность, и скорость (0.5..2 = октава вниз/вверх).
+    if (pitch < 0.5f) pitch = 0.5f;
+    if (pitch > 2.0f) pitch = 2.0f;
     int idx = 0;
     SDL_AudioStream *ch = channel_take(s, &idx);
     if (!ch) return;
     SDL_ClearAudioStream(ch);
     // Задаём формат входа (wav) и выхода (устройство): иначе поток не
     // конвертирует 22050 моно -> 44100 стерео и звук молчит.
-    SDL_SetAudioStreamFormat(ch, &s->spec, &s_dev_spec);
+    SDL_AudioSpec src = s->spec;
+    src.freq = (int)(src.freq * pitch + 0.5f);
+    SDL_SetAudioStreamFormat(ch, &src, &s_dev_spec);
     SDL_SetAudioStreamGain(ch, volume * snd_gain("snd_sfx"));
     SDL_PutAudioStreamData(ch, s->data, (int)s->len);
     s_chan_snd[idx] = s;

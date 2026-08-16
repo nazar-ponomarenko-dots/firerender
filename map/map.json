@@ -1,1037 +1,1049 @@
 {
-    "info": {
-        "name": "Ферма",
-        "author": "Zawor Group",
-        "description": "Пшеничное поле в долине"
-    },
-    "map": {
-        "image": "map.png"
-    },
-    "player": {
-        "pos": [
-            1000.0,
-            0,
-            562.5
-        ],
-        "yaw": 3.14159,
-        "pitch": -0.5,
-        "fov": 60
-    },
-    "terrain": {
-        "min_height": -100,
-        "max_height": 400,
-        "band_t0": 0.16,
-        "band_t1": 0.4,
-        "band_h0": -50,
-        "band_h1": 200,
-        "blur": 2,
-        "blur_radius": 80,
-        "erosion": 250,
-        "erosion_slope": 33,
-        "ground_tex": "img/ground.png",
-        "tex_scale": 6.4,
-        "field_color": [
-            0.68,
-            0.57,
-            0.33
-        ],
-        "field_blend": 0.85,
-        "fog_start": 0.75,
-        "fog_end": 1.6
-    },
-    "veg": {
-        "grass_density": 0.4,
-        "wheat_density": 140,
-        "grass_floor": 0.004,
-        "wheat_floor": 1.0,
-        "dyn_radius": 48,
-        "vis_radius": 220,
-        "falloff": 16
-    },
-    "sky": {
-        "tex": "img/skybox.png",
-        "tint": [
-            1.0,
-            1.0,
-            1.0
-        ]
-    },
-    "bloom": {
-        "threshold": 0.75,
-        "intensity": 1.0,
-        "strength": 0.425
-    },
-    "shadows": {
-        "size": 1024
-    },
-    "fog": {
-        "enabled": true,
-        "strength": 0.9,
-        "density_ground": 0.02,
-        "ground_height": 5.0,
-        "density_field": 0.032,
-        "field_height": 8.0,
-        "color": [
-            0.52,
-            0.56,
-            0.6
-        ],
-        "color_sun": [
-            0.85,
-            0.62,
-            0.45
-        ],
-        "glare": 0.2,
-        "ray_strength": 1.9
-    },
-    "field": {
-        "center": [
-            1000.0,
-            562.5
-        ],
-        "size": [
-            500.0,
-            300.0
-        ],
-        "attached": false
-    },
-    "lights": [
-        {
-            "type": "directional",
-            "name": "sun",
-            "dir": [
-                0.25,
-                0.6,
-                3.0
-            ],
-            "color": [
-                1.0,
-                0.75,
-                0.65
-            ],
-            "intensity": 1.0,
-            "shadow": {
-                "enabled": true,
-                "bias": 4.0,
-                "bias_veg": 2.0
-            }
-        },
-        {
-            "type": "directional",
-            "name": "fill",
-            "dir": [
-                -0.5,
-                0.25,
-                -1.5
-            ],
-            "color": [
-                0.55,
-                0.65,
-                0.9
-            ],
-            "intensity": 0.55
-        }
+  "info": {
+    "name": "Ферма",
+    "author": "Zawor Group",
+    "description": "Пшеничное поле в долине"
+  },
+  "map": {
+    "image": "map.png"
+  },
+  "player": {
+    "pos": [
+      1000.0,
+      0.0,
+      562.5
     ],
-    "ambient": {
-        "sound": "audio/wind.wav",
-        "volume": 0.35
-    },
-    "commands": [
-        "echo [Ферма] карта загружена"
+    "yaw": 3.14159,
+    "pitch": -0.5,
+    "fov": 60
+  },
+  "terrain": {
+    "min_height": -100,
+    "max_height": 400,
+    "band_t0": 0.16,
+    "band_t1": 0.4,
+    "band_h0": -50,
+    "band_h1": 200,
+    "blur": 2,
+    "blur_radius": 80,
+    "erosion": 250,
+    "erosion_slope": 33,
+    "ground_tex": "img/ground.png",
+    "tex_scale": 6.4,
+    "field_color": [
+      0.68,
+      0.57,
+      0.33
     ],
-    "objects": [
-        {
-            "name": "tree1",
-            "model": "img/tree.png",
-            "pos": [
-                880.0,
-                0,
-                380.0
-            ],
-            "scale": [
-                1,
-                1,
-                1
-            ]
-        },
-        {
-            "name": "tree2",
-            "model": "img/tree.png",
-            "pos": [
-                910.0,
-                0,
-                360.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree3",
-            "model": "img/tree.png",
-            "pos": [
-                940.0,
-                0,
-                400.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree4",
-            "model": "img/tree.png",
-            "pos": [
-                860.0,
-                0,
-                430.0
-            ],
-            "scale": [
-                1,
-                1.3,
-                1
-            ]
-        },
-        {
-            "name": "tree5",
-            "model": "img/tree.png",
-            "pos": [
-                1130.0,
-                0,
-                380.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree6",
-            "model": "img/tree.png",
-            "pos": [
-                1160.0,
-                0,
-                360.0
-            ],
-            "scale": [
-                1,
-                0.8,
-                1
-            ]
-        },
-        {
-            "name": "tree7",
-            "model": "img/tree.png",
-            "pos": [
-                1190.0,
-                0,
-                410.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree8",
-            "model": "img/tree.png",
-            "pos": [
-                1220.0,
-                0,
-                380.0
-            ],
-            "scale": [
-                1,
-                1,
-                1
-            ]
-        },
-        {
-            "name": "tree9",
-            "model": "img/tree.png",
-            "pos": [
-                880.0,
-                0,
-                740.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree10",
-            "model": "img/tree.png",
-            "pos": [
-                910.0,
-                0,
-                760.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree11",
-            "model": "img/tree.png",
-            "pos": [
-                940.0,
-                0,
-                730.0
-            ],
-            "scale": [
-                1,
-                1.3,
-                1
-            ]
-        },
-        {
-            "name": "tree12",
-            "model": "img/tree.png",
-            "pos": [
-                860.0,
-                0,
-                700.0
-            ],
-            "scale": [
-                1,
-                1,
-                1
-            ]
-        },
-        {
-            "name": "tree13",
-            "model": "img/tree.png",
-            "pos": [
-                1130.0,
-                0,
-                740.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree14",
-            "model": "img/tree.png",
-            "pos": [
-                1160.0,
-                0,
-                760.0
-            ],
-            "scale": [
-                1,
-                1,
-                1
-            ]
-        },
-        {
-            "name": "tree15",
-            "model": "img/tree.png",
-            "pos": [
-                1190.0,
-                0,
-                730.0
-            ],
-            "scale": [
-                1,
-                0.85,
-                1
-            ]
-        },
-        {
-            "name": "tree16",
-            "model": "img/tree.png",
-            "pos": [
-                1220.0,
-                0,
-                700.0
-            ],
-            "scale": [
-                1,
-                1.15,
-                1
-            ]
-        },
-        {
-            "name": "tree17",
-            "model": "img/tree.png",
-            "pos": [
-                740.0,
-                0,
-                560.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree18",
-            "model": "img/tree.png",
-            "pos": [
-                700.0,
-                0,
-                600.0
-            ],
-            "scale": [
-                1,
-                1.3,
-                1
-            ]
-        },
-        {
-            "name": "tree19",
-            "model": "img/tree.png",
-            "pos": [
-                730.0,
-                0,
-                640.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree20",
-            "model": "img/tree.png",
-            "pos": [
-                1280.0,
-                0,
-                560.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree21",
-            "model": "img/tree.png",
-            "pos": [
-                1310.0,
-                0,
-                600.0
-            ],
-            "scale": [
-                1,
-                1,
-                1
-            ]
-        },
-        {
-            "name": "tree22",
-            "model": "img/tree.png",
-            "pos": [
-                1290.0,
-                0,
-                640.0
-            ],
-            "scale": [
-                1,
-                0.8,
-                1
-            ]
-        },
-        {
-            "name": "tree23",
-            "model": "img/tree.png",
-            "pos": [
-                600.0,
-                0,
-                420.0
-            ],
-            "scale": [
-                1,
-                1.15,
-                1
-            ]
-        },
-        {
-            "name": "tree24",
-            "model": "img/tree.png",
-            "pos": [
-                620.0,
-                0,
-                480.0
-            ],
-            "scale": [
-                1,
-                0.95,
-                1
-            ]
-        },
-        {
-            "name": "tree25",
-            "model": "img/tree.png",
-            "pos": [
-                1400.0,
-                0,
-                440.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree26",
-            "model": "img/tree.png",
-            "pos": [
-                1420.0,
-                0,
-                520.0
-            ],
-            "scale": [
-                1,
-                1.25,
-                1
-            ]
-        },
-        {
-            "name": "tree27",
-            "model": "img/tree.png",
-            "pos": [
-                760.0,
-                0,
-                300.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree28",
-            "model": "img/tree.png",
-            "pos": [
-                1260.0,
-                0,
-                820.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree29",
-            "model": "img/tree.png",
-            "pos": [
-                980.0,
-                0,
-                900.0
-            ],
-            "scale": [
-                1,
-                1.3,
-                1
-            ]
-        },
-        {
-            "name": "tree30",
-            "model": "img/tree.png",
-            "pos": [
-                1050.0,
-                0,
-                280.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree31",
-            "model": "img/tree.png",
-            "pos": [
-                560.0,
-                0,
-                520.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree32",
-            "model": "img/tree.png",
-            "pos": [
-                540.0,
-                0,
-                580.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree33",
-            "model": "img/tree.png",
-            "pos": [
-                570.0,
-                0,
-                640.0
-            ],
-            "scale": [
-                1,
-                1.25,
-                1
-            ]
-        },
-        {
-            "name": "tree34",
-            "model": "img/tree.png",
-            "pos": [
-                1450.0,
-                0,
-                520.0
-            ],
-            "scale": [
-                1,
-                1.0,
-                1
-            ]
-        },
-        {
-            "name": "tree35",
-            "model": "img/tree.png",
-            "pos": [
-                1470.0,
-                0,
-                580.0
-            ],
-            "scale": [
-                1,
-                1.15,
-                1
-            ]
-        },
-        {
-            "name": "tree36",
-            "model": "img/tree.png",
-            "pos": [
-                1440.0,
-                0,
-                640.0
-            ],
-            "scale": [
-                1,
-                0.85,
-                1
-            ]
-        },
-        {
-            "name": "tree37",
-            "model": "img/tree.png",
-            "pos": [
-                820.0,
-                0,
-                240.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree38",
-            "model": "img/tree.png",
-            "pos": [
-                880.0,
-                0,
-                220.0
-            ],
-            "scale": [
-                1,
-                0.95,
-                1
-            ]
-        },
-        {
-            "name": "tree39",
-            "model": "img/tree.png",
-            "pos": [
-                1140.0,
-                0,
-                230.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree40",
-            "model": "img/tree.png",
-            "pos": [
-                1200.0,
-                0,
-                250.0
-            ],
-            "scale": [
-                1,
-                1.3,
-                1
-            ]
-        },
-        {
-            "name": "tree41",
-            "model": "img/tree.png",
-            "pos": [
-                820.0,
-                0,
-                940.0
-            ],
-            "scale": [
-                1,
-                1.0,
-                1
-            ]
-        },
-        {
-            "name": "tree42",
-            "model": "img/tree.png",
-            "pos": [
-                880.0,
-                0,
-                960.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree43",
-            "model": "img/tree.png",
-            "pos": [
-                1140.0,
-                0,
-                950.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree44",
-            "model": "img/tree.png",
-            "pos": [
-                1200.0,
-                0,
-                930.0
-            ],
-            "scale": [
-                1,
-                1.15,
-                1
-            ]
-        },
-        {
-            "name": "tree45",
-            "model": "img/tree.png",
-            "pos": [
-                640.0,
-                0,
-                380.0
-            ],
-            "scale": [
-                1,
-                1.05,
-                1
-            ]
-        },
-        {
-            "name": "tree46",
-            "model": "img/tree.png",
-            "pos": [
-                670.0,
-                0,
-                340.0
-            ],
-            "scale": [
-                1,
-                1.25,
-                1
-            ]
-        },
-        {
-            "name": "tree47",
-            "model": "img/tree.png",
-            "pos": [
-                1380.0,
-                0,
-                380.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree48",
-            "model": "img/tree.png",
-            "pos": [
-                1410.0,
-                0,
-                340.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        },
-        {
-            "name": "tree49",
-            "model": "img/tree.png",
-            "pos": [
-                680.0,
-                0,
-                780.0
-            ],
-            "scale": [
-                1,
-                1.15,
-                1
-            ]
-        },
-        {
-            "name": "tree50",
-            "model": "img/tree.png",
-            "pos": [
-                710.0,
-                0,
-                810.0
-            ],
-            "scale": [
-                1,
-                0.8,
-                1
-            ]
-        },
-        {
-            "name": "tree51",
-            "model": "img/tree.png",
-            "pos": [
-                1330.0,
-                0,
-                780.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree52",
-            "model": "img/tree.png",
-            "pos": [
-                1360.0,
-                0,
-                810.0
-            ],
-            "scale": [
-                1,
-                1.0,
-                1
-            ]
-        },
-        {
-            "name": "tree53",
-            "model": "img/tree.png",
-            "pos": [
-                500.0,
-                0,
-                460.0
-            ],
-            "scale": [
-                1,
-                1.1,
-                1
-            ]
-        },
-        {
-            "name": "tree54",
-            "model": "img/tree.png",
-            "pos": [
-                520.0,
-                0,
-                420.0
-            ],
-            "scale": [
-                1,
-                1.3,
-                1
-            ]
-        },
-        {
-            "name": "tree55",
-            "model": "img/tree.png",
-            "pos": [
-                1500.0,
-                0,
-                460.0
-            ],
-            "scale": [
-                1,
-                1.05,
-                1
-            ]
-        },
-        {
-            "name": "tree56",
-            "model": "img/tree.png",
-            "pos": [
-                1520.0,
-                0,
-                520.0
-            ],
-            "scale": [
-                1,
-                0.95,
-                1
-            ]
-        },
-        {
-            "name": "tree57",
-            "model": "img/tree.png",
-            "pos": [
-                990.0,
-                0,
-                160.0
-            ],
-            "scale": [
-                1,
-                1.2,
-                1
-            ]
-        },
-        {
-            "name": "tree58",
-            "model": "img/tree.png",
-            "pos": [
-                1060.0,
-                0,
-                180.0
-            ],
-            "scale": [
-                1,
-                1.0,
-                1
-            ]
-        },
-        {
-            "name": "tree59",
-            "model": "img/tree.png",
-            "pos": [
-                990.0,
-                0,
-                1000.0
-            ],
-            "scale": [
-                1,
-                1.15,
-                1
-            ]
-        },
-        {
-            "name": "tree60",
-            "model": "img/tree.png",
-            "pos": [
-                1060.0,
-                0,
-                980.0
-            ],
-            "scale": [
-                1,
-                0.9,
-                1
-            ]
-        }
-    ],
-    "fauna": [
-        {
-            "type": "fireflies",
-            "area": [
-                1000,
-                560
-            ],
-            "size": [
-                400,
-                240
-            ],
-            "count": 50,
-            "height": 2.0
-        },
-        {
-            "type": "butterflies",
-            "area": [
-                1000,
-                560
-            ],
-            "size": [
-                300,
-                180
-            ],
-            "count": 15,
-            "height": 1.5
-        },
-        {
-            "type": "birds",
-            "area": [
-                1000,
-                560
-            ],
-            "size": [
-                600,
-                400
-            ],
-            "count": 6,
-            "height": 45
-        }
-    ],
-    "sounds": [
-        {
-            "pos": [
-                880,
-                0,
-                380
-            ],
-            "sound": "audio/rustle.wav",
-            "volume": 0.5,
-            "radius": 30
-        }
+    "field_blend": 0.85,
+    "fog_start": 0.75,
+    "fog_end": 1.6
+  },
+  "veg": {
+    "grass_density": 0.4,
+    "wheat_density": 140,
+    "grass_floor": 0.004,
+    "wheat_floor": 1.0,
+    "dyn_radius": 48,
+    "vis_radius": 220,
+    "falloff": 16
+  },
+  "sky": {
+    "tex": "img/skybox.png",
+    "tint": [
+      1.0,
+      1.0,
+      1.0
     ]
+  },
+  "bloom": {
+    "threshold": 0.75,
+    "intensity": 1.0,
+    "strength": 0.425
+  },
+  "shadows": {
+    "size": 1024
+  },
+  "fog": {
+    "enabled": true,
+    "strength": 0.9,
+    "density_ground": 0.02,
+    "ground_height": 5.0,
+    "density_field": 0.032,
+    "field_height": 8.0,
+    "color": [
+      0.52,
+      0.56,
+      0.6
+    ],
+    "color_sun": [
+      0.85,
+      0.62,
+      0.45
+    ],
+    "glare": 0.2,
+    "ray_strength": 1.9
+  },
+  "field": {
+    "center": [
+      1000.0,
+      562.5
+    ],
+    "size": [
+      500.0,
+      300.0
+    ],
+    "attached": false
+  },
+  "lights": [
+    {
+      "type": "directional",
+      "name": "sun",
+      "dir": [
+        0.25,
+        0.6,
+        3.0
+      ],
+      "color": [
+        1.0,
+        0.75,
+        0.65
+      ],
+      "intensity": 1.0,
+      "shadow": {
+        "enabled": true,
+        "bias": 4.0,
+        "bias_veg": 2.0
+      }
+    },
+    {
+      "type": "directional",
+      "name": "fill",
+      "dir": [
+        -0.5,
+        0.25,
+        -1.5
+      ],
+      "color": [
+        0.55,
+        0.65,
+        0.9
+      ],
+      "intensity": 0.55
+    }
+  ],
+  "ambient": {
+    "sound": "audio/wind.wav",
+    "volume": 0.35
+  },
+  "commands": [
+    "echo [Ферма] карта загружена"
+  ],
+  "objects": [
+    {
+      "name": "tree1",
+      "model": "img/tree.png",
+      "pos": [
+        880.0,
+        0,
+        380.0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "tree2",
+      "model": "img/tree.png",
+      "pos": [
+        910.0,
+        0,
+        360.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree3",
+      "model": "img/tree.png",
+      "pos": [
+        940.0,
+        0,
+        400.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree4",
+      "model": "img/tree.png",
+      "pos": [
+        860.0,
+        0,
+        430.0
+      ],
+      "scale": [
+        1,
+        1.3,
+        1
+      ]
+    },
+    {
+      "name": "tree5",
+      "model": "img/tree.png",
+      "pos": [
+        1130.0,
+        0,
+        380.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree6",
+      "model": "img/tree.png",
+      "pos": [
+        1160.0,
+        0,
+        360.0
+      ],
+      "scale": [
+        1,
+        0.8,
+        1
+      ]
+    },
+    {
+      "name": "tree7",
+      "model": "img/tree.png",
+      "pos": [
+        1190.0,
+        0,
+        410.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree8",
+      "model": "img/tree.png",
+      "pos": [
+        1220.0,
+        0,
+        380.0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "tree9",
+      "model": "img/tree.png",
+      "pos": [
+        880.0,
+        0,
+        740.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree10",
+      "model": "img/tree.png",
+      "pos": [
+        910.0,
+        0,
+        760.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree11",
+      "model": "img/tree.png",
+      "pos": [
+        940.0,
+        0,
+        730.0
+      ],
+      "scale": [
+        1,
+        1.3,
+        1
+      ]
+    },
+    {
+      "name": "tree12",
+      "model": "img/tree.png",
+      "pos": [
+        860.0,
+        0,
+        700.0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "tree13",
+      "model": "img/tree.png",
+      "pos": [
+        1130.0,
+        0,
+        740.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree14",
+      "model": "img/tree.png",
+      "pos": [
+        1160.0,
+        0,
+        760.0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "tree15",
+      "model": "img/tree.png",
+      "pos": [
+        1190.0,
+        0,
+        730.0
+      ],
+      "scale": [
+        1,
+        0.85,
+        1
+      ]
+    },
+    {
+      "name": "tree16",
+      "model": "img/tree.png",
+      "pos": [
+        1220.0,
+        0,
+        700.0
+      ],
+      "scale": [
+        1,
+        1.15,
+        1
+      ]
+    },
+    {
+      "name": "tree17",
+      "model": "img/tree.png",
+      "pos": [
+        740.0,
+        0,
+        560.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree18",
+      "model": "img/tree.png",
+      "pos": [
+        700.0,
+        0,
+        600.0
+      ],
+      "scale": [
+        1,
+        1.3,
+        1
+      ]
+    },
+    {
+      "name": "tree19",
+      "model": "img/tree.png",
+      "pos": [
+        730.0,
+        0,
+        640.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree20",
+      "model": "img/tree.png",
+      "pos": [
+        1280.0,
+        0,
+        560.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree21",
+      "model": "img/tree.png",
+      "pos": [
+        1310.0,
+        0,
+        600.0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "tree22",
+      "model": "img/tree.png",
+      "pos": [
+        1290.0,
+        0,
+        640.0
+      ],
+      "scale": [
+        1,
+        0.8,
+        1
+      ]
+    },
+    {
+      "name": "tree23",
+      "model": "img/tree.png",
+      "pos": [
+        600.0,
+        0,
+        420.0
+      ],
+      "scale": [
+        1,
+        1.15,
+        1
+      ]
+    },
+    {
+      "name": "tree24",
+      "model": "img/tree.png",
+      "pos": [
+        620.0,
+        0,
+        480.0
+      ],
+      "scale": [
+        1,
+        0.95,
+        1
+      ]
+    },
+    {
+      "name": "tree25",
+      "model": "img/tree.png",
+      "pos": [
+        1400.0,
+        0,
+        440.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree26",
+      "model": "img/tree.png",
+      "pos": [
+        1420.0,
+        0,
+        520.0
+      ],
+      "scale": [
+        1,
+        1.25,
+        1
+      ]
+    },
+    {
+      "name": "tree27",
+      "model": "img/tree.png",
+      "pos": [
+        760.0,
+        0,
+        300.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree28",
+      "model": "img/tree.png",
+      "pos": [
+        1260.0,
+        0,
+        820.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree29",
+      "model": "img/tree.png",
+      "pos": [
+        980.0,
+        0,
+        900.0
+      ],
+      "scale": [
+        1,
+        1.3,
+        1
+      ]
+    },
+    {
+      "name": "tree30",
+      "model": "img/tree.png",
+      "pos": [
+        1050.0,
+        0,
+        280.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree31",
+      "model": "img/tree.png",
+      "pos": [
+        560.0,
+        0,
+        520.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree32",
+      "model": "img/tree.png",
+      "pos": [
+        540.0,
+        0,
+        580.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree33",
+      "model": "img/tree.png",
+      "pos": [
+        570.0,
+        0,
+        640.0
+      ],
+      "scale": [
+        1,
+        1.25,
+        1
+      ]
+    },
+    {
+      "name": "tree34",
+      "model": "img/tree.png",
+      "pos": [
+        1450.0,
+        0,
+        520.0
+      ],
+      "scale": [
+        1,
+        1.0,
+        1
+      ]
+    },
+    {
+      "name": "tree35",
+      "model": "img/tree.png",
+      "pos": [
+        1470.0,
+        0,
+        580.0
+      ],
+      "scale": [
+        1,
+        1.15,
+        1
+      ]
+    },
+    {
+      "name": "tree36",
+      "model": "img/tree.png",
+      "pos": [
+        1440.0,
+        0,
+        640.0
+      ],
+      "scale": [
+        1,
+        0.85,
+        1
+      ]
+    },
+    {
+      "name": "tree37",
+      "model": "img/tree.png",
+      "pos": [
+        820.0,
+        0,
+        240.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree38",
+      "model": "img/tree.png",
+      "pos": [
+        880.0,
+        0,
+        220.0
+      ],
+      "scale": [
+        1,
+        0.95,
+        1
+      ]
+    },
+    {
+      "name": "tree39",
+      "model": "img/tree.png",
+      "pos": [
+        1140.0,
+        0,
+        230.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree40",
+      "model": "img/tree.png",
+      "pos": [
+        1200.0,
+        0,
+        250.0
+      ],
+      "scale": [
+        1,
+        1.3,
+        1
+      ]
+    },
+    {
+      "name": "tree41",
+      "model": "img/tree.png",
+      "pos": [
+        820.0,
+        0,
+        940.0
+      ],
+      "scale": [
+        1,
+        1.0,
+        1
+      ]
+    },
+    {
+      "name": "tree42",
+      "model": "img/tree.png",
+      "pos": [
+        880.0,
+        0,
+        960.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree43",
+      "model": "img/tree.png",
+      "pos": [
+        1140.0,
+        0,
+        950.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree44",
+      "model": "img/tree.png",
+      "pos": [
+        1200.0,
+        0,
+        930.0
+      ],
+      "scale": [
+        1,
+        1.15,
+        1
+      ]
+    },
+    {
+      "name": "tree45",
+      "model": "img/tree.png",
+      "pos": [
+        640.0,
+        0,
+        380.0
+      ],
+      "scale": [
+        1,
+        1.05,
+        1
+      ]
+    },
+    {
+      "name": "tree46",
+      "model": "img/tree.png",
+      "pos": [
+        670.0,
+        0,
+        340.0
+      ],
+      "scale": [
+        1,
+        1.25,
+        1
+      ]
+    },
+    {
+      "name": "tree47",
+      "model": "img/tree.png",
+      "pos": [
+        1380.0,
+        0,
+        380.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree48",
+      "model": "img/tree.png",
+      "pos": [
+        1410.0,
+        0,
+        340.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    },
+    {
+      "name": "tree49",
+      "model": "img/tree.png",
+      "pos": [
+        680.0,
+        0,
+        780.0
+      ],
+      "scale": [
+        1,
+        1.15,
+        1
+      ]
+    },
+    {
+      "name": "tree50",
+      "model": "img/tree.png",
+      "pos": [
+        710.0,
+        0,
+        810.0
+      ],
+      "scale": [
+        1,
+        0.8,
+        1
+      ]
+    },
+    {
+      "name": "tree51",
+      "model": "img/tree.png",
+      "pos": [
+        1330.0,
+        0,
+        780.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree52",
+      "model": "img/tree.png",
+      "pos": [
+        1360.0,
+        0,
+        810.0
+      ],
+      "scale": [
+        1,
+        1.0,
+        1
+      ]
+    },
+    {
+      "name": "tree53",
+      "model": "img/tree.png",
+      "pos": [
+        500.0,
+        0,
+        460.0
+      ],
+      "scale": [
+        1,
+        1.1,
+        1
+      ]
+    },
+    {
+      "name": "tree54",
+      "model": "img/tree.png",
+      "pos": [
+        520.0,
+        0,
+        420.0
+      ],
+      "scale": [
+        1,
+        1.3,
+        1
+      ]
+    },
+    {
+      "name": "tree55",
+      "model": "img/tree.png",
+      "pos": [
+        1500.0,
+        0,
+        460.0
+      ],
+      "scale": [
+        1,
+        1.05,
+        1
+      ]
+    },
+    {
+      "name": "tree56",
+      "model": "img/tree.png",
+      "pos": [
+        1520.0,
+        0,
+        520.0
+      ],
+      "scale": [
+        1,
+        0.95,
+        1
+      ]
+    },
+    {
+      "name": "tree57",
+      "model": "img/tree.png",
+      "pos": [
+        990.0,
+        0,
+        160.0
+      ],
+      "scale": [
+        1,
+        1.2,
+        1
+      ]
+    },
+    {
+      "name": "tree58",
+      "model": "img/tree.png",
+      "pos": [
+        1060.0,
+        0,
+        180.0
+      ],
+      "scale": [
+        1,
+        1.0,
+        1
+      ]
+    },
+    {
+      "name": "tree59",
+      "model": "img/tree.png",
+      "pos": [
+        990.0,
+        0,
+        1000.0
+      ],
+      "scale": [
+        1,
+        1.15,
+        1
+      ]
+    },
+    {
+      "name": "tree60",
+      "model": "img/tree.png",
+      "pos": [
+        1060.0,
+        0,
+        980.0
+      ],
+      "scale": [
+        1,
+        0.9,
+        1
+      ]
+    }
+  ],
+  "waters": [
+    {
+      "type": "sea",
+      "name": "ocean",
+      "pos": [
+        850.0,
+        60.0
+      ],
+      "radius": 210.0,
+      "level": -76.0
+    }
+  ],
+  "fauna": [
+    {
+      "type": "fireflies",
+      "area": [
+        1000,
+        560
+      ],
+      "size": [
+        400,
+        240
+      ],
+      "count": 50,
+      "height": 2.0
+    },
+    {
+      "type": "butterflies",
+      "area": [
+        1000,
+        560
+      ],
+      "size": [
+        300,
+        180
+      ],
+      "count": 15,
+      "height": 1.5
+    },
+    {
+      "type": "birds",
+      "area": [
+        1000,
+        560
+      ],
+      "size": [
+        600,
+        400
+      ],
+      "count": 6,
+      "height": 45
+    }
+  ],
+  "sounds": [
+    {
+      "pos": [
+        880,
+        0,
+        380
+      ],
+      "sound": "audio/rustle.wav",
+      "volume": 0.5,
+      "radius": 30
+    }
+  ]
 }

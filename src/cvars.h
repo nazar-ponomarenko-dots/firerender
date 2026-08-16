@@ -24,7 +24,7 @@ typedef struct {
     char help[64];       // описание (для cvarlist)
 } Cvar;
 
-#define CVARS_MAX 32
+#define CVARS_MAX 64
 
 // Флаги переменных
 #define CVAR_ARCHIVE   1  // сохранять в config.cfg (по умолчанию для register)

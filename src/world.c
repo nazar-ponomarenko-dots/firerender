@@ -35,17 +35,24 @@ float height_curve(const WorldState *w, float t)
     // наклон на обоих концах, поэтому на СТЫКАХ сегментов (band_t0, band_t1)
     // наклон совпадает — переходы плавные (C1), без резких "рёбер"/изломов,
     // как было со стыком "линейный хвост + smoothstep" (там был излом).
+    // Дегенеративные параметры (band_t0==0, band_t1==band_t0, band_t1==1 —
+    // кривой terrain.cfg) дают деление на ноль и NaN в рельефе: сегмент
+    // нулевой ширины пропускаем (сразу его верхняя высота).
     float s;
     if (t < w->band_t0) {                                  // под играбельной полосой
+        if (w->band_t0 <= 0.0f) return w->band_h0;
         s = t / w->band_t0;
         s = s * s * (3.0f - 2.0f * s);
         return w->min_height + s * (w->band_h0 - w->min_height);
     }
     if (t <= w->band_t1) {                                 // играбельная полоса
-        s = (t - w->band_t0) / (w->band_t1 - w->band_t0);
+        float span = w->band_t1 - w->band_t0;
+        if (span <= 0.0f) return w->band_h0;
+        s = (t - w->band_t0) / span;
         s = s * s * (3.0f - 2.0f * s);
         return w->band_h0 + s * (w->band_h1 - w->band_h0);
     }
+    if (1.0f - w->band_t1 <= 0.0f) return w->band_h1;
     s = (t - w->band_t1) / (1.0f - w->band_t1);            // над полосой
     s = s * s * (3.0f - 2.0f * s);
     return w->band_h1 + s * (w->max_height - w->band_h1);
@@ -91,6 +98,11 @@ static void blur_heights(float *h, int w, int hh, int passes, int radius)
     int n = w > hh ? w : hh;
     float *tmp = malloc((size_t)w * hh * sizeof(float));
     float *pre = malloc((size_t)n * sizeof(float));
+    if (!tmp || !pre) {   // OOM — пропуск сглаживания (лучше, чем падение)
+        free(tmp); free(pre);
+        SDL_Log("terrain: blur skipped (no memory)");
+        return;
+    }
     for (int pass = 0; pass < passes; pass++) {
         // --- горизонтальный проход (строки) ---
         for (int y = 0; y < hh; y++) {
@@ -213,6 +225,13 @@ int world_load(WorldState *w, WorldTextures *out)
     // Яркость (высота) и цвет карты в полном разрешении
     float *lum = malloc((size_t)mw * mh * sizeof(float));
     unsigned char *color = malloc((size_t)mw * mh * 3);
+    w->heights = malloc((size_t)mw * mh * sizeof(float));
+    if (!lum || !color || !w->heights) {   // OOM — честный fail загрузки
+        free(lum); free(color); free(w->heights);
+        w->heights = NULL;                 // world_free терпит NULL
+        SDL_Log("World: no memory for %dx%d map", mw, mh);
+        return -1;
+    }
     for (int i = 0; i < mw * mh; i++) {
         const unsigned char *px = img + i * 3;
         color[i*3 + 0] = px[0];
@@ -228,7 +247,6 @@ int world_load(WorldState *w, WorldTextures *out)
     // Высоты считаем в C (height_curve), поэтому normal map, положение пшеницы
     // и HUD всегда согласованы с рельефом. blur_heights "синтерполирует" карту:
     // углы и ступеньки сглаживаются ещё до отрисовки. 1 px = 1 м.
-    w->heights = malloc((size_t)mw * mh * sizeof(float));
     for (int i = 0; i < mw * mh; i++)
         w->heights[i] = height_curve(w, 1.0f - lum[i]);
     // Сглаживание переходов + ограничение крутизны: сначала размываем, чтобы
@@ -240,6 +258,11 @@ int world_load(WorldState *w, WorldTextures *out)
         slope_limit_heights(w->heights, mw, mh, w->terrain_erosion,
                             w->terrain_erosion_slope);
     unsigned char *nm = malloc((size_t)mw * mh * 3);
+    if (!nm) {
+        free(lum); free(color);
+        SDL_Log("World: no memory for normal map");
+        return -1;                         // w->heights дойдёт до world_free
+    }
     for (int y = 0; y < mh; y++) {
         for (int x = 0; x < mw; x++) {
             int xl = x > 0 ? x - 1 : x;                  // края — без wrap,
@@ -265,9 +288,17 @@ int world_load(WorldState *w, WorldTextures *out)
     // Билинейная фильтрация + LINEAR дают плавную поверхность; коллизия
     // (sample_height) читает те же значения из float-массива — всё совпадает.
     unsigned short *hb = malloc((size_t)mw * mh * sizeof(unsigned short));
+    if (!hb) {
+        free(color); free(nm);            // lum уже освобождён выше
+        SDL_Log("World: no memory for height texture");
+        return -1;
+    }
+    // Дегенеративная кривая (max==min в map.json): деление на ноль -> NaN.
+    // Зажимаем диапазон до минимум 1 м, чтобы высота квантовалась корректно.
+    float hspan = w->max_height - w->min_height;
+    if (hspan < 1.0f) hspan = 1.0f;
     for (int i = 0; i < mw * mh; i++) {
-        float t = (w->heights[i] - w->min_height) /
-                  (w->max_height - w->min_height);
+        float t = (w->heights[i] - w->min_height) / hspan;
         if (t < 0) t = 0;
         if (t > 1) t = 1;
         hb[i] = (unsigned short)(t * 65535.0f);
@@ -306,4 +337,11 @@ void world_free(WorldState *w)
 float world_avg_lum(void)
 {
     return s_avg_lum;
+}
+
+// Текстура карты высот (GL_R16, LINEAR) — для волюметрик-тумана (дымка у
+// земли). 0, пока мир не загружен / уже освобождён.
+GLuint world_height_tex(void)
+{
+    return s_tex_height;
 }

@@ -3,6 +3,7 @@
 // ============================================================================
 #include "mesh.h"
 
+#include "events.h"
 #include "material.h"
 #include "resources.h"
 #include "shader.h"
@@ -197,7 +198,6 @@ void mesh_node_render(SceneNode *n, float dt)
     MeshLocs *p = n->params;
     if (p->rc->pass == RP_SHADOW) return;   // меши в карты теней пока не пишут
     if (!p->mesh) return;
-
     mesh_gpu_upload(p->mesh);
 
     float model[16] = {
@@ -221,10 +221,33 @@ void mesh_node_render(SceneNode *n, float dt)
     glBindVertexArray(0);
 }
 
+// Освобождение ресурсов узла MeshInstance3D (по EV_NODE_EXIT из node_free_tree).
+// node_free_tree освобождает только структуру MeshLocs; меш (CPU + GPU),
+// refcount-текстуру и refcount-программу отдаём здесь.
+static void mesh_node_exit(const Event *e, void *user)
+{
+    (void)user;
+    if (!e || !e->a) return;
+    const SceneNode *n = e->a;
+    if (!n->type || strcmp(n->type, "MeshInstance3D") != 0) return;
+    MeshLocs *p = n->params;
+    if (!p) return;
+    if (p->tex) resources_texture_release(p->tex);
+    if (p->prog) resources_program_release(p->prog);
+    mesh_free(p->mesh);
+}
+
 SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
                           float scale, const char *tex_path,
                           const RendererContext *rc)
 {
+    // Один раз: узел MeshInstance3D при выходе из дерева (node_free_tree шлёт
+    // EV_NODE_EXIT ДО free(params)) освобождает меш, текстуру и ref программы.
+    // node_free_tree освобождает ТОЛЬКО структуру MeshLocs — без этого всё
+    // GPU-содержимое утекало бы навсегда (mesh_free ни разу не вызывался).
+    static int s_registered = 0;
+    if (!s_registered) { events_listen(EV_NODE_EXIT, mesh_node_exit, NULL); s_registered = 1; }
+
     Mesh *mesh = mesh_load_obj(obj_path);
     if (!mesh) return NULL;
 

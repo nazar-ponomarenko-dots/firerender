@@ -34,6 +34,7 @@ typedef struct {
     GLint u_viewproj, u_tex, u_color, u_alpha;
     Decal d[DECALS_MAX];
     int n;
+    int head;        // следующий слот кольца (при n == DECALS_MAX)
 } DecalsParams;
 
 static DecalsParams *s_d = NULL;
@@ -131,8 +132,12 @@ void decal_place_ex(float x, float z, float half_w, float half_d, float rot,
         slot = p->n++;
         p->d[slot].tex = 0;
     } else {
-        slot = 0;   // кольцевой буфер
-        if (p->d[slot].tex) resources_texture_release(p->d[slot].tex);
+        // Настоящее кольцо: раньше всегда переписывался slot 0 — самая
+        // старая декаль вытеснялась каждым новым штампением, остальные жили
+        // вечно (кольцо не работало).
+        slot = p->head;
+        p->head = (p->head + 1) % DECALS_MAX;
+        if (p->d[slot].tex) { resources_texture_release(p->d[slot].tex); p->d[slot].tex = 0; }
     }
     Decal *d = &p->d[slot];
     d->cx = x; d->cz = z;
@@ -209,6 +214,7 @@ void decals_draw(const RendererContext *rc)
 
 void decals_cleanup(SceneNode *n)
 {
+    if (!n) return;
     DecalsParams *p = n->params;
     if (!p) return;
     if (s_d == p) s_d = NULL;

@@ -15,6 +15,12 @@ uniform vec3 uTint;
 uniform int uBlend;
 uniform float uAlpha;
 uniform float uSpecular;       // сила спекуляра (0 = матовый)
+uniform float uWetness;        // мокрость 0..1 (fx.c)
+// Кубомап отражений воды (юнит 9, scene_uniforms_bind): мокрые меши
+// (GLB-модели, ящики) глянцуют и отражают окружение.
+uniform samplerCube uReflection;
+// Шум мокрости (img/noise.png, юнит 11): пятна "мокрее / почти сухо"
+uniform sampler2D uNoise;
 
 #define SUN_MAX_LIGHTS 4
 uniform vec3 uLightDir[SUN_MAX_LIGHTS];
@@ -101,6 +107,13 @@ void main() {
     }
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vWorldPos);
+    float wet = clamp(uWetness, 0.0, 1.0);
+    // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
+    // ≈ 6 м / 1.25 м), где-то мокро сильнее, где-то почти сухо.
+    float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
+                + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
+    wet *= mix(0.05, 1.8, noise * noise);
+    c.rgb = mix(c.rgb, c.rgb * 0.6, wet * 0.7);
 
     // двухсторонняя геометрия: переворачиваем нормаль к камере, чтобы
     // внутренние грани (и дубли вершин без нормалей) не выглаживались в тьму
@@ -144,6 +157,25 @@ void main() {
     }
     light = min(light, vec3(1.0));
     vec3 col = c.rgb * uTint * light + spec * uSpecular;
+
+    // мокрость: добавить спекулярный блик на влажных поверхностях
+    if (wet > 0.0 && uSpecular > 0.001) {
+        float wet_spec = wet * uSpecular * 2.0;
+        for (int i = 0; i < uLightCount; i++) {
+            vec3 L = normalize(-uLightDir[i]);
+            vec3 H = normalize(L + V);
+            float s = pow(max(dot(N, H), 0.0), 32.0);
+            col += uLightColor[i] * uLightIntensity[i] * s * wet_spec;
+        }
+    }
+
+    // мокрый глянец: кубомап отражений (растёт с мокротой и гляным углом)
+    if (wet > 0.001) {
+        vec3 reflDir = reflect(-V, N);
+        vec3 reflCol = texture(uReflection, reflDir).rgb;
+        float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+        col = mix(col, reflCol, wet * (0.06 + 0.30 * fres));
+    }
 
     float dist = distance(uCamPos, vWorldPos);
     if (uFogOn > 0.5) {

@@ -9,6 +9,7 @@
 #include "linalg.h"
 #include "world.h"
 #include "objects.h"
+#include "water.h"
 
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -204,7 +205,27 @@ void camera_update(Camera *cam, const WorldState *w,
         float gravity = cvar_get("sv_gravity");
         if (gravity <= 0.0f) gravity = GRAVITY;
         cam->vy -= gravity * dt;                 // гравитация
+
+        // Вода: если точка покрыта водоёмом и глаза под поверхностью
+        // (вода глубже роста) — плаваем. Плавучесть выталкивает к
+        // поверхности, а течение реки (water_flow_at) сносит игрока.
+        float wl = water_surface_at(w, cam->pos[0], cam->pos[2]);
+        bool in_water = wl > ground - 0.05f;     // поверхность выше "дна"
+        if (in_water && cam->pos[1] < wl - 0.05f) {   // глаза под водой
+            // Плавучесть: под водой гравитация гасится, выталкивание
+            // превышает её (24 > 20) — игрок всплывает к поверхности,
+            // а не тонет на дно (там вода была не видна "вблизи").
+            cam->vy += (24.0f - gravity * 0.5f) * dt;
+            cam->vy *= 0.98f;                    // вязкое сопротивление
+            float flo[2];
+            if (water_flow_at(w, cam->pos[0], cam->pos[2], flo)) {
+                cam->vx += flo[0] * 3.5f * dt;   // течение реки несёт
+                cam->vz += flo[1] * 3.5f * dt;
+            }
+        }
+
         float ny = cam->pos[1] + cam->vy * dt;
+        if (in_water && ny > wl) ny = wl;        // не выныривать в воздух
         if (ny <= ground) {                      // приземлились (или уже стоим)
             float fall = cam->vy;
             cam->pos[1] = ground;
@@ -233,7 +254,7 @@ void camera_update(Camera *cam, const WorldState *w,
         // Шаги: движение по земле (не в полёте, не падаем). Таймер зависит
         // от скорости: бег — чаще. Присед — тише.
         float vsp2 = cam->vx * cam->vx + cam->vz * cam->vz;
-        if (cam->vy <= 0.1f && vsp2 > 0.5f) {
+        if (!in_water && cam->vy <= 0.1f && vsp2 > 0.5f) {
             s_step_timer -= dt;
             if (s_step_timer <= 0.0f) {
                 float spd = sqrtf(vsp2);
@@ -246,7 +267,7 @@ void camera_update(Camera *cam, const WorldState *w,
 
         // Шуршание: только при движении сквозь пшеницу (поле). Трава/кусты
         // звука не дают. Три варианта шелеста чередуются (как шаги).
-        if (cam->vy <= 0.1f && vsp2 > 0.5f) {
+        if (!in_water && cam->vy <= 0.1f && vsp2 > 0.5f) {
             bool in_field =
                 cam->pos[0] >= w->field_x0 && cam->pos[0] <= w->field_x0 + w->field_w &&
                 cam->pos[2] >= w->field_z0 && cam->pos[2] <= w->field_z0 + w->field_d;

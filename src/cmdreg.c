@@ -16,6 +16,7 @@
 #include "material.h"    // (cmd_matlist в commands.c)
 #include "fx.h"          // команды эффектов
 #include "glb.h"         // cmd_glb
+#include "glb_anim.h"    // cmd_glbanim + auto-выбор в cmd_glb
 
 // --- +/- команды действия (ставят флаг g_act) ---------------------------------
 #define DEF_ACTION(id, name)                                             \
@@ -94,7 +95,15 @@ static const ConCmdDesc s_cmds[] = {
     { "fx_blood",      "кровь в точке взгляда (.)",  cmd_fx_blood },
     { "matlist",       "список зарегистрированных материалов", cmd_matlist },
     { "mesh",          "mesh <obj> [x y z] [scale] [tex] — статичный меш", cmd_mesh },
-    { "glb",           "glb <glb> [x y z] [scale] — статичный меш (.glb)", cmd_glb },
+    { "glb",           "glb <glb> [x y z] [scale] — меш (.glb), скиннинг если есть", cmd_glb },
+    { "glbanim",       "glbanim <glb> [x y z] [scale] — анимир. меш (skinning)", cmd_glbanim },
+    { "glbclips",      "glbclips [имя-узла] — список клипов анимации", cmd_glbclips },
+    { "glbclip",       "glbclip <индекс|имя> [имя-узла] — переключить клип", cmd_glbclip },
+    { "glbanim_pause", "glbanim_pause [имя-узла] — пауза анимации", cmd_glbanim_pause },
+    { "glbanim_play",  "glbanim_play [имя-узла] — продолжить анимацию", cmd_glbanim_play },
+    { "glbanim_speed", "glbanim_speed <x> [имя-узла] — скорость анимации", cmd_glbanim_speed },
+    { "glbanim_loop",  "glbanim_loop <0|1> [имя-узла] — зациклить анимацию", cmd_glbanim_loop },
+    { "cubemap_capture", "cubemap_capture [x y z] [size] — захват кубомапа отражений (6 PNG в cubemaps/)", cmd_cubemap_capture },
 };
 
 void cmdreg_register_all(void)

@@ -89,4 +89,7 @@ void world_free(WorldState *w);
 // Средняя яркость карты (нужна камере для стартовой высоты).
 float world_avg_lum(void);
 
+// Текстура карты высот (GL_R16) — для пост-проходов (волюметрика). 0 = нет.
+GLuint world_height_tex(void);
+
 #endif

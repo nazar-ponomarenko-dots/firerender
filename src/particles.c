@@ -176,7 +176,8 @@ void particles_emit(const ParticleParams *par)
     float vx = sinf(ang1) * cosf(ang2);
     float vy = sinf(ang2);                       // знак разрешён: разброс и навес
     float vz = cosf(ang1) * cosf(ang2);
-    if (par->dir && (par->dir[0] || par->dir[1] || par->dir[2])) {
+    // dir — массив внутри struct, NULL быть не может: проверяем только нули
+    if (par->dir[0] || par->dir[1] || par->dir[2]) {
         vx += par->dir[0]; vy += par->dir[1]; vz += par->dir[2];
         float l = sqrtf(vx * vx + vy * vy + vz * vz);
         if (l > 0.001f) { vx /= l; vy /= l; vz /= l; }
@@ -314,6 +315,7 @@ void particles_clear(void)
 
 void particles_cleanup(SceneNode *n)
 {
+    if (!n) return;
     ParticlesParams *p = n->params;
     if (!p) return;
     if (s_p == p) s_p = NULL;

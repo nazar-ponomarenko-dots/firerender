@@ -21,6 +21,7 @@ typedef struct {
     GLint u_btex, u_threshold, u_intensity;
     GLint u_blurtex, u_dir, u_texel;
     GLint u_ctex, u_glowtex, u_strength;
+    GLint u_exposure;
     int vw, vh;                // размер сцены (пиксели)
     int gw, gh;                // размер glow (половина)
     float threshold;           // порог яркости (0..1)

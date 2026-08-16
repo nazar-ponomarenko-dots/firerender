@@ -14,6 +14,7 @@
 #include "fx.h"
 #include "mesh.h"
 #include "glb.h"
+#include "glb_anim.h"
 #include "material.h"
 
 #include <stdarg.h>
@@ -105,18 +106,37 @@ void console_later(int frames, const char *cmd)
 
 // Каждый кадр из главного цикла: выполняет отложенные команды.
 // Команда с frames=N выполняется на N-й кадр (wait -> 1 кадр спустя).
+// Порядок ВАЖЕН (FIFO): созревшие в один кадр команды исполняются в том же
+// порядке, что и добавлены. Уплотняем список сдвигом сохраняя порядок
+// (swap-with-last тут не годился — он перемешивал очередь и терял вложенные
+// wait). Команды, добавленные console_later ВО ВРЕМЯ drain (вложенный wait),
+// дописываются в хвост за пределами снимка end: в этом кадре они НЕ
+// исполняются, а переносятся уплотнением в начало очереди — на следующий кадр.
+// (Раньше хвост просто отбрасывался при s_pend_n = kept — команды терялись.)
 void console_drain(void)
 {
-    if (s_pend_n == 0) return;
-    for (int i = 0; i < s_pend_n; ) {
+    int end = s_pend_n;
+    if (end == 0) return;
+    int kept = 0;
+    for (int i = 0; i < end; i++) {
         if (s_pend[i].frames > 0) s_pend[i].frames--;
         if (s_pend[i].frames <= 0) {
-            console_exec_one(s_pend[i].cmd);
-            s_pend[i] = s_pend[--s_pend_n];     // порядок не важен
+            // Строку копируем ДО exec: console_later вложенного wait может
+            // дописать хвост, а уплотнение ниже — перезаписать ячейку.
+            char cmd[sizeof s_pend[0].cmd];
+            snprintf(cmd, sizeof cmd, "%s", s_pend[i].cmd);
+            console_exec_one(cmd);          // может добавить новые (wait)
         } else {
-            i++;
+            if (kept != i) s_pend[kept] = s_pend[i];
+            kept++;
         }
     }
+    // Хвост [end, s_pend_n) — команды, добавленные в процессе drain:
+    // сдвигаем их на освободившиеся места (на следующий кадр).
+    int tail = s_pend_n - end;
+    if (tail > 0 && kept != end)
+        memmove(&s_pend[kept], &s_pend[end], (size_t)tail * sizeof s_pend[0]);
+    s_pend_n = kept + tail;
 }
 
 int console_active(void)
@@ -329,9 +349,15 @@ static void input_complete(void)
     if (s_tab_n <= 0) return;
     if (s_tab_idx >= s_tab_n) s_tab_idx = 0;
 
-    // Заменить слово от wstart до курсора на совпадение
+    // Заменить слово от wstart до курсора на совпадение. Сперва проверяем,
+    // что результат поместится в буфер ввода — иначе длинное совпадение
+    // (имена cvar'ов до 31 байта) перепишет память за s_input[128].
     const char *m = s_tab_matches[s_tab_idx];
     int mlen = (int)strlen(m);
+    if (s_inlen + (mlen - wlen) >= CON_INPUT_LEN) {
+        s_tab_idx++;
+        return;                             // не влезает — молча не ставим
+    }
     memmove(s_input + wstart + mlen, s_input + s_cur,
             (size_t)s_inlen - s_cur + 1);
     memcpy(s_input + wstart, m, (size_t)mlen);
@@ -559,8 +585,12 @@ static void cmd_set(const char *args)
     // set name "строка" — для строковых переменных (CVAR_STRING)
     char sval[64];
     if (sscanf(args, "%31s \"%63[^\"]\"", name, sval) == 2) {
+        if (cvar_index(name) < 0) {
+            console_print("unknown variable \"%s\"", name);   // опечатка?
+            return;
+        }
         cvar_set_from_string(name, sval);
-        if (cvar_index(name) >= 0 && (cvar_at(cvar_index(name))->flags & CVAR_STRING))
+        if (cvar_at(cvar_index(name))->flags & CVAR_STRING)
             console_print("  %s = \"%s\"", name, cvar_get_string(name));
         else
             console_print("  %s = %.4g", name, cvar_get(name));
@@ -569,6 +599,18 @@ static void cmd_set(const char *args)
     float v;
     int n = sscanf(args, "%31s %f", name, &v);
     if (n == 2) {
+        if (cvar_index(name) < 0) {
+            // Строгость для ввода из консоли: опечатка не должна молча
+            // создавать переменную (карты/Lua идут через cvar_set напрямую).
+            console_print("unknown variable \"%s\"", name);
+            // подсказка по префиксу (как дополнение по Tab)
+            for (int i = 0; i < cvar_count(); i++) {
+                const Cvar *c = cvar_at(i);
+                if (strncmp(c->name, name, strlen(name)) == 0)
+                    { console_print("  (похожая: %s)", c->name); break; }
+            }
+            return;
+        }
         cvar_set(name, v);
         console_print("  %s = %.4g", name, cvar_get(name));
     } else if (n == 1) {
@@ -1122,18 +1164,27 @@ void console_selftest(void)
     {
         FILE *f = fopen("_fr_test.cfg", "w");
         if (f) {
-            fprintf(f, "set fov 77\nset r_fog 0\n");
+            fprintf(f, "set fov 77\nset r_fog_mode 0\n");
             fclose(f);
             console_exec("exec _fr_test.cfg");
-            if (cvar_get("fov") != 77.0f || cvar_get("r_fog") != 0.0f) {
+            if (cvar_get("fov") != 77.0f || cvar_get("r_fog_mode") != 0.0f) {
                 SDL_Log("console test: exec FAIL");
                 fail++;
             }
             remove("_fr_test.cfg");
             console_exec("set fov 60");
-            console_exec("set r_fog 1");
+            console_exec("set r_fog_mode 1");
         } else {
             SDL_Log("console test: exec (no tmp file) SKIP");
+        }
+    }
+
+    // 5b) опечатка в set — молча НЕ создаёт переменную (строгая консоль)
+    {
+        console_exec("set r_fog 0");              // такого cvar'а нет
+        if (cvar_index("r_fog") >= 0) {
+            SDL_Log("console test: typo-set FAIL (создан мусорный cvar)");
+            fail++;
         }
     }
 
@@ -1182,14 +1233,14 @@ void console_selftest(void)
 
     // 8) алиасы, toggle, комбинации ";"
     {
-        console_exec("alias testme \"set fov 66; set r_fog 0\"");
+        console_exec("alias testme \"set fov 66; set r_fog_mode 0\"");
         console_exec("testme");
-        if (cvar_get("fov") != 66.0f || cvar_get("r_fog") != 0.0f) {
+        if (cvar_get("fov") != 66.0f || cvar_get("r_fog_mode") != 0.0f) {
             SDL_Log("console test: alias FAIL");
             fail++;
         }
-        console_exec("toggle r_fog");
-        if (cvar_get("r_fog") != 1.0f) { SDL_Log("console test: toggle FAIL"); fail++; }
+        console_exec("toggle r_fog_mode");
+        if (cvar_get("r_fog_mode") != 1.0f) { SDL_Log("console test: toggle FAIL"); fail++; }
         console_exec("unalias testme");
         console_exec("set fov 60");
     }
@@ -1355,6 +1406,79 @@ void console_selftest(void)
             }
             if (t) fail++;
             glb_model_free(gm);
+        }
+    }
+
+    // 15) Анимированный glTF (.glb): glb_anim_parse headless — кожи, веса,
+    // клипы анимации (channels/samplers) и bind-pose геометрия.
+    {
+        AnimGlb *a = glb_anim_parse("models/test_anim.glb");
+        if (!a) { SDL_Log("console test: glb_anim parse FAIL (NULL)"); fail++; }
+        else {
+            int t = 0;
+            if (a->nnode != 4) { SDL_Log("console test: glb_anim nodes FAIL (%d)", a->nnode); t = 1; }
+            if (a->nprim != 1) { SDL_Log("console test: glb_anim prims FAIL (%d)", a->nprim); t = 1; }
+            if (a->nskin != 1) { SDL_Log("console test: glb_anim skins FAIL (%d)", a->nskin); t = 1; }
+            if (a->nclip != 1) { SDL_Log("console test: glb_anim clips FAIL (%d)", a->nclip); t = 1; }
+            if (a->nskin > 0 && a->skins[0].joint_count != 2) {
+                SDL_Log("console test: glb_anim joints FAIL (%d)", a->skins[0].joint_count); t = 1;
+            }
+            if (a->nprim > 0) {
+                AnimPrim *P = &a->prims[0];
+                if (P->vcount != 48) { SDL_Log("console test: glb_anim vcount FAIL (%d)", P->vcount); t = 1; }
+                if (!P->bone_idx || !P->bone_w) { SDL_Log("console test: glb_anim weights FAIL"); t = 1; }
+                // первая половина вершин (0-23) привязана к кости 0, вторая (24-47) к кости 1
+                if (P->bone_idx) {
+                    if (P->bone_idx[0] != 0 || P->bone_idx[23*4] != 0 ||
+                        P->bone_idx[24*4] != 1 || P->bone_idx[47*4] != 1) {
+                        SDL_Log("console test: glb_anim joints FAIL (%u,%u,%u,%u)",
+                                P->bone_idx[0], P->bone_idx[23*4], P->bone_idx[24*4], P->bone_idx[47*4]);
+                        t = 1;
+                    }
+                    if (P->bone_w[3] != 0.0f || P->bone_w[24*4+3] != 0.0f) {
+                        SDL_Log("console test: glb_anim weights FAIL"); t = 1;
+                    }
+                }
+            }
+            if (a->nclip > 0 && a->clips[0].nch != 1) {
+                SDL_Log("console test: glb_anim channels FAIL (%d)", a->clips[0].nch); t = 1;
+            }
+            if (t) fail++;
+            glb_anim_free(a);
+        }
+    }
+
+    // 15b) Реальная модель с большой кожей: handpaint_-_girl_01.glb (99 костей,
+    // имя клипа "IDLE", не-скинненый примитив). Проверяет per-primitive remap
+    // и много-костевые кожи, которые не влезали бы в uBones[64] целиком.
+    {
+        AnimGlb *a = glb_anim_parse("models/handpaint_-_girl_01.glb");
+        if (!a) { SDL_Log("console test: glb_anim girl parse FAIL (NULL)"); fail++; }
+        else {
+            int t = 0;
+            if (a->nskin < 1 || a->skins[0].joint_count != 99) {
+                SDL_Log("console test: glb_anim girl joints FAIL (%d)",
+                        a->nskin > 0 ? a->skins[0].joint_count : -1); t = 1;
+            }
+            if (a->nprim != 6) { SDL_Log("console test: glb_anim girl prims FAIL (%d)", a->nprim); t = 1; }
+            if (a->nclip != 1) { SDL_Log("console test: glb_anim girl clips FAIL (%d)", a->nclip); t = 1; }
+            if (a->nclip > 0 && strcmp(a->clips[0].name, "IDLE")) {
+                SDL_Log("console test: glb_anim girl clip name FAIL (%s)", a->clips[0].name); t = 1;
+            }
+            int skinned = 0, plain = 0;
+            for (int i = 0; i < a->nprim; i++) {
+                if (a->prims[i].bone_idx) skinned++; else plain++;
+                if (a->prims[i].bone_idx)
+                    for (int v = 0; v < a->prims[i].vcount; v++)
+                        for (int k = 0; k < 4; k++)
+                            if (a->prims[i].bone_idx[4*v+k] >= a->skins[0].joint_count) { t = 1; }
+            }
+            if (skinned != 5 || plain != 1) {
+                SDL_Log("console test: glb_anim girl skin split FAIL (%d skinned, %d plain)",
+                        skinned, plain); t = 1;
+            }
+            if (t) fail++;
+            glb_anim_free(a);
         }
     }
 

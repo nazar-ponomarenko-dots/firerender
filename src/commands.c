@@ -6,6 +6,8 @@
 //  Регистрация всех статических команд — в ЕДИНОМ реестре (cmdreg.c).
 // ============================================================================
 #include "commands.h"
+#include <stdlib.h>
+#include <string.h>
 
 #include "app.h"
 #include "audio.h"
@@ -14,9 +16,11 @@
 #include "cvars.h"
 #include "fx.h"
 #include "entity.h"
+#include "events.h"
 #include "game.h"
 #include "gl_loader.h"
 #include "glb.h"
+#include "glb_anim.h"
 #include "mapdata.h"
 #include "material.h"
 #include "mesh.h"
@@ -110,9 +114,14 @@ void cmd_pause(const char *args)
 // --- Карты ----------------------------------------------------------------------
 // Выбор карты: map <имя> — "map" (папка) или имя из maps/*.zip.
 // Если мир загружен — перезапускает игру на новой карте прямо сейчас.
+static int s_map_switching = 0;   // рекурсия: скрипт/команда грузит карту внутри game_load_world
 void cmd_map_select(const char *args)
 {
     Game *g = game_instance();
+    if (s_map_switching) {
+        console_print("map: вложенный вызов игнорируется (карта уже грузится)");
+        return;
+    }
     char name[64];
     if (sscanf(args, "%63s", name) != 1 || !name[0]) {
         console_print("current map: %s", g->map_name);
@@ -126,9 +135,15 @@ void cmd_map_select(const char *args)
     }
     snprintf(g->map_name, sizeof g->map_name, "%s", name);
     if (g->world_loaded) {
-        // Перезагрузка мира на новой карте: выгрузить -> загрузить -> в игру
+        // Перезагрузка мира на новой карте: выгрузить -> загрузить -> в игру.
+        // Флаг рекурсии: game_load_world -> map_apply/скрипт карты может сам
+        // выполнить "map X" — вложенный cmd_map_select мы отбрасываем, иначе
+        // мир выгрузится внутри собственной загрузки (UAF/double free сцены).
+        s_map_switching = 1;
         game_unload_world(g);
-        if (game_load_world(g) != 0) {
+        int rc = game_load_world(g);
+        s_map_switching = 0;
+        if (rc != 0) {
             SDL_Log("Map %s load failed", g->map_name);
             snprintf(g->map_name, sizeof g->map_name, "map1");
             app_set_state(APP_MENU);
@@ -300,6 +315,10 @@ void commands_shot_take(int vw, int vh)
     char path[320];
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
+    if (!tm) {   // localtime может вернуть NULL — не пишем в tm->*
+        SDL_Log("screenshot: localtime failed");
+        return;
+    }
     snprintf(path, sizeof path, "screenshots/shot_%04d%02d%02d_%02d%02d%02d.png",
              tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
              tm->tm_hour, tm->tm_min, tm->tm_sec);
@@ -501,6 +520,33 @@ void cmd_mesh(const char *args)
 }
 
 // Поставить бинарный glTF (.glb): glb <путь> [x y z] [scale]
+static SceneNode *s_last_anim;   // последний поставленный AnimInstance3D
+
+// Узел-анимик, на который указывает s_last_anim, может быть убит/удалён
+// (entity_kill, выгрузка мира) — указатель станет висячим. Чистим его по
+// EV_NODE_EXIT, пока node_free_tree ещё не освободил сам узел.
+static void anim_last_exit(const Event *e, void *user)
+{
+    (void)user;
+    if (e && e->a == (const void *)s_last_anim) s_last_anim = NULL;
+}
+
+static void anim_last_hook(void)
+{
+    static int s_hooked = 0;
+    if (!s_hooked) { events_listen(EV_NODE_EXIT, anim_last_exit, NULL); s_hooked = 1; }
+}
+
+// Узел-анимик: по имени (если задано) или последний поставленный.
+static SceneNode *anim_find(const char *name)
+{
+    Game *g = game_instance();
+    SceneNode *nd = NULL;
+    if (name && name[0] && g && g->root) nd = node_find(g->root, name);
+    if (!nd) nd = s_last_anim;
+    return nd;
+}
+
 void cmd_glb(const char *args)
 {
     Game *g = game_instance();
@@ -510,10 +556,144 @@ void cmd_glb(const char *args)
     int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
     if (n < 1) { console_print("usage: glb <glb> [x y z] [scale]"); return; }
     float pos[3] = { x, y, z };
-    SceneNode *nd = glb_make_node(path, pos, scale, renderer_context());
+    SceneNode *nd = NULL;
+    // авто-выбор: есть скин+анимация -> скелетный путь (skinning)
+    if (glb_anim_has_anim(path))
+        nd = glb_anim_make_node(path, pos, scale, renderer_context());
+    else
+        nd = glb_make_node(path, pos, scale, renderer_context());
     if (!nd) { console_print("glb: не удалось загрузить %s", path); return; }
+    anim_last_hook();
     node_add(g->root, nd);
+    if (glb_anim_clip_count(nd) > 0) s_last_anim = nd;
     console_print("glb: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
+}
+
+// Поставить анимированный glTF (.glb): glbanim <путь> [x y z] [scale]
+void cmd_glbanim(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->root) { console_print("glbanim: мир не загружен"); return; }
+    char path[256] = "";
+    float x = 0, y = 0, z = 0, scale = 1.0f;
+    int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
+    if (n < 1) { console_print("usage: glbanim <glb> [x y z] [scale]"); return; }
+    float pos[3] = { x, y, z };
+    SceneNode *nd = glb_anim_make_node(path, pos, scale, renderer_context());
+    if (!nd) { console_print("glbanim: не удалось загрузить %s", path); return; }
+    anim_last_hook();
+    node_add(g->root, nd);
+    s_last_anim = nd;
+    console_print("glbanim: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
+    if (glb_anim_clip_count(nd) > 0) {
+        console_print("  клипы: %d, активный: %s",
+                      glb_anim_clip_count(nd),
+                      glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+        for (int i = 0; i < glb_anim_clip_count(nd); i++)
+            console_print("  [%d] %s", i, glb_anim_clip_name(nd, i) ? glb_anim_clip_name(nd, i) : "?");
+    }
+}
+
+// Список клипов анимации узла: glbclips [имя-узла]
+void cmd_glbclips(const char *args)
+{
+    char name[128] = "";
+    sscanf(args, "%127s", name);
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbclips: нет анимик-узла (спавн через glbanim/glb)"); return; }
+    int nc = glb_anim_clip_count(nd);
+    console_print("glbclips: узел %s, клипов %d, активный: %s",
+                  nd->name ? nd->name : "?", nc,
+                  glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+    for (int i = 0; i < nc; i++)
+        console_print("  [%d] %s", i, glb_anim_clip_name(nd, i) ? glb_anim_clip_name(nd, i) : "?");
+}
+
+// Переключить клип: glbclip <индекс|имя> [имя-узла]
+void cmd_glbclip(const char *args)
+{
+    char sel[64] = "", name[128] = "";
+    int n = sscanf(args, "%63s %127s", sel, name);
+    if (n < 1) { console_print("usage: glbclip <idx|имя> [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbclip: нет анимик-узла (спавн через glbanim/glb)"); return; }
+    int idx = atoi(sel);
+    if (!(sel[0] >= '0' && sel[0] <= '9') || idx > 99999) idx = glb_anim_clip_find(nd, sel);
+    if (idx < 0) { console_print("glbclip: клип '%s' не найден", sel); return; }
+    glb_anim_set_clip(nd, idx);
+    console_print("glbclip: %s -> [%d] %s", nd->name ? nd->name : "?", idx,
+                  glb_anim_clip_name(nd, idx) ? glb_anim_clip_name(nd, idx) : "?");
+}
+
+// Пауза/продолжить: glbanim_pause [имя-узла]
+void cmd_glbanim_pause(const char *args)
+{
+    char name[128] = "";
+    sscanf(args, "%127s", name);
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_pause: нет анимик-узла"); return; }
+    glb_anim_set_paused(nd, 1);
+    console_print("glbanim_pause: %s", nd->name ? nd->name : "?");
+}
+// Продолжить: glbanim_play [имя-узла]
+void cmd_glbanim_play(const char *args)
+{
+    char name[128] = "";
+    sscanf(args, "%127s", name);
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_play: нет анимик-узла"); return; }
+    glb_anim_set_paused(nd, 0);
+    console_print("glbanim_play: %s", nd->name ? nd->name : "?");
+}
+// Скорость времени: glbanim_speed <x> [имя-узла]
+void cmd_glbanim_speed(const char *args)
+{
+    float s = 1.0f; char name[128] = "";
+    if (sscanf(args, "%f %127s", &s, name) < 1) { console_print("usage: glbanim_speed <x> [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_speed: нет анимик-узла"); return; }
+    glb_anim_set_speed(nd, s);
+    console_print("glbanim_speed: %s = %g", nd->name ? nd->name : "?", s);
+}
+// Зацикливание: glbanim_loop <0|1> [имя-узла]
+void cmd_glbanim_loop(const char *args)
+{
+    int v = 1; char name[128] = "";
+    if (sscanf(args, "%d %127s", &v, name) < 1) { console_print("usage: glbanim_loop <0|1> [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_loop: нет анимик-узла"); return; }
+    glb_anim_set_loop(nd, v);
+    console_print("glbanim_loop: %s = %d", nd->name ? nd->name : "?", v?1:0);
+}
+
+// cubemap_capture [x y z] [size] — захватить кубомап отражений в позиции
+// игрока (или в точке x y z) и сохранить 6 PNG в cubemaps/. По умолчанию
+// размер 256; захваченный кубомап тут же используется водой.
+void cmd_cubemap_capture(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->cam || !g->world_loaded) {
+        console_print("cubemap_capture: мир не загружен");
+        return;
+    }
+    if (!renderer_refl_cubemap()) {
+        console_print("cubemap_capture: кубомап недоступен");
+        return;
+    }
+    // Позиция: игрок по умолчанию, либо из аргументов "x y z [size]"
+    float pos[3] = {
+        g->cam->cam.pos[0], g->cam->cam.pos[1], g->cam->cam.pos[2]
+    };
+    int size = 256;
+    if (args && args[0]) {
+        float x, y, z;
+        int n = sscanf(args, "%f %f %f %d", &x, &y, &z, &size);
+        if (n == 1) size = (int)x;       // "cubemap_capture 128" — только размер
+        else if (n >= 3) { pos[0] = x; pos[1] = y; pos[2] = z; }
+    }
+    renderer_cubemap_capture_at(g, pos, size);
+    console_print("cubemap_capture: (%.0f, %.0f, %.0f) size=%d сохранён в cubemaps/",
+                  pos[0], pos[1], pos[2], size);
 }
 
 // Список зарегистрированных материалов по имени (matlist).

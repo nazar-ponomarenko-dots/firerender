@@ -81,6 +81,12 @@ typedef struct {
 
 static FxEmitter s_emitters[FX_MAX_EMITTERS];
 
+// --- Wetness state -----------------------------------------------------------
+static float s_wetness = 0.0f;         // текущий уровень мокрости 0..1
+static float s_wetness_target = 0.0f;  // целевой (1 под дождём, 0 без)
+static float s_wetness_ramp_up = 1.0f;   // скорость нарастания (сек^-1) — 1 сек до 1.0
+static float s_wetness_ramp_down = 0.18f; // скорость высыхания (сек^-1) — ~5.5 сек до 0
+
 static FxEmitter *emitter_find(const char *name)
 {
     for (int i = 0; i < FX_MAX_EMITTERS; i++)
@@ -103,6 +109,8 @@ void fx_emitter_start(const char *name, const float *pos, const float *ext,
     if (!e) return;   // лимит эмиттеров
     snprintf(e->name, sizeof e->name, "%s", name);
     e->active = 1;
+    e->follow = 0;   // старый эмиттер мог быть погодным — сбрасываем,
+    e->y_off = 0;    // иначе «закреплённый» эмиттер продолжит следовать за камерой
     e->pos[0] = pos[0]; e->pos[1] = pos[1]; e->pos[2] = pos[2];
     e->ext[0] = ext ? ext[0] : 0.0f;
     e->ext[1] = ext ? ext[1] : 0.0f;
@@ -146,6 +154,17 @@ void fx_update(float dt)
         camy = g->cam->cam.pos[1];
         camz = g->cam->cam.pos[2];
     }
+
+    // Проверка активного дождя для мокрости
+    int rain_active = 0;
+    for (int i = 0; i < FX_MAX_EMITTERS; i++) {
+        if (s_emitters[i].active && s_emitters[i].follow &&
+            strcmp(s_emitters[i].name, "rain") == 0) {
+            rain_active = 1;
+            break;
+        }
+    }
+
     for (int i = 0; i < FX_MAX_EMITTERS; i++) {
         FxEmitter *e = &s_emitters[i];
         if (!e->active) continue;
@@ -178,6 +197,24 @@ void fx_update(float dt)
             particles_emit(&pp);
         }
     }
+
+    // Wetness ramp: нарастает под дождём, сохнет без
+    s_wetness_target = rain_active ? 1.0f : 0.0f;
+    if (s_wetness < s_wetness_target)
+        s_wetness = s_wetness + s_wetness_ramp_up * dt > s_wetness_target ? s_wetness_target : s_wetness + s_wetness_ramp_up * dt;
+    else if (s_wetness > s_wetness_target)
+        s_wetness = s_wetness - s_wetness_ramp_down * dt < s_wetness_target ? s_wetness_target : s_wetness - s_wetness_ramp_down * dt;
+}
+
+// --- Wetness getters ---------------------------------------------------------
+float fx_wetness(void)
+{
+    return s_wetness;
+}
+
+float fx_wetness_target(void)
+{
+    return s_wetness_target;
 }
 
 // --- Консоль и управление ------------------------------------------------------
@@ -356,13 +393,13 @@ void fx_register_builtin(void)
     }
     // Дождь: тонкие стрики вниз, быстрые, слегка голубые
     {
-        ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.03f,
-            .speed0 = 30.0f, .speed1 = 40.0f,
-            .life0 = 0.5f, .life1 = 0.8f,
-            .size0 = 0.015f, .size1 = 0.015f,
-            .alpha0 = 0.35f, .alpha1 = 0.0f,
-            .r = 0.75f, .g = 0.85f, .b = 1.0f,
-            .gravity = 9.8f, .drag = 0.0f, .streak = 1 };
+        ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.15f,
+            .speed0 = 15.0f, .speed1 = 25.0f,
+            .life0 = 1.0f, .life1 = 1.5f,
+            .size0 = 0.04f, .size1 = 0.03f,
+            .alpha0 = 0.6f, .alpha1 = 0.0f,
+            .r = 0.7f, .g = 0.8f, .b = 1.0f,
+            .gravity = 9.8f, .drag = 0.1f, .streak = 1 };
         fx_register("rain", &pp, 1);
     }
     // Снег: медленно падает, покачивается

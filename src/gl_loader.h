@@ -96,6 +96,7 @@
     F(void,             glTexParameteri,         (GLenum, GLenum, GLint))         \
     F(void,             glGenerateMipmap,        (GLenum))                         \
     F(void,             glTexImage2D,            (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) \
+    F(void,             glCopyTexSubImage2D,     (GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei)) \
     F(void,             glTexImage3D,            (GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) \
     F(void,             glTexSubImage3D,         (GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
     F(void,             glPixelStorei,           (GLenum, GLint))                 \
@@ -187,6 +188,7 @@ GL_FUNCS(F)
 #define glTexParameteri           p_glTexParameteri
 #define glGenerateMipmap          p_glGenerateMipmap
 #define glTexImage2D              p_glTexImage2D
+#define glCopyTexSubImage2D       p_glCopyTexSubImage2D
 #define glTexImage3D              p_glTexImage3D
 #define glTexSubImage3D           p_glTexSubImage3D
 #define glPixelStorei             p_glPixelStorei

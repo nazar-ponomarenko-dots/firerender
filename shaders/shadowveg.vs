@@ -24,6 +24,7 @@ uniform float uTime;                   // время симуляции (вет�
 uniform vec3 uCamPos;                  // игрок (для прогиба растительности)
 uniform float uWalk;                   // 1 = ходьба (сильнее раздвигаем)
 uniform float uDyn;                    // 1 = динамический слой (вокруг камеры)
+uniform float uWindBoost;              // мокрость 0..1: в дождь ветер сильнее
 
 out vec2 vUV;
 flat out float vLayer;   // LOD целый для всего квада (не интерполировать)
@@ -94,7 +95,8 @@ void main() {
     float w1 = sin(uTime * 1.15 + ph);
     float w2 = sin(uTime * 2.35 + dot(iPos.xz * 1.7, vec2(0.53, -0.81))
                    + iAttr.w * 4.0);
-    float amp = 0.7 + 0.6 * fract(iPos.x * 0.37 + iPos.z * 0.91);
+    float amp = (0.7 + 0.6 * fract(iPos.x * 0.37 + iPos.z * 0.91))
+              * (1.0 + 0.6 * uWindBoost);   // дождь = ветер +60% амплитуда
     float sway = (w1 * 0.07 + w2 * 0.035) * aPos.y * amp;
     wp.x += sway;
     wp.z += sway * 0.35 + w2 * 0.02 * aPos.y;

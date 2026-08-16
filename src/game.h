@@ -29,6 +29,7 @@ typedef struct {
     SceneNode *obj_node, *field_node;
     SceneNode *fauna_node;
     SceneNode *particles_node, *decals_node;
+    SceneNode *water_node;       // вода: лужи/озёра/реки/моря (water.c)
     SceneNode *sel_node, *mm_node, *hud_node;
     CameraParams *cam;         // параметры узла Camera
     MinimapParams *mm;         // параметры узла Minimap

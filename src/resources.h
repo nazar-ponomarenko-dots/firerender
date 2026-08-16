@@ -47,6 +47,13 @@ GLuint resources_program(const char *vs_path, const char *fs_path);
 void resources_program_release(GLuint prog);
 void resources_texture_release(GLuint tex);
 
+// Перезапрос программы при hot-reload: берёт свежую программу пары и отдаёт
+// ссылку на старую. old == 0 (первый запрос из *_init) — просто загрузка.
+// Если компиляция не удалась, возвращает 0 и НЕ трогает старый id — вызывающий
+// обязан оставить узлу прежнюю программу (она жива до релиза).
+GLuint resources_program_replace(GLuint old, const char *vs_path,
+                                 const char *fs_path);
+
 // Инициализация — до любых загрузок (в начале main), и полная очистка —
 // в самом конце main, ПОСЛЕ освобождения всех модулей сцены.
 void resources_init(void);

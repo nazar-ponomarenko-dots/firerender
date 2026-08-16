@@ -41,11 +41,16 @@ static GLint u_tex3d[VF_CASCADES], u_center[VF_CASCADES];
 static GLint u_box[VF_CASCADES], u_res[VF_CASCADES];
 static GLint u_sundir, u_strength, u_fogmode;
 static GLint u_fogcol, u_fogcolsun, u_glare, u_raystr;
+static GLint u_wetness, u_skycolor;
+static GLint u_heightmap, u_worldsize, u_hmin, u_hmax, u_time;
+static GLint u_haze, u_hazeh;
+static GLint u_noise;   // img/noise.png (unit 12) — неравномерность дымки
+static GLuint s_noise_tex = 0;
 static GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES], u_shadowbias[SHADOW_CASCADES];
 static GLint u_shadowgrad[SHADOW_CASCADES], u_shadowon;
 
 // Режим тумана: 0 = выкл, 1 = объёмный (полное разрешение),
-// 2 = объёмный в 1/4 разрешения (дешёвый, для слабых машин)
+// 2 = «дешёвый» объёмный в полном разрешении: марш только по грубому каскаду
 static int s_mode = 1;
 
 int voxfog_is_on(void)          { return s_on; }
@@ -106,10 +111,10 @@ static void vf_rebuild(int c)
     free(buf);
 }
 
-// Пересоздаёт программу тумана и переищет uniform'ы (для hot-reload).
+// Проги создаются СНАРУЖИ (init / reshade: refcount балансируется там).
+// Здесь — только uniform'ы для ТЕКУЩЕГО id (s_prog).
 static void voxfog_prog_init(void)
 {
-    s_prog = make_program("shaders/postfx.vs", "shaders/volumetric.fs");
     if (!s_prog) return;
     u_scene      = glGetUniformLocation(s_prog, "uScene");
     u_scenedepth = glGetUniformLocation(s_prog, "uSceneDepth");
@@ -124,6 +129,16 @@ static void voxfog_prog_init(void)
     u_fogcolsun  = glGetUniformLocation(s_prog, "uFogColorSun");
     u_glare      = glGetUniformLocation(s_prog, "uGlare");
     u_raystr     = glGetUniformLocation(s_prog, "uRayStrength");
+    u_wetness    = glGetUniformLocation(s_prog, "uWetness");
+    u_skycolor   = glGetUniformLocation(s_prog, "uSkyColor");
+    u_heightmap  = glGetUniformLocation(s_prog, "uHeightmap");
+    u_worldsize  = glGetUniformLocation(s_prog, "uWorldSize");
+    u_hmin       = glGetUniformLocation(s_prog, "uHeightMin");
+    u_hmax       = glGetUniformLocation(s_prog, "uHeightMax");
+    u_time       = glGetUniformLocation(s_prog, "uTime");
+    u_haze       = glGetUniformLocation(s_prog, "uHaze");
+    u_hazeh      = glGetUniformLocation(s_prog, "uHazeH");
+    u_noise      = glGetUniformLocation(s_prog, "uNoise");
     for (int c = 0; c < VF_CASCADES; c++) {
         char name[64];
         snprintf(name, sizeof name, "uFogTex%d", c);
@@ -155,15 +170,28 @@ static void voxfog_prog_init(void)
     glUniform1i(u_tex3d[2], 4);
     for (int c = 0; c < SHADOW_CASCADES; c++)
         glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
+    glUniform1i(u_heightmap, 10);                // карта высот (дымка у земли)
+    glUniform1i(u_noise, 12);                    // img/noise.png (шум дымки)
     glUseProgram(0);
 }
 
-static void voxfog_reshade(void) { voxfog_prog_init(); }
+// Hot-reload: replace балансирует refcount (release старого + новая ссылка);
+// 0 — пара не собралась, остаётся прежний id.
+static void voxfog_reshade(void)
+{
+    GLuint prog = resources_program_replace(s_prog, "shaders/postfx.vs",
+                                            "shaders/volumetric.fs");
+    if (prog) s_prog = prog;
+    voxfog_prog_init();
+}
 
 void voxfog_init(const WorldState *w, int vw, int vh)
 {
     s_world = w;
     mapdata_fog(&s_cfg);
+    // Шум дымки: img/noise.png (REPEAT), общая текстура ресурсов
+    if (!s_noise_tex)
+        s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
     // Режим — из cvar'а r_fog_mode (config.cfg/меню/консоль), а НЕ дефолт
     // карты: sync_cvars в main.c срабатывает только на ИЗМЕНЕНИЕ cvar'а,
     // поэтому при старте с r_fog_mode 0 из config.cfg туман иначе остался
@@ -185,7 +213,10 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         memset(s_center[c], 0, sizeof s_center[c]);
     }
 
-    voxfog_prog_init();    // программа + uniform'ы (для hot-reload)
+    // Программа тумана (replace: old==0 после cleanup => plain-загрузка)
+    s_prog = resources_program_replace(s_prog, "shaders/postfx.vs",
+                                       "shaders/volumetric.fs");
+    voxfog_prog_init();    // uniform'ы (для hot-reload)
     if (!s_prog) return;
     u_scenedepth = glGetUniformLocation(s_prog, "uSceneDepth");
     u_invviewproj = glGetUniformLocation(s_prog, "uInvViewProj");
@@ -199,6 +230,16 @@ void voxfog_init(const WorldState *w, int vw, int vh)
     u_fogcolsun  = glGetUniformLocation(s_prog, "uFogColorSun");
     u_glare      = glGetUniformLocation(s_prog, "uGlare");
     u_raystr     = glGetUniformLocation(s_prog, "uRayStrength");
+    u_wetness    = glGetUniformLocation(s_prog, "uWetness");
+    u_skycolor   = glGetUniformLocation(s_prog, "uSkyColor");
+    u_heightmap  = glGetUniformLocation(s_prog, "uHeightmap");
+    u_worldsize  = glGetUniformLocation(s_prog, "uWorldSize");
+    u_hmin       = glGetUniformLocation(s_prog, "uHeightMin");
+    u_hmax       = glGetUniformLocation(s_prog, "uHeightMax");
+    u_time       = glGetUniformLocation(s_prog, "uTime");
+    u_haze       = glGetUniformLocation(s_prog, "uHaze");
+    u_hazeh      = glGetUniformLocation(s_prog, "uHazeH");
+    u_noise      = glGetUniformLocation(s_prog, "uNoise");
     for (int c = 0; c < VF_CASCADES; c++) {
         char name[64];
         snprintf(name, sizeof name, "uFogTex%d", c);
@@ -230,6 +271,8 @@ void voxfog_init(const WorldState *w, int vw, int vh)
     glUniform1i(u_tex3d[2], 4);
     for (int c = 0; c < SHADOW_CASCADES; c++)
         glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
+    glUniform1i(u_heightmap, 10);                // карта высот (дымка у земли)
+    glUniform1i(u_noise, 12);                    // img/noise.png (шум дымки)
     glUseProgram(0);
 
     shader_on_reshade(voxfog_reshade);
@@ -339,7 +382,8 @@ static void mat4_invert(const float *m, float *o)
 }
 
 // Рендер объёмного тумана в заданный FBO (0 = экран) и viewport.
-// Общий для режимов 1 (полное разрешение) и 2 (1/4 + растяжка).
+// Общий для режимов 1 (все каскады) и 2 (только грубый каскад) — оба
+// проходят в полном разрешении экрана.
 static void render_volumetric(int vw, int vh, GLuint target_fbo,
                               const RendererContext *rc,
                               GLuint scene_tex, GLuint scene_depth)
@@ -374,6 +418,29 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
                 s_cfg.color_sun[2]);
     glUniform1f(u_glare, s_cfg.glare);
     glUniform1f(u_raystr, s_cfg.ray_strength);
+    // Дождь: туман светится от неба (uSkyColor), не от солнца — мокрость
+    // и цвет неба приходят из кадрового контекста.
+    glUniform1f(u_wetness, rc->wetness);
+    glUniform3f(u_skycolor, rc->sky_color[0], rc->sky_color[1],
+                rc->sky_color[2]);
+    // Дымка над землёй (дождь): серая, ~0.5 м, с шумом. Сила растёт с
+    // мокротой; толщина слоя постоянна (0.5 м). Время — дрейф шума.
+    glUniform2f(u_worldsize, s_world->world_w, s_world->world_d);
+    glUniform1f(u_hmin, s_world->min_height);
+    glUniform1f(u_hmax, s_world->max_height);
+    glUniform1f(u_time, (float)(SDL_GetTicks() % 600000) / 1000.0f);
+    // Приземная дымка отключена (убрана по запросу). uHaze = 0 — низ чистый.
+    glUniform1f(u_haze, 0.0f);
+    glUniform1f(u_hazeh, 1.0f);
+    GLuint htex = world_height_tex();
+    if (htex) {
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_2D, htex);
+        glActiveTexture(GL_TEXTURE12);
+        glBindTexture(GL_TEXTURE_2D, s_noise_tex);
+    } else {
+        glUniform1f(u_haze, 0.0f);   // нет карты высот — дымку не рисуем
+    }
     for (int c = 0; c < VF_CASCADES; c++) {
         glUniform3f(u_center[c], s_center[c][0], s_center[c][1], s_center[c][2]);
         glUniform1f(u_box[c], s_box[c]);
@@ -415,9 +482,11 @@ void voxfog_cleanup(void)
         glDeleteTextures(1, &s_tex);
     }
     if (s_prog) resources_program_release(s_prog);
+    if (s_noise_tex) resources_texture_release(s_noise_tex);
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     s_fbo = s_tex = 0;
     s_prog = 0;
+    s_noise_tex = 0;
     s_on = 0;
 }

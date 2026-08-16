@@ -15,6 +15,7 @@
 // ============================================================================
 #include "glb.h"
 
+#include "events.h"
 #include "json.h"
 #include "render_ctx.h"
 #include "resources.h"
@@ -206,11 +207,34 @@ static float spec_from_rough(float rough, float metallic)
     return 0.05f + g * (0.55f + 0.45f * clamp01(metallic));
 }
 
+// Акцессор укладывается в свой bufferView и в bin-чанк (защита от
+// битого/вредоносного GLB: смещения/длины — из JSON, проверяются ДО чтения).
+static int acc_fits(const GlbAcc *a, const GlbBv *bvs, int bv_n, long bin_len)
+{
+    if (!a || a->count <= 0) return 0;
+    if (a->bufferView < 0 || a->bufferView >= bv_n) return 0;
+    const GlbBv *bv = &bvs[a->bufferView];
+    long sz = (long)comp_size(a->comp) * a->vec;
+    if (sz <= 0) return 0;
+    if (a->count > bin_len) return 0;
+    long need = a->count * sz;
+    long base = bv->byteOffset + a->byteOffset;
+    return base >= 0 && bv->byteLength >= 0 && need <= bv->byteLength &&
+           base + need <= bin_len;
+}
+static int bv_fits(const GlbBv *bvs, int bv_n, int i, long bin_len)
+{
+    if (i < 0 || i >= bv_n) return 0;
+    return bvs[i].byteOffset >= 0 && bvs[i].byteLength >= 0 &&
+           bvs[i].byteOffset + bvs[i].byteLength <= bin_len;
+}
+
 // --- Альбедо из GLB (bufferView -> stb_image -> RGBA пиксели) ------------------
 static int load_albedo(GlbItem *o, int mi,
                        const JsonNode *materials, const JsonNode *textures,
                        const JsonNode *images, const JsonNode *samplers,
-                       const GlbBv *bvs, int bv_n, const unsigned char *bin)
+                       const GlbBv *bvs, int bv_n, const unsigned char *bin,
+                       long bin_len)
 {
     if (mi < 0 || !materials || materials->type != JSON_ARRAY ||
         !textures || textures->type != JSON_ARRAY ||
@@ -225,7 +249,7 @@ static int load_albedo(GlbItem *o, int mi,
     int smp = (int)json_num(json_find(tex, "sampler"), -1);
     if (src < 0 || src >= json_array_len(images)) return 0;
     int iv = (int)json_num(json_find(json_array_get(images, src), "bufferView"), -1);
-    if (iv < 0 || iv >= bv_n) return 0;
+    if (!bv_fits(bvs, bv_n, iv, bin_len)) return 0;
     int w, h, ch;
     unsigned char *px = stbi_load_from_memory(bin + bvs[iv].byteOffset,
                                               (int)bvs[iv].byteLength, &w, &h, &ch, 4);
@@ -257,7 +281,7 @@ GlbModel *glb_parse_file(const char *path)
     }
 
     const unsigned char *json_data = NULL, *bin = NULL;
-    unsigned int json_len = 0;
+    unsigned int json_len = 0, bin_len = 0;
     unsigned int off = 12;
     while (off + 8 <= filesz) {
         unsigned int clen, ctype;
@@ -265,7 +289,7 @@ GlbModel *glb_parse_file(const char *path)
         off += 8;
         if (off + clen > filesz) break;
         if (ctype == 0x4E4F534A) { json_data = file + off; json_len = clen; }
-        else if (ctype == 0x004E4942) bin = file + off;
+        else if (ctype == 0x004E4942) { bin = file + off; bin_len = clen; }
         off += clen;
     }
     if (!json_data || !bin) {
@@ -362,9 +386,18 @@ GlbModel *glb_parse_file(const char *path)
                     int iidx = (int)json_num(json_find(prim, "indices"), -1);
                     if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "нет POSITION"; break; }
                     GlbAcc *ap = &accs[ipos];
-                    GlbAcc *an = (inrm >= 0 && inrm < acc_n) ? &accs[inrm] : NULL;
-                    GlbAcc *au = (iuv >= 0 && iuv < acc_n) ? &accs[iuv] : NULL;
-                    GlbAcc *ai = (iidx >= 0 && iidx < acc_n) ? &accs[iidx] : NULL;
+                    // Защита от OOB: акцессор обязан укладываться в bin-чанк.
+                    if (!acc_fits(ap, bvs, bv_n, (long)bin_len)) {
+                        SDL_Log("glb: %s — POSITION акцессор вне буфера, примитив пропущен", path);
+                        continue;
+                    }
+                    if (ap->count > 16L * 1024 * 1024) {
+                        SDL_Log("glb: %s — POSITION count %ld слишком велик, примитив пропущен", path, ap->count);
+                        continue;
+                    }
+                    GlbAcc *an = (inrm >= 0 && inrm < acc_n && acc_fits(&accs[inrm], bvs, bv_n, (long)bin_len)) ? &accs[inrm] : NULL;
+                    GlbAcc *au = (iuv >= 0 && iuv < acc_n && acc_fits(&accs[iuv], bvs, bv_n, (long)bin_len)) ? &accs[iuv] : NULL;
+                    GlbAcc *ai = (iidx >= 0 && iidx < acc_n && acc_fits(&accs[iidx], bvs, bv_n, (long)bin_len)) ? &accs[iidx] : NULL;
                     long nv = ap->count;
 
                     Bucket *bk = b_get(&buckets, &bk_n, &bk_cap, mat_idx);
@@ -461,7 +494,8 @@ GlbModel *glb_parse_file(const char *path)
             }
             if (json_find(mt, "normalTexture"))
                 SDL_Log("glb: %s — normalTexture игнор (псевдо-PBR 2004)", path);
-            load_albedo(o, mi, materials, textures, images, samplers, bvs, bv_n, bin);
+            load_albedo(o, mi, materials, textures, images, samplers, bvs, bv_n,
+                        bin, (long)bin_len);
         }
         // Данные переданы GlbItem'у — не освобождать повторно в b_free
         bk->verts = bk->nrm = bk->uv = (float *)NULL;
@@ -483,6 +517,7 @@ typedef struct {
     int index_count;
     GLenum index_type;
     GLuint tex;
+    int tex_owned;           // 1 — glGenTextures (из img), 0 — кеш ресурсов
     Material mat;
     MaterialLocs ml;
     float specular;
@@ -547,6 +582,7 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog)
     d->specular = gi->specular;
     if (gi->img) {
         glGenTextures(1, &d->tex);
+        d->tex_owned = 1;
         glBindTexture(GL_TEXTURE_2D, d->tex);
         GLint wm = GL_REPEAT, fm = GL_LINEAR_MIPMAP_LINEAR, fmag = GL_LINEAR;
         if (gi->wrap == MAT_WRAP_CLAMP) wm = GL_CLAMP_TO_EDGE;
@@ -566,9 +602,15 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog)
     return d;
 }
 
+static void glb_node_exit(const Event *e, void *user);   // forward (см. ниже)
+
 SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
                          const RendererContext *rc)
 {
+    // Один раз: узел GlbInstance3D при выходе из дерева освобождает ресурсы.
+    static int s_registered = 0;
+    if (!s_registered) { events_listen(EV_NODE_EXIT, glb_node_exit, NULL); s_registered = 1; }
+
     GlbModel *gm = glb_parse_file(path);
     if (!gm) return NULL;
     GLuint prog = make_program("shaders/mesh.vs", "shaders/mesh.fs");
@@ -585,7 +627,10 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
 
     p->items = calloc((size_t)gm->count, sizeof *p->items);
     p->count = gm->count;
-    for (int i = 0; i < gm->count; i++) p->items[i] = *build_item(&gm->items[i], prog);
+    for (int i = 0; i < gm->count; i++) {
+        DrawItem *bi = build_item(&gm->items[i], prog);
+        p->items[i] = *bi; free(bi);   // структура скопирована — обёртку освободить
+    }
     glb_model_free(gm);
 
     glUseProgram(prog);
@@ -628,6 +673,35 @@ void glb_node_render(SceneNode *n, float dt)
         glDrawElements(GL_TRIANGLES, d->index_count, d->index_type, NULL);
     }
     glBindVertexArray(0);
+}
+
+// Освобождение ресурсов узла GlbInstance3D (по EV_NODE_EXIT из node_free_tree).
+// node_free_tree освобождает только структуру GlbParams; VAO/VBO/EBO каждой
+// бакеты, текстуры (свои + кеш) и refcount программы отдаём здесь.
+static void glb_free_resources(GlbParams *p)
+{
+    if (!p) return;
+    if (p->items) {
+        for (int i = 0; i < p->count; i++) {
+            DrawItem *d = &p->items[i];
+            if (d->vao) glDeleteVertexArrays(1, &d->vao);
+            if (d->vbo) glDeleteBuffers(1, &d->vbo);
+            if (d->ebo) glDeleteBuffers(1, &d->ebo);
+            if (d->tex_owned) glDeleteTextures(1, &d->tex);
+            else if (d->tex) resources_texture_release(d->tex);
+        }
+        free(p->items); p->items = NULL;
+    }
+    if (p->prog) { resources_program_release(p->prog); p->prog = 0; }
+}
+
+static void glb_node_exit(const Event *e, void *user)
+{
+    (void)user;
+    if (!e || !e->a) return;
+    const SceneNode *n = e->a;
+    if (!n->type || strcmp(n->type, "GlbInstance3D") != 0) return;
+    glb_free_resources(n->params);
 }
 
 // --- Освобождение ---------------------------------------------------------------

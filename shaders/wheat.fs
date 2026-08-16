@@ -70,6 +70,7 @@ uniform sampler2D uShadowDepth2;
 uniform sampler2D uShadowDepth3;
 uniform float uShadowGrad[4];         // глубина до полной темноты (NDC)
 uniform float uShadowOn;          // 1 = тени включены (клавиша [)
+uniform float uWetness;        // мокрость 0..1 (fx.c)
 
 // Растения светятся прямым светом и CSM-тенями солнца; никакого AO —
 // поле остаётся золотым, тени от растений на землю кладут каскады.
@@ -163,6 +164,8 @@ void main() {
     if (c.a < 0.5) discard;              // прозрачный фон спрайта
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vWorldPos);
+    float wet = clamp(uWetness, 0.0, 1.0);
+    c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.5);
 
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
@@ -231,6 +234,13 @@ void main() {
         vec3 H = normalize(L + V);
         float spec = pow(max(dot(N, H), 0.0), 48.0) * layer;
         col += uLightColor[0] * spec * 0.5 * shadow;
+
+        // мокрость: лёгкий влажный блеск на колосях (слой 1). Слабый —
+        // чтобы в дождь колос не "выгорал" в белый; приглушён с высотой.
+        if (wet > 0.0) {
+            float wet_spec = wet * layer * 0.18;
+            col += uLightColor[0] * wet_spec * shadow;
+        }
     }
 
     // ПОДПОВЕРХНОСТНОЕ РАССЕИВАНИЕ — всем растениям по умолчанию: когда

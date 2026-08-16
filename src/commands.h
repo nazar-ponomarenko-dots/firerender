@@ -51,6 +51,17 @@ void cmd_setpos(const char *args);
 void cmd_mesh(const char *args);
 // Поставить бинарный glTF (.glb): glb <путь> [x y z] [scale]
 void cmd_glb(const char *args);
+// Поставить анимированный glTF (.glb) со скиннингом: glbanim <путь> [x y z] [scale]
+void cmd_glbanim(const char *args);
+// Список клипов анимации анимик-узла: glbclips [имя-узла]
+void cmd_glbclips(const char *args);
+// Переключить клип: glbclip <индекс|имя> [имя-узла]
+void cmd_glbclip(const char *args);
+// Управление воспроизведением
+void cmd_glbanim_pause(const char *args);   // пауза
+void cmd_glbanim_play(const char *args);    // продолжить
+void cmd_glbanim_speed(const char *args);   // glbanim_speed <x>
+void cmd_glbanim_loop(const char *args);    // glbanim_loop <0|1>
 void cmd_matlist(const char *args);
 
 // Эффекты (fx) — частицы на точке попадения луча взгляда в рельеф
@@ -60,6 +71,9 @@ void cmd_fx_blood(const char *args);
 
 // Hot-reload шейдеров: перекомпилирует изменённые (по mtime) файлы.
 void cmd_reload_shaders(const char *args);
+
+// Кубомап: рендер 6 граней из позиции игрока (или точки) + 6 PNG в cubemaps/
+void cmd_cubemap_capture(const char *args);
 
 // Вызывается из главного цикла каждый кадр: сохраняет кадр в PNG, если
 // была запрошена команда screenshot (F12).

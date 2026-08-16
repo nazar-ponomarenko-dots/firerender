@@ -75,8 +75,13 @@ void cvar_set(const char *name, float v)
 {
     int i = cvar_index(name);
     if (i < 0) {
-        cvar_register(name, v, "");      // незнакомое имя — заводим сами
-        i = s_count - 1;
+        // Незнакомое имя — заводим сами (карты/Lua могут вводить свои
+        // переменные), но БЕЗ CVAR_ARCHIVE: чужеродные cvar'ы не попадают
+        // в config.cfg (иначе опечатка жила бы в конфиге вечно).
+        if (!name || !name[0]) return;
+        SDL_Log("cvar_set: \"%s\" не зарегистрирован — создаю (не сохранится в config.cfg)", name);
+        cvar_register_ex(name, v, 1.0f, -1.0f, 0, "map/lua-переменная");
+        i = cvar_index(name);
     }
     if (i < 0) return;
     Cvar *c = &s_cvars[i];
@@ -105,8 +110,10 @@ void cvar_set_string(const char *name, const char *s)
 {
     int i = cvar_index(name);
     if (i < 0) {
+        if (!name || !name[0]) return;
+        SDL_Log("cvar_set_string: \"%s\" не зарегистрирован — создаю", name);
         cvar_register_string(name, s, "");
-        i = s_count - 1;
+        i = cvar_index(name);
     }
     if (i < 0) return;
     Cvar *c = &s_cvars[i];

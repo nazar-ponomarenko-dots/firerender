@@ -119,19 +119,30 @@ void binds_reset(void)
     binds_init();
 }
 
-// Выполняет команду (или комбинацию "cmd1; cmd2"). При отпускании (down=0)
-// команды с "+" выполняются как "-" (снимают действие).
+// Выполняет команду (или комбинацию "cmd1; cmd2"). ';' — НЕ разделитель внутри
+// кавычек (alias q "echo a; echo b" — единое тело, как в console_exec).
+// При отпускании (down=0) исполняются ТОЛЬКО statement'ы с "+", причём как
+// "-" (снимают действие); остальные пропускаются — иначе комбинированный бинд
+// вида "noclip; +forward" при отпускании оставлял действие залипшим.
 static void bind_exec(const char *cmd, int down)
 {
     char buf[256];
     snprintf(buf, sizeof buf, "%s", cmd);
     char *p = buf;
     while (p && *p) {
-        char *semi = strchr(p, ';');
+        char *semi = NULL;
+        int inq = 0;
+        for (char *q = p; *q; q++) {
+            if (*q == '"') inq = !inq;
+            else if (*q == ';' && !inq) { semi = q; break; }
+        }
         if (semi) *semi = 0;
         while (*p == ' ' || *p == '\t') p++;
-        if (!down && *p == '+') *p = '-';
-        if (*p) console_exec(p);
+        if (!down) {
+            if (*p == '+') { *p = '-'; console_exec(p); }
+        } else if (*p) {
+            console_exec(p);
+        }
         p = semi ? semi + 1 : NULL;
     }
 }
@@ -140,10 +151,7 @@ void binds_key(SDL_Scancode sc, int down)
 {
     const char *cmd = binds_cmd(sc);
     if (!cmd) return;
-    if (down)
-        bind_exec(cmd, 1);
-    else if (cmd[0] == '+')
-        bind_exec(cmd, 0);
+    bind_exec(cmd, down);
 }
 
 // Колесо мыши: импульсное действие (up=1 — вверх, 0 — вниз)
@@ -153,32 +161,81 @@ void binds_wheel(int up)
 }
 
 // --- config.cfg ---------------------------------------------------------------
+// Таблица «имя клавиши -> scancode». Имена SDL МОГУТ содержать пробелы
+// ("Left Shift", "Keypad 1"), а команда — пробелы и ';' (alias-тела), поэтому
+// строка "bind <клавиша> <команда>" разбирается жадным матчем имени из таблицы
+// (отсортирована по длине: "Left Shift" раньше, чем "Left"). Команда = остаток
+// строки после имени.
+typedef struct { const char *name; SDL_Scancode sc; size_t len; } KeyName;
+static KeyName s_keynames[SDL_SCANCODE_COUNT + 2];
+static int s_keynames_n = 0;
+
+static void keynames_init(void)
+{
+    if (s_keynames_n) return;
+    for (int i = 0; i < SDL_SCANCODE_COUNT; i++) {
+        const char *nm = SDL_GetScancodeName((SDL_Scancode)i);
+        if (!nm || !nm[0]) continue;
+        s_keynames[s_keynames_n].name = nm;
+        s_keynames[s_keynames_n].sc = (SDL_Scancode)i;
+        s_keynames[s_keynames_n].len = strlen(nm);
+        s_keynames_n++;
+    }
+    s_keynames[s_keynames_n] = (KeyName){ "mouse_wheel_up", BIND_WHEEL_UP, 14 };
+    s_keynames_n++;
+    s_keynames[s_keynames_n] = (KeyName){ "mouse_wheel_down", BIND_WHEEL_DOWN, 16 };
+    s_keynames_n++;
+    // По длине — по убыванию: жадный матч на самое длинное имя
+    for (int i = 1; i < s_keynames_n; i++)
+        for (int j = i; j > 0 && s_keynames[j].len > s_keynames[j - 1].len; j--) {
+            KeyName t = s_keynames[j];
+            s_keynames[j] = s_keynames[j - 1];
+            s_keynames[j - 1] = t;
+        }
+}
+
 void binds_load_config(void)
 {
     FILE *f = fopen("config.cfg", "r");
     if (!f) return;
+    keynames_init();
     char line[256];
     int any = 0;
     while (fgets(line, sizeof line, f)) {
-        char key[64], cmd[128];
-        if (sscanf(line, "bind %63s %127[^\r\n]", key, cmd) == 2) {
-            if (!any) {
-                any = 1;
-                binds_clearall();      // пользовательские бинды — дефолты долой
+        if (strncmp(line, "bind ", 5) != 0) continue;
+        char *nl = strpbrk(line, "\r\n");
+        if (nl) *nl = 0;
+        char *body = line + 5;
+        while (*body == ' ' || *body == '\t') body++;
+
+        SDL_Scancode sc = SDL_SCANCODE_UNKNOWN;
+        char *cmd = NULL;
+        for (int k = 0; k < s_keynames_n; k++) {
+            const KeyName *kn = &s_keynames[k];
+            if (strncmp(body, kn->name, kn->len) == 0 &&
+                (body[kn->len] == ' ' || body[kn->len] == '\t' || body[kn->len] == 0)) {
+                sc = kn->sc;
+                cmd = body + kn->len;
+                break;
             }
-            SDL_Scancode sc = binds_key_from_name(key);
-            if (sc == SDL_SCANCODE_UNKNOWN) continue;
-            // Дедупликация: последняя строка config.cfg побеждает — снимаем
-            // эту же команду с прежних клавиш (напр. bind Q demo; bind X demo)
-            SDL_Scancode olds[BINDS_MAX];
-            int nold = 0;
-            for (int i = 0; i < s_n; i++)
-                if (s_binds[i].sc != sc && strcmp(s_binds[i].cmd, cmd) == 0 &&
-                    nold < BINDS_MAX)
-                    olds[nold++] = s_binds[i].sc;
-            for (int i = 0; i < nold; i++) binds_clear(olds[i]);
-            binds_set(sc, cmd);
         }
+        if (!cmd || sc == SDL_SCANCODE_UNKNOWN) continue;   // битое имя — игнор
+        while (*cmd == ' ' || *cmd == '\t') cmd++;
+        if (!cmd[0]) continue;
+        if (!any) {
+            any = 1;
+            binds_clearall();      // пользовательские бинды — дефолты долой
+        }
+        // Дедупликация: последняя строка config.cfg побеждает — снимаем
+        // эту же команду с прежних клавиш (напр. bind Q demo; bind X demo)
+        SDL_Scancode olds[BINDS_MAX];
+        int nold = 0;
+        for (int i = 0; i < s_n; i++)
+            if (s_binds[i].sc != sc && strcmp(s_binds[i].cmd, cmd) == 0 &&
+                nold < BINDS_MAX)
+                olds[nold++] = s_binds[i].sc;
+        for (int i = 0; i < nold; i++) binds_clear(olds[i]);
+        binds_set(sc, cmd);
     }
     fclose(f);
 }

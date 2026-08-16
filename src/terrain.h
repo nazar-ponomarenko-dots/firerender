@@ -22,6 +22,7 @@ typedef struct TerrainParams {
     GLint u_specpow, u_specint;     // блики (земля матовая: spec = 0)
     GLint u_heightmin, u_heightmax, u_texscale;
     GLint u_statictex, u_static_on, u_worldsize;   // статические тени
+    GLint u_wetness_mask;           // маска мокрости (unit 8)
     int vert_count;                // сколько вершин рисуем
 } TerrainParams;
 
@@ -43,5 +44,13 @@ void terrain_cleanup(SceneNode *n);
 void terrain_shadows_bake(const WorldState *w, SunParams *sun);
 // 1, если статическая карта теней готова (и её можно применять).
 int terrain_shadows_have(void);
+
+// --- Мокрость: запечённая маска (под крышей/нависающими объектами) -------
+// Строит текстуру мокрости 0..1: луч вверх (0,1,0) до MAX_WETNESS_H или
+// выхода за карту. Попал в объект (по цилиндрам ShadowObj) -> сухо (0),
+// иначе мокрое (1). Шум + slope factor применяются в шейдере.
+void terrain_wetness_mask_bake(const WorldState *w);
+int terrain_wetness_mask_have(void);
+GLuint terrain_wetness_mask_tex(void);
 
 #endif

@@ -57,6 +57,12 @@ void fx_update(float dt);
 void fx_weather_start(const char *name, float y_off, const float *ext,
                       float rate, float life);
 
+// --- Мокрость (wetness) -------------------------------------------------------
+// Возвращает текущий уровень мокрости 0..1 (растёт под дождём, сохнет без него).
+float fx_wetness(void);
+// Целевая мокрость (1.0 под дождём, 0.0 без дождя) — для плавного ramp.
+float fx_wetness_target(void);
+
 // --- Управление и консоль -----------------------------------------------------
 // Список пресетов в консоль (fx_list).
 void fx_print_list(void);

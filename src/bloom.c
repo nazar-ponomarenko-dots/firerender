@@ -15,8 +15,8 @@
 #include <stddef.h>
 
 static BloomParams *s_bloom_p = NULL;   // для hot-reload (shader_on_reshade)
-static void bloom_prog_init(BloomParams *b);
-static void bloom_reshade(void) { if (s_bloom_p) bloom_prog_init(s_bloom_p); }
+static void bloom_prog_init(BloomParams *b);   // uniform'ы (id уже готовы)
+static void bloom_reshade(void);               // ниже: replace + prog_init
 
 #include <SDL3/SDL.h>
 #include <stdlib.h>
@@ -30,8 +30,10 @@ static GLuint make_color_tex(int w, int h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    // HDR: сцена и glow — полуfloat (RGBA16F), чтобы яркие участки не
+    // срезались при накоплении; тонмаппинг происходит в композите.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0,
+                 GL_RGBA, GL_HALF_FLOAT, NULL);
     return id;
 }
 
@@ -62,12 +64,10 @@ static void make_fbo(GLuint *fbo, GLuint *tex, GLuint *depth,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// Пересоздаёт программы постобработки и переищет uniform'ы (для hot-reload)
+// Проги создаются СНАРУЖИ (bloom_init / reshade: refcount там).
+// Здесь — только uniform'ы для ТЕКУЩИХ id.
 static void bloom_prog_init(BloomParams *b)
 {
-    b->prog_bright = make_program("shaders/postfx.vs", "shaders/bright.fs");
-    b->prog_blur    = make_program("shaders/postfx.vs", "shaders/blur.fs");
-    b->prog_composite = make_program("shaders/postfx.vs", "shaders/composite.fs");
     b->u_btex      = glGetUniformLocation(b->prog_bright, "uTex");
     b->u_threshold = glGetUniformLocation(b->prog_bright, "uThreshold");
     b->u_intensity = glGetUniformLocation(b->prog_bright, "uIntensity");
@@ -77,6 +77,28 @@ static void bloom_prog_init(BloomParams *b)
     b->u_ctex      = glGetUniformLocation(b->prog_composite, "uScene");
     b->u_glowtex   = glGetUniformLocation(b->prog_composite, "uGlow");
     b->u_strength  = glGetUniformLocation(b->prog_composite, "uStrength");
+    b->u_exposure  = glGetUniformLocation(b->prog_composite, "uExposure");
+}
+
+// Hot-reload: replace балансирует refcount (release старой + новая ссылка);
+// если пара не собралась — остаётся прежний id.
+static void bloom_reshade(void)
+{
+    BloomParams *b = s_bloom_p;
+    if (!b) return;
+    GLuint p1 = resources_program_replace(b->prog_bright,
+                                          "shaders/postfx.vs",
+                                          "shaders/bright.fs");
+    GLuint p2 = resources_program_replace(b->prog_blur,
+                                          "shaders/postfx.vs",
+                                          "shaders/blur.fs");
+    GLuint p3 = resources_program_replace(b->prog_composite,
+                                          "shaders/postfx.vs",
+                                          "shaders/composite.fs");
+    if (p1) b->prog_bright = p1;
+    if (p2) b->prog_blur = p2;
+    if (p3) b->prog_composite = p3;
+    bloom_prog_init(b);
 }
 
 void bloom_init(BloomParams *b, int vw, int vh)
@@ -91,10 +113,21 @@ void bloom_init(BloomParams *b, int vw, int vh)
     cvar_register("r_bloom_threshold", bc.threshold, "порог яркости bloom");
     cvar_register("r_bloom_intensity", bc.intensity, "сила ярких пикселей");
     cvar_register("r_bloom_strength", bc.strength, "сила свечения в композите");
+    cvar_register("r_exposure", 1.0f, "экспозиция HDR (тонмаппинг)");
     b->threshold = bc.threshold;
     b->intensity = bc.intensity;
     b->strength  = bc.strength;
-    bloom_prog_init(b);    // программы + uniform'ы (для hot-reload)
+    // Программы постобработки (replace: old==0 после cleanup => plain-загрузка)
+    b->prog_bright = resources_program_replace(b->prog_bright,
+                                               "shaders/postfx.vs",
+                                               "shaders/bright.fs");
+    b->prog_blur = resources_program_replace(b->prog_blur,
+                                             "shaders/postfx.vs",
+                                             "shaders/blur.fs");
+    b->prog_composite = resources_program_replace(b->prog_composite,
+                                                  "shaders/postfx.vs",
+                                                  "shaders/composite.fs");
+    bloom_prog_init(b);    // uniform'ы (для hot-reload)
 
     shader_on_reshade(bloom_reshade);
 
@@ -211,6 +244,9 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
     glBindTexture(GL_TEXTURE_2D, b->tex_glow[0]);
     glUniform1i(b->u_glowtex, 1);
     glUniform1f(b->u_strength, strength);
+    // Экспозиция HDR — из cvar'а r_exposure
+    if (b->u_exposure >= 0)
+        glUniform1f(b->u_exposure, cvar_get("r_exposure"));
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 

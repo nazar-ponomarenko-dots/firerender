@@ -24,6 +24,7 @@ uniform float uAspect;        // пропорции окна
 uniform vec3 uFogColor;       // цвет горизонта (туман рельефа)
 uniform vec3 uSunDir;         // направление на солнце (узел Sun)
 uniform vec3 uSunColor;       // цвет солнца
+uniform float uSunGlow;       // видимость солнечного диска 0..1 (гаснет в дождь)
 
 out vec4 FragColor;
 
@@ -43,10 +44,11 @@ void main() {
     float dark = 1.0 - 0.18 * smoothstep(0.785398163, 1.570796327, elev);
     vec3 zenith = texture(uSky, vec2(u, 0.0)).rgb * uTint;
     col = mix(col, zenith * dark, zenithT);
-    // солнечный диск и ореол — там, где смотрит источник света
+    // солнечный диск и ореол — там, где смотрит источник света;
+    // в дождь (uSunGlow -> 0) солнце скрыто облаками
     float s = dot(rd, normalize(uSunDir));
-    col += uSunColor * (pow(max(s, 0.0), 600.0) * 4.0
-                      + pow(max(s, 0.0), 10.0) * 0.35);
+    col += uSunColor * uSunGlow * (pow(max(s, 0.0), 600.0) * 4.0
+                                 + pow(max(s, 0.0), 10.0) * 0.35);
     // под горизонтом панорама — это земля, но у нас настоящий рельеф: глушим
     col = mix(col, uFogColor, smoothstep(0.46, 0.50, v));
     FragColor = vec4(col, 1.0);

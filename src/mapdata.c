@@ -28,6 +28,8 @@ static MapTrigger s_triggers[MAP_MAX_TRIGGERS];
 static int s_trigger_count;
 static MapFauna s_fauna[MAP_MAX_FAUNA];
 static int s_fauna_count;
+static MapWater s_waters[MAP_MAX_WATERS];
+static int s_water_count;
 static char s_image[256];
 static float s_field_center[2], s_field_size[2];
 static int s_field_set;
@@ -280,6 +282,120 @@ static void parse_fauna(const JsonNode *obj)
     f->height = (float)json_num(json_find(obj, "height"),
                                 f->type == FAUNA_BIRDS ? 40.0 : 2.5);
     s_fauna_count++;
+}
+
+// Блок water = { type, level, ... }: лужа/озеро/река/море. Значения по
+// умолчанию подобраны для каждого типа (см. water.c — они же используются
+// узлом воды). Неизвестный тип пропускается с руганью в лог.
+static void parse_water(const JsonNode *obj)
+{
+    if (s_water_count >= MAP_MAX_WATERS) return;
+    MapWater *w = &s_waters[s_water_count];
+    memset(w, 0, sizeof *w);
+    const char *type = json_str(json_find(obj, "type"), "");
+    if (strcmp(type, "puddle") == 0)      w->type = WATER_PUDDLE;
+    else if (strcmp(type, "lake") == 0)   w->type = WATER_LAKE;
+    else if (strcmp(type, "river") == 0)  w->type = WATER_RIVER;
+    else if (strcmp(type, "sea") == 0)    w->type = WATER_SEA;
+    else {
+        SDL_Log("Map: unknown water type '%s', skipped", type ? type : "?");
+        return;
+    }
+    snprintf(w->name, sizeof w->name, "%s",
+             json_str(json_find(obj, "name"), ""));
+    // Уровень и форма: круг (pos+radius) или осевая линия реки (points)
+    const JsonNode *pos = json_find(obj, "pos");
+    if (pos && json_array_len(pos) == 2) {
+        w->center[0] = (float)json_num(json_array_get(pos, 0), 0);
+        w->center[1] = (float)json_num(json_array_get(pos, 1), 0);
+    }
+    w->radius = (float)json_num(json_find(obj, "radius"),
+                                w->type == WATER_PUDDLE ? 3.0f :
+                                w->type == WATER_LAKE   ? 40.0f : 0.0f);
+    w->width  = (float)json_num(json_find(obj, "width"), 8.0f);
+    const JsonNode *pts = json_find(obj, "points");
+    if (pts) {
+        int n = json_array_len(pts);
+        for (int i = 0; i < n && w->point_n < MAP_WATER_MAX_POINTS; i++) {
+            const JsonNode *p = json_array_get(pts, i);
+            if (!p || json_array_len(p) < 2) continue;
+            w->points[w->point_n][0] = (float)json_num(json_array_get(p, 0), 0);
+            w->points[w->point_n][1] = (float)json_num(json_array_get(p, 1), 0);
+            w->point_n++;
+        }
+    }
+    // Река без осевой линии смысла не имеет (нечем мазать русло)
+    if (w->type == WATER_RIVER && w->point_n < 2) {
+        SDL_Log("Map: river '%s' needs at least 2 points, skipped",
+                w->name[0] ? w->name : "?");
+        return;
+    }
+    // Уровень воды (м): у моря это ГЛОБАЛЬНЫЙ уровень; по умолчанию —
+    // чуть ниже игровой полосы рельефа, чтобы вода не топила спавн.
+    w->level = (float)json_num(json_find(obj, "level"), -60.0f);
+    // Вид: дефолтные параметры зависят от типа.
+    switch (w->type) {
+    case WATER_PUDDLE:
+        w->depth = 0.6f;
+        w->color[0] = 0.36f; w->color[1] = 0.38f; w->color[2] = 0.34f;
+        w->alpha = 0.82f;
+        w->wave_amp = 0.02f;
+        w->wave_speed = 1.5f;
+        w->foam = 0.0f;
+        break;
+    case WATER_LAKE:
+        w->depth = 3.0f;
+        w->color[0] = 0.10f; w->color[1] = 0.22f; w->color[2] = 0.24f;
+        w->alpha = 0.88f;
+        w->wave_amp = 0.06f;
+        w->wave_speed = 1.0f;
+        w->foam = 0.35f;
+        break;
+    case WATER_RIVER:
+        w->depth = 2.0f;
+        w->color[0] = 0.10f; w->color[1] = 0.24f; w->color[2] = 0.26f;
+        w->alpha = 0.85f;
+        w->wave_amp = 0.05f;
+        w->wave_speed = 1.4f;
+        w->flow_speed = 1.2f;   // м/с вдоль осевой линии
+        w->foam = 0.5f;
+        break;
+    case WATER_SEA:
+        w->depth = 6.0f;
+        w->color[0] = 0.04f; w->color[1] = 0.16f; w->color[2] = 0.22f;
+        w->alpha = 0.9f;
+        w->wave_amp = 0.18f;
+        w->wave_speed = 0.8f;
+        w->foam = 0.6f;
+        break;
+    }
+    w->depth = (float)json_num(json_find(obj, "depth"), w->depth);
+    const JsonNode *col = json_find(obj, "color");
+    if (col && json_array_len(col) == 3) parse_vec3(col, w->color, w->color[0]);
+    w->alpha = (float)json_num(json_find(obj, "alpha"), w->alpha);
+    w->wave_amp   = (float)json_num(json_find(obj, "wave_amp"), w->wave_amp);
+    w->wave_speed = (float)json_num(json_find(obj, "wave_speed"), w->wave_speed);
+    w->flow_speed = (float)json_num(json_find(obj, "flow_speed"), w->flow_speed);
+    const JsonNode *fl = json_find(obj, "flow");
+    if (fl && json_array_len(fl) == 2) {
+        w->flow[0] = (float)json_num(json_array_get(fl, 0), 0);
+        w->flow[1] = (float)json_num(json_array_get(fl, 1), 0);
+    }
+    w->foam = (float)json_num(json_find(obj, "foam"), w->foam);
+    // Направление течения реки: средняя ось -> направление по XZ.
+    // Если в JSON нет flow и ось не задана, берём от первого к последнему
+    // сегменту (вода бежит по цепочке точек).
+    if (w->type == WATER_RIVER && w->flow[0] == 0.0f && w->flow[1] == 0.0f &&
+        w->point_n >= 2) {
+        float dx = 0, dz = 0;
+        for (int i = 0; i + 1 < w->point_n; i++) {
+            dx += w->points[i + 1][0] - w->points[i][0];
+            dz += w->points[i + 1][1] - w->points[i][1];
+        }
+        float l = sqrtf(dx * dx + dz * dz);
+        if (l > 0.001f) { w->flow[0] = dx / l; w->flow[1] = dz / l; }
+    }
+    s_water_count++;
 }
 
 // Тип света из строки JSON ("directional"/"point"/"spot"). -1 — неизвестный.
@@ -677,7 +793,15 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_fauna(json_array_get(fa, i));
     }
 
-    SDL_Log("Map data: %s, field %s (%.0f,%.0f %.0fx%.0f)%s, player %s, lights %d, objects %d, collisions %d, sounds %d, triggers %d, fauna %d%s%s",
+    // --- Вода: waters[] ----------------------------------------------------------
+    s_water_count = 0;
+    const JsonNode *ws = json_find(root, "waters");
+    if (ws) {
+        int n = json_array_len(ws);
+        for (int i = 0; i < n; i++) parse_water(json_array_get(ws, i));
+    }
+
+    SDL_Log("Map data: %s, field %s (%.0f,%.0f %.0fx%.0f)%s, player %s, lights %d, objects %d, collisions %d, sounds %d, triggers %d, fauna %d, waters %d%s%s",
             s_image,
             s_field_set ? "set" : "default",
             s_field_center[0], s_field_center[1],
@@ -685,7 +809,7 @@ int mapdata_load(const char *path)
             s_field_attached ? " ATTACHED" : "",
             s_player_set ? "set" : "default",
             s_light_count, s_object_count, s_collision_count,
-            s_sound_count, s_trigger_count, s_fauna_count,
+            s_sound_count, s_trigger_count, s_fauna_count, s_water_count,
             s_info.name[0] ? " | " : "",
             s_info.name[0] ? s_info.name : "");
     if (s_command_count)
@@ -820,6 +944,16 @@ const MapFauna *mapdata_fauna(int i)
     return (i >= 0 && i < s_fauna_count) ? &s_fauna[i] : NULL;
 }
 
+int mapdata_water_count(void)
+{
+    return s_water_count;
+}
+
+const MapWater *mapdata_water(int i)
+{
+    return (i >= 0 && i < s_water_count) ? &s_waters[i] : NULL;
+}
+
 void mapdata_info(MapInfo *i)
 {
     if (i) *i = s_info;
@@ -881,4 +1015,5 @@ void mapdata_free(void)
     s_sound_count = 0;
     s_trigger_count = 0;
     s_fauna_count = 0;
+    s_water_count = 0;
 }
