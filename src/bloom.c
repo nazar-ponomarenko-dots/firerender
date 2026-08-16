@@ -78,6 +78,9 @@ static void bloom_prog_init(BloomParams *b)
     b->u_glowtex   = glGetUniformLocation(b->prog_composite, "uGlow");
     b->u_strength  = glGetUniformLocation(b->prog_composite, "uStrength");
     b->u_exposure  = glGetUniformLocation(b->prog_composite, "uExposure");
+    b->u_gamma     = glGetUniformLocation(b->prog_composite, "uGamma");
+    b->u_sat       = glGetUniformLocation(b->prog_composite, "uSat");
+    b->u_contrast  = glGetUniformLocation(b->prog_composite, "uContrast");
 }
 
 // Hot-reload: replace балансирует refcount (release старой + новая ссылка);
@@ -114,6 +117,9 @@ void bloom_init(BloomParams *b, int vw, int vh)
     cvar_register("r_bloom_intensity", bc.intensity, "сила ярких пикселей");
     cvar_register("r_bloom_strength", bc.strength, "сила свечения в композите");
     cvar_register("r_exposure", 1.0f, "экспозиция HDR (тонмаппинг)");
+    cvar_register("r_gamma", 2.2f, "гамма-коррекция (энкодинг sRGB)");
+    cvar_register("r_saturation", 1.15f, "насыщенность (1 = без изменений)");
+    cvar_register("r_contrast", 1.1f, "контраст (1 = без изменений)");
     b->threshold = bc.threshold;
     b->intensity = bc.intensity;
     b->strength  = bc.strength;
@@ -247,6 +253,13 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
     // Экспозиция HDR — из cvar'а r_exposure
     if (b->u_exposure >= 0)
         glUniform1f(b->u_exposure, cvar_get("r_exposure"));
+    // Гамма и цвето-коррекция (каждый кадр, из cvar'ов)
+    if (b->u_gamma >= 0)
+        glUniform1f(b->u_gamma, cvar_get("r_gamma"));
+    if (b->u_sat >= 0)
+        glUniform1f(b->u_sat, cvar_get("r_saturation"));
+    if (b->u_contrast >= 0)
+        glUniform1f(b->u_contrast, cvar_get("r_contrast"));
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
