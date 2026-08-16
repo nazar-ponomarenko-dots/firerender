@@ -22,6 +22,7 @@ typedef enum {
     PROF_SHADOW,       // каскадные тени
     PROF_FOG,          // объёмный туман
     PROF_BLOOM,        // bloom
+    PROF_SSR,          // отражения экранного пространства
     PROF_N
 } ProfSlot;
 

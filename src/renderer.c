@@ -21,6 +21,7 @@
 #include "profiler.h"
 #include "resources.h"
 #include "sky.h"
+#include "ssr.h"
 #include "voxfog.h"
 #include "water.h"
 #include "world.h"
@@ -38,6 +39,8 @@
 
 // FBO сцены и тумана: создаются при загрузке мира (renderer_setup)
 static BloomParams s_bloom;
+// SSR — отражения экранного пространства (рельеф в дождь): сцена+отражение.
+static SsrParams s_ssr;
 // Кубомап отражений воды (6 граней, рендер от игрока — см. renderer_cubemap_pass)
 static GLuint s_refl_cubemap = 0;
 static GLuint s_refl_cubemap_fbo[6] = {0};
@@ -468,6 +471,7 @@ void renderer_setup(const WorldState *w, int vw, int vh)
 {
     memset(&s_bloom, 0, sizeof s_bloom);
     bloom_init(&s_bloom, vw, vh);
+    ssr_init(&s_ssr, vw, vh);
     voxfog_init(w, vw, vh);
     make_cubemap_fbo(256); // кубомап фиксированного размера
     s_cubemap_valid = 0;
@@ -481,6 +485,7 @@ void renderer_resize(int vw, int vh)
 {
     if (!s_active) return;
     bloom_resize(&s_bloom, vw, vh);
+    ssr_resize(&s_ssr, vw, vh);
     voxfog_resize(vw, vh);
 }
 
@@ -488,6 +493,7 @@ void renderer_teardown(void)
 {
     if (!s_active) return;
     bloom_cleanup(&s_bloom);
+    ssr_cleanup(&s_ssr);
     voxfog_cleanup();
     if (s_refl_cubemap) {
         glDeleteTextures(1, &s_refl_cubemap);
@@ -730,10 +736,25 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();
+        // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
+        // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
+        GLuint scene_for_post = bloom_scene_tex(&s_bloom);
+        if (cvar_get("r_ssr") >= 0.5f &&
+            (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
+            cvar_get("r_ssr_strength") > 0.0f) {
+            Uint64 ts = SDL_GetPerformanceCounter();
+            prof_gpu_begin(PROF_SSR);
+            ssr_render(&s_ssr, bloom_scene_tex(&s_bloom),
+                       bloom_scene_depth(&s_bloom), &s_rc);
+            prof_gpu_end(PROF_SSR);
+            Uint64 te = SDL_GetPerformanceCounter();
+            prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
+            scene_for_post = ssr_tex(&s_ssr);
+        }
         if (voxfog_is_on()) {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, bloom_scene_tex(&s_bloom), voxfog_fbo());
+            bloom_render(&s_bloom, scene_for_post, voxfog_fbo());
             prof_gpu_end(PROF_BLOOM);
             Uint64 t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
@@ -747,7 +768,7 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         } else {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, bloom_scene_tex(&s_bloom), 0);
+            bloom_render(&s_bloom, scene_for_post, 0);
             prof_gpu_end(PROF_BLOOM);
             Uint64 t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);

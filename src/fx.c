@@ -86,6 +86,7 @@ static float s_wetness = 0.0f;         // текущий уровень мокр
 static float s_wetness_target = 0.0f;  // целевой (1 под дождём, 0 без)
 static float s_wetness_ramp_up = 1.0f;   // скорость нарастания (сек^-1) — 1 сек до 1.0
 static float s_wetness_ramp_down = 0.18f; // скорость высыхания (сек^-1) — ~5.5 сек до 0
+static float s_wet_force = -1.0f;      // принудительная мокрость (<0 = выкл, тест)
 
 static FxEmitter *emitter_find(const char *name)
 {
@@ -198,8 +199,10 @@ void fx_update(float dt)
         }
     }
 
-    // Wetness ramp: нарастает под дождём, сохнет без
+    // Wetness ramp: нарастает под дождём, сохнет без.
+    // s_wet_force >= 0 — принудительная мокрость (тест, без дождя).
     s_wetness_target = rain_active ? 1.0f : 0.0f;
+    if (s_wet_force >= 0.0f) s_wetness_target = s_wet_force;
     if (s_wetness < s_wetness_target)
         s_wetness = s_wetness + s_wetness_ramp_up * dt > s_wetness_target ? s_wetness_target : s_wetness + s_wetness_ramp_up * dt;
     else if (s_wetness > s_wetness_target)
@@ -210,6 +213,15 @@ void fx_update(float dt)
 float fx_wetness(void)
 {
     return s_wetness;
+}
+
+void fx_force_wetness(float v)
+{
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    s_wet_force = v;      // держит мокрость каждый тик (тест/консоль)
+    s_wetness = v;
+    s_wetness_target = v;
 }
 
 float fx_wetness_target(void)

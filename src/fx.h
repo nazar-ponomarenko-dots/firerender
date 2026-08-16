@@ -62,6 +62,8 @@ void fx_weather_start(const char *name, float y_off, const float *ext,
 float fx_wetness(void);
 // Целевая мокрость (1.0 под дождём, 0.0 без дождя) — для плавного ramp.
 float fx_wetness_target(void);
+// Принудительная мокрость (тесты/консоль): фиксирует уровень без дождя.
+void fx_force_wetness(float v);
 
 // --- Управление и консоль -----------------------------------------------------
 // Список пресетов в консоль (fx_list).

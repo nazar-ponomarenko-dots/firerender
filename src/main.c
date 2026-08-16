@@ -136,6 +136,7 @@ static int fr_test_apply(Game *g)
     if (!fr_test) return 0;
     if (strchr(fr_test, 'x')) console_selftest();
     if (strchr(fr_test, 's')) shadow_toggle();
+    if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
     if (strchr(fr_test, 'p')) g_shadow_terrain = 0;
     if (strchr(fr_test, 'q')) g_shadow_veg = 0;
@@ -165,6 +166,8 @@ static int fr_test_apply(Game *g)
         float ext[3] = { 20.0f, 10.0f, 20.0f };
         fx_weather_start("rain", 12.0f, ext, 150.0f, 0.0f);
     }
+    // w — мокрость=1 БЕЗ частиц дождя (чистый тест мокрого SSR, A/B-кадры)
+    if (strchr(fr_test, 'w')) fx_force_wetness(1.0f);
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);
@@ -403,13 +406,17 @@ int main(int argc, char *argv[])
         console_drain();                                      // отложенные wait-команды
         console_render(renderer_vw(), renderer_vh());         // консоль — поверх всего (`)
 
-        // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland)
+        // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland).
+        // Значение — номер кадра для снимка (FR_SHOT=60), пустое = 60.
         {
             static int shot_frame = 0;
-            if (getenv("FR_SHOT") && shot_frame != -1) {
+            const char *fs = getenv("FR_SHOT");
+            if (fs && shot_frame != -1) {
+                int target = atoi(fs);
+                if (target < 1) target = 60;
                 if (shot_frame == 0) shot_frame = 1;
-                else if (shot_frame < 60) shot_frame++;
-                if (shot_frame == 60) {
+                else if (shot_frame < target) shot_frame++;
+                if (shot_frame == target) {
                     unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
                     glReadPixels(0, 0, renderer_vw(), renderer_vh(), GL_RGB, GL_UNSIGNED_BYTE, px);
                     FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
