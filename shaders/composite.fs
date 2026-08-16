@@ -16,6 +16,7 @@ uniform float uExposure;     // экспозиция
 uniform float uGamma;        // гамма (1 = без изменений)
 uniform float uSat;          // насыщенность (>1 — сочнее)
 uniform float uContrast;     // контраст (1 = без изменений)
+uniform float uWetness;      // мокрость 0..1 — в дождь цветастость ниже
 
 out vec4 FragColor;
 
@@ -39,7 +40,9 @@ void main() {
     c *= max(target / max(l, 1e-5), 0.0);
 
     // Насыщенность: mix к серому по Rec.709 (>1 — сочнее).
-    c = mix(vec3(dot(c, luma)), c, uSat);
+    // В дождь (uWetness) цветастость опускается до 0.3 от базовой.
+    float sat = mix(uSat, 0.3, uWetness);
+    c = mix(vec3(dot(c, luma)), c, sat);
 
     // Доп. гамма-коррекция (по умолчанию 1 — сцена уже гаммирована).
     // Можно поднять в консоли, если хочется ярче/поднять тени.

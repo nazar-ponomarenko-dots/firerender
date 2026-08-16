@@ -8,6 +8,7 @@
 #include "bloom.h"
 
 #include "cvars.h"
+#include "fx.h"
 #include "mapdata.h"
 #include "resources.h"
 #include "shader.h"
@@ -81,6 +82,7 @@ static void bloom_prog_init(BloomParams *b)
     b->u_gamma     = glGetUniformLocation(b->prog_composite, "uGamma");
     b->u_sat       = glGetUniformLocation(b->prog_composite, "uSat");
     b->u_contrast  = glGetUniformLocation(b->prog_composite, "uContrast");
+    b->u_wetness   = glGetUniformLocation(b->prog_composite, "uWetness");
 }
 
 // Hot-reload: replace балансирует refcount (release старой + новая ссылка);
@@ -260,6 +262,9 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
         glUniform1f(b->u_sat, cvar_get("r_saturation"));
     if (b->u_contrast >= 0)
         glUniform1f(b->u_contrast, cvar_get("r_contrast"));
+    // Мокрость (дождь): в композите снижает цветастость
+    if (b->u_wetness >= 0)
+        glUniform1f(b->u_wetness, fx_wetness());
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
