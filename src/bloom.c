@@ -118,8 +118,8 @@ void bloom_init(BloomParams *b, int vw, int vh)
     cvar_register("r_bloom_strength", bc.strength, "сила свечения в композите");
     cvar_register("r_exposure", 1.0f, "экспозиция HDR (тонмаппинг)");
     cvar_register("r_gamma", 2.2f, "гамма-коррекция (энкодинг sRGB)");
-    cvar_register("r_saturation", 1.15f, "насыщенность (1 = без изменений)");
-    cvar_register("r_contrast", 1.1f, "контраст (1 = без изменений)");
+    cvar_register("r_saturation", 1.4f, "насыщенность (1 = без изменений)");
+    cvar_register("r_contrast", 1.3f, "контраст (1 = без изменений)");
     b->threshold = bc.threshold;
     b->intensity = bc.intensity;
     b->strength  = bc.strength;
