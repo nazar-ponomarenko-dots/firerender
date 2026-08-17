@@ -28,6 +28,7 @@ out vec2 vUV;
 out float vEdge;
 
 // Волновая функция — ОДНА на VS и FS (нормали в FS считают по ней же).
+// Последний слагаемый — мелкая рябь (короткая волна, малая амплитуда).
 float waveY(vec2 p, float t) {
     float k = 6.2831853 / uWaveLen;
     vec2 f = uFlowDir;
@@ -36,7 +37,9 @@ float waveY(vec2 p, float t) {
     vec2 q = vec2(-f.y, f.x);                     // поперёк течения
     return uWaveAmp * sin(dot(f, p) * k + t * uWaveSpeed)
          + uWaveAmp * 0.45 * sin(dot(q, p) * k * 0.62 + t * uWaveSpeed * 1.17)
-         + uWaveAmp * 0.2  * sin((p.x + p.y) * k * 0.34 + t * uWaveSpeed * 0.8);
+         + uWaveAmp * 0.2  * sin((p.x + p.y) * k * 0.34 + t * uWaveSpeed * 0.8)
+         + uWaveAmp * 0.12 * sin(dot(f, p) * k * 4.7 + dot(q, p) * k * 3.1
+                                 + t * uWaveSpeed * 1.6);
 }
 
 void main() {

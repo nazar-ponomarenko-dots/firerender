@@ -69,6 +69,8 @@ uniform samplerCube uReflCube;   // кубомап отражения (юнит 
 out vec4 FragColor;
 
 // Волновая функция — та же, что в water.vs (нормаль — конечные разности).
+// Последний слагаемый — мелкая рябь (короткая волна, малая амплитуда):
+// поверхность живая, а не гладкое стекло.
 float waveY(vec2 p, float t) {
     float k = 6.2831853 / uWaveLen;
     vec2 f = uFlowDir;
@@ -77,7 +79,9 @@ float waveY(vec2 p, float t) {
     vec2 q = vec2(-f.y, f.x);
     return uWaveAmp * sin(dot(f, p) * k + t * uWaveSpeed)
          + uWaveAmp * 0.45 * sin(dot(q, p) * k * 0.62 + t * uWaveSpeed * 1.17)
-         + uWaveAmp * 0.2  * sin((p.x + p.y) * k * 0.34 + t * uWaveSpeed * 0.8);
+         + uWaveAmp * 0.2  * sin((p.x + p.y) * k * 0.34 + t * uWaveSpeed * 0.8)
+         + uWaveAmp * 0.12 * sin(dot(f, p) * k * 4.7 + dot(q, p) * k * 3.1
+                                 + t * uWaveSpeed * 1.6);
 }
 
 void main() {
@@ -94,7 +98,25 @@ void main() {
     float hR = waveY(p + vec2(e, 0.0), uTime);
     float hD = waveY(p - vec2(0.0, e), uTime);
     float hU = waveY(p + vec2(0.0, e), uTime);
-    vec3 N = normalize(vec3(hL - hR, 2.0 * e, hD - hU));
+    vec3 N = vec3(hL - hR, 2.0 * e, hD - hU);
+
+    // Мелкая рябь бежит по течению (высокочастотные волны, которые конечные
+    // разности не разглядят — добавляем в нормаль аналитически). Поверхность
+    // переливается на солнце, а не выглядит гладким стеклом.
+    {
+        float rk = 6.2831853 / max(uWaveLen * 0.22, 0.6);
+        vec2 f = uFlowDir;
+        if (dot(f, f) < 0.0001) f = vec2(1.0, 0.0);
+        f = normalize(f);
+        vec2 q = vec2(-f.y, f.x);
+        float rt = uTime * uWaveSpeed * 1.4;
+        float rp = uWaveAmp * 0.30;
+        // два набора коротких волн под углами — пересекающиеся борозды
+        N.xy += rp * rk * 0.10 * vec2(
+            cos(dot(f, p) * rk + rt) + cos((dot(q, p) * 0.7 + dot(f, p) * 0.5) * rk - rt * 1.3),
+            cos(dot(q, p) * rk * 0.9 - rt) + cos((dot(f, p) * 0.6 - dot(q, p) * 0.4) * rk + rt * 0.9));
+    }
+    N = normalize(N);
     vec3 V = normalize(uCamPos - vWorldPos);
     // Двусторонняя геометрия (как в mesh.fs): снизу (из-под воды) нормаль
     // переворачиваем к камере, иначе поверхность снизу была чёрной.
@@ -102,9 +124,13 @@ void main() {
 
     // Кромка (0 у берега .. 1 внутри); у открытого моря vEdge = 1e6 -> 1.
     float edgeFade = clamp(vEdge / max(uEdge, 0.001), 0.0, 1.0);
-    // Непрозрачность: растёт с глубиной и гаснет к берегу.
+    // Непрозрачность: раньше альфа росла ЛИНЕЙНО на всю глубину uDepthFade
+    // (у моря 6 м) — на глубине 1 м вода была почти стеклом, дно просвечивало.
+    // Теперь кривая резкая (smoothstep на 30% глубины) и минимальный пол
+    // 45%: снаружи прибрежная полоса выглядит водой, а не плёнкой.
     float depthT = clamp(waterDepth / max(uDepthFade, 0.01), 0.0, 1.0);
-    float alpha = uAlpha * depthT * edgeFade;
+    float alphaDepth = smoothstep(0.0, 0.30, depthT);
+    float alpha = uAlpha * mix(0.45, 1.0, alphaDepth) * edgeFade;
 
     // Освещение (как у рельефа/мешей): полусферный ambient.
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
@@ -138,11 +164,31 @@ void main() {
     }
     light = min(light, vec3(1.0));
 
-    vec3 col = uWaterColor * light;
+    // Цвет воды меняется с глубиной: на мелководье видно дно (смешение к
+    // тёплому светлому тону), на глубине — насыщенный тёмный цвет воды.
+    // depthT уже есть сверху: 0 у берега, 1 на глубине uDepthFade.
+    vec3 shallow = uWaterColor * 1.35 + uSkyColor * 0.25;   // светло и теплее
+    vec3 deep    = uWaterColor * 0.55;                      // темнее и плотнее
+    vec3 col = mix(shallow, deep, depthT) * light;
 
     // Цвет воды всегда заметен: не даём вырождаться в чёрную яму или
     // сливаться с небом. Основа — вода, а фреснель-микс неба умеренный.
     col = max(col, uSkyColor * 0.10);
+
+    // Блики солнца на волнах: широкая мягкая дорожка + узкие искры.
+    // Дорожка (spec) бежит по гребням; искры (spark) от мелкой ряби —
+    // короткие вспышки, когда нормаль ряби точно ловит отражение.
+    if (uLightCount > 0) {
+        vec3 li = normalize(uLightDir[0]);   // солнце = источник 0
+        vec3 H = normalize(li + V);
+        float diff0 = max(dot(li, N), 0.0);
+        float spec = pow(max(dot(N, H), 0.0), 70.0);       // дорожка
+        float spark = pow(max(dot(N, H), 0.0), 260.0);     // искры
+        vec3 specCol = uLightColor[0] * uLightIntensity[0]
+                     * (0.5 + 0.5 * diff0);
+        col += specCol * spec * 0.9;
+        col += specCol * spark * 2.2;
+    }
 
     // Отражение: вектор отражённого луча считаем по нормали волны и сэмплим
     // кубомап отражения. I — луч камера -> поверхность; reflect(I, N) даёт
@@ -156,9 +202,16 @@ void main() {
     float fres = 0.10 + 0.90 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
     col = mix(col, reflCol, clamp(fres * 0.85 + 0.10, 0.0, 1.0));
 
-    // Пена у берега (там, где vEdge стремится к 0).
-    float foamAmt = uFoam * (1.0 - smoothstep(0.0, 2.0, vEdge));
-    col += foamAmt * (uSkyColor + uWaterColor) * 0.5;
+    // Пена у берега: не сплошная полоса, а живые движущиеся хлопья —
+    // «прибойная кромка» ползёт по направлению течения, рвётся по шуму.
+    {
+        float shoreT = 1.0 - smoothstep(0.0, 2.0, vEdge);   // полоса 0..2 м
+        vec2 fp = p * 0.7 + uFlowDir * (uTime * uFlowSpeed * 2.0);
+        float fr = fract(sin(dot(floor(fp), vec2(127.1, 311.7))) * 43758.5453);
+        float wob = sin(uTime * 2.2 + fr * 6.283 + vEdge * 3.0) * 0.5 + 0.5;
+        float foamAmt = uFoam * shoreT * smoothstep(fr, fr + 0.3, wob);
+        col = mix(col, uSkyColor * 0.9 + 0.1, foamAmt);
+    }
 
     // Туман по дальности (как в рельефе).
     if (uFogOn > 0.5) {

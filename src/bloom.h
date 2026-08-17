@@ -22,6 +22,7 @@ typedef struct {
     GLint u_blurtex, u_dir, u_texel;
     GLint u_ctex, u_glowtex, u_strength;
     GLint u_exposure, u_gamma, u_sat, u_contrast, u_wetness;
+    GLint u_underwater, u_watertint, u_time;     // подводные эффекты (composite.fs)
     int vw, vh;                // размер сцены (пиксели)
     int gw, gh;                // размер glow (половина)
     float threshold;           // порог яркости (0..1)
@@ -51,5 +52,9 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo);
 
 // Освобождает GL-ресурсы.
 void bloom_cleanup(BloomParams *b);
+
+// Подводные эффекты (composite.fs): amount 0..1 (плавный вход/выход из воды),
+// tint — тон водоёма, time — время сцены (анимация волн искажения).
+void bloom_set_underwater(float amount, const float tint[3], float time);
 
 #endif

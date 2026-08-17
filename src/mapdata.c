@@ -363,7 +363,7 @@ static void parse_water(const JsonNode *obj)
     case WATER_SEA:
         w->depth = 6.0f;
         w->color[0] = 0.04f; w->color[1] = 0.16f; w->color[2] = 0.22f;
-        w->alpha = 0.9f;
+        w->alpha = 0.94f;
         w->wave_amp = 0.18f;
         w->wave_speed = 0.8f;
         w->foam = 0.6f;

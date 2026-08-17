@@ -126,13 +126,19 @@ void main() {
     vec3 spec = vec3(0.0);
     for (int i = 0; i < uLightCount; i++) {
         vec3 L = normalize(-uLightDir[i]);
-        float d = max(dot(N, L), 0.0);
+        float raw = dot(N, L);
+        // Солнце: мягкий терминатор (half-lambert) — переход свет/тень
+        // плавный, не режет силуэт жёстким чёрным срезом.
+        float half_ = raw * 0.5 + 0.5;
+        float d = smoothstep(0.08, 1.0, half_) * (0.55 + 0.45 * max(raw, 0.0));
         float sh = (i == 0) ? shadow : 1.0;
         light += uLightColor[i] * uLightIntensity[i] * d * sh;
         if (uSpecular > 0.001) {
+            // Двухступенчатый блик: узкий острый + мягкая широкая часть.
             vec3 H = normalize(L + V);
+            float ndh = max(dot(N, H), 0.0);
             spec += uLightColor[i] * uLightIntensity[i] * sh
-                  * pow(max(dot(N, H), 0.0), 32.0);
+                  * (pow(ndh, 32.0) * 0.8 + pow(ndh, 8.0) * 0.2);
         }
     }
     for (int i = 0; i < uPointCount; i++) {
@@ -178,6 +184,9 @@ void main() {
     }
 
     float dist = distance(uCamPos, vWorldPos);
+    // Rim: тонкая светлая кромка неба на силуэте (скользящие грани).
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+    col += rim * uSkyColor * uAmbient * 0.30;
     if (uFogOn > 0.5) {
         float fog = smoothstep(uFogStart, uFogEnd, dist);
         col = mix(col, uFogColor, fog);

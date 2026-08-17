@@ -720,6 +720,26 @@ void renderer_frame(Game *g, float dt, int draw_3d)
     SceneNode *world = g->root;
     int did_3d = 0;
 
+    // Подводные эффекты: следим за тем, под водой ли глаза игрока, и плавно
+    // вводим/выводим постобработку (тонирование, искажение, виньетка). Тон
+    // берём из водоёма (water_underwater); время копится для анимации волн.
+    if (world && draw_3d) {
+        static float s_under = 0.0f;
+        static float s_undtime = 0.0f;
+        float tint[3] = { 0.08f, 0.22f, 0.30f };
+        int inw = g->world_loaded &&
+                  water_underwater(&g->world, s_rc.cam_pos, tint);
+        float target = inw ? 1.0f : 0.0f;
+        float rate = 1.6f;                 // ~0.6 с до полного входа/выхода
+        if (s_under < target) {
+            s_under += rate * dt; if (s_under > target) s_under = target;
+        } else if (s_under > target) {
+            s_under -= rate * dt; if (s_under < 0.0f) s_under = 0.0f;
+        }
+        if (s_under > 0.0f) s_undtime += dt;   // волны идут, пока эффект виден
+        bloom_set_underwater(s_under, tint, s_undtime);
+    }
+
     // Кубомап отражений — статический (загружен из cubemaps/ при старте).
     // Рендер в реальном времени отключён для производительности.
     // Для обновления используйте консольную команду cubemap_capture.
