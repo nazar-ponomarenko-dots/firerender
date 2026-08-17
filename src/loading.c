@@ -2,13 +2,16 @@
 //  loading.c — экран загрузки уровня (см. loading.h)
 // ----------------------------------------------------------------------------
 //  Фон — img/loading.png (cover: растянут на весь экран без искажений,
-//  лишнее обрезается по центру). Справа снизу — полоса прогресса загрузки
-//  с подписью текущей фазы. Каждый вызов loading_progress предъявляет кадр,
-//  т.к. загрузка синхронная и главный цикл в это время не крутится.
+//  лишнее обрезается по центру). Справа снизу — панель загрузки: название
+//  карты и автор, подпись текущей фазы с процентами и полоса прогресса с
+//  плавно наполняющимся заполнением. Каждый вызов loading_progress
+//  предъявляет кадр, т.к. загрузка синхронная и главный цикл в это время
+//  не крутится.
 // ============================================================================
 #include "loading.h"
 
 #include "hud.h"
+#include "mapdata.h"
 #include "resources.h"
 #include "shader.h"
 
@@ -21,6 +24,9 @@ static GLuint s_tex = 0;
 static GLuint s_prog = 0, s_vao = 0, s_vbo = 0;
 static GLint s_u_tex, s_u_usetex, s_u_usemarker, s_u_color;
 static int s_iw = 0, s_ih = 0;   // размер картинки (для cover-квада)
+static char s_map_name[128];     // название карты (info.name из map.json)
+static char s_map_author[128];   // автор карты (info.author)
+static float s_shown = 0.0f;     // отображаемый прогресс (плавно идёт к цели)
 
 // cover-квад: картинка накрывает весь экран, uv обрезается по центру.
 static void loading_quad(int vw, int vh)
@@ -45,6 +51,12 @@ static void loading_quad(int vw, int vh)
 
 void loading_begin(void)
 {
+    // Состояние экрана: плавный прогресс начинается с нуля; название/автора
+    // карты возьмём при первом прогрессе (map.json читается в фазе 1 загрузки,
+    // до этого карта ещё не открыта).
+    s_shown = 0.0f;
+    s_map_name[0] = 0;
+    s_map_author[0] = 0;
     if (s_tex) return;   // уже подготовлен
     s_tex = resources_texture("img/loading.png", 3, GL_CLAMP_TO_EDGE, 1);
     resources_image("img/loading.png", &s_iw, &s_ih, 3);   // флипаем строки сами
@@ -72,13 +84,10 @@ void loading_begin(void)
     glUseProgram(0);
 }
 
-void loading_progress(float t, const char *label)
+// Один кадр панели загрузки: фон, панель с названием карты, подписью фазы,
+// процентами и полосой прогресса (s_shown = текущий показанный прогресс).
+static void loading_frame(int vw, int vh, SDL_Window *win, const char *label)
 {
-    int vw = 1280, vh = 720;
-    SDL_Window *win = SDL_GL_GetCurrentWindow();
-    if (win) SDL_GetWindowSizeInPixels(win, &vw, &vh);
-    if (vw < 2 || vh < 2) return;
-
     glViewport(0, 0, vw, vh);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -98,50 +107,116 @@ void loading_progress(float t, const char *label)
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
-    if (t < 0.0f) t = 0.0f;
-    if (t > 1.0f) t = 1.0f;
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Полоса загрузки — справа снизу
-    float bw = (float)vw * 0.34f;
-    if (bw < 220.0f) bw = 220.0f;
-    if (bw > 420.0f) bw = 420.0f;
-    float bh = 18.0f;
-    float margin = 24.0f;
-    float x = (float)vw - bw - margin;
-    float y = (float)vh - bh - margin;
+    // --- Панель загрузки: справа снизу ----------------------------------------
+    float pw = (float)vw * 0.30f;                       // ширина панели
+    if (pw < 260.0f) pw = 260.0f;
+    if (pw > 460.0f) pw = 460.0f;
+    float margin = 28.0f, pad = 16.0f, bh = 14.0f;
+    float lh = hud_text_line_height_small();            // строка 15px
+    float lh_mid = hud_text_line_height();              // строка 26px (название)
+    float head_h = s_map_name[0] ? lh_mid * 1.15f + lh * 1.15f : 0.0f;
+    float ph = pad * 2 + head_h + lh * 1.35f + bh + pad;
+    float px = (float)vw - pw - margin;
+    float py = (float)vh - ph - margin;
 
-    // подпись над полосой («Загрузка уровня… 37%»)
-    char cap[96];
-    float pct = t * 100.0f + 0.5f;
-    snprintf(cap, sizeof cap, "%s… %d%%", label ? label : "Загрузка уровня",
-             (int)pct);
-    float lh = hud_text_line_height_small();
-    float cap_w = hud_text_width_small(cap);
-    float cap_x = x + bw - cap_w;
-    if (cap_x < x) cap_x = x;
-    const float fg[4] = { 0.95f, 0.96f, 0.98f, 1.0f };
-    const float bg[4] = { 0.0f, 0.0f, 0.0f, 0.45f };
-    hud_rect_draw(vw, vh, x, y - lh - 8.0f, bw, lh + 6.0f, bg);
-    hud_text_draw_small(vw, vh, cap_x, y - lh - 6.0f + hud_text_ascent_small(),
-                        cap, fg);
+    // Подложка, акцентная полоска сверху и тонкая рамка
+    hud_rect_draw(vw, vh, px, py, pw, ph,
+                  (const float[4]){0.02f, 0.03f, 0.05f, 0.72f});
+    hud_rect_draw(vw, vh, px, py, pw, 3.0f,
+                  (const float[4]){1.0f, 0.70f, 0.25f, 0.9f});
+    const float br[4] = { 1.0f, 1.0f, 1.0f, 0.10f };
+    hud_rect_draw(vw, vh, px, py + ph - 1.0f, pw, 1.0f, br);
+    hud_rect_draw(vw, vh, px, py, 1.0f, ph, br);
+    hud_rect_draw(vw, vh, px + pw - 1.0f, py, 1.0f, ph, br);
 
-    // подложка + рамка + заполнение полосы
-    hud_rect_draw(vw, vh, x, y, bw, bh, (const float[4]){0.0f, 0.0f, 0.0f, 0.55f});
-    const float br[4] = { 0.85f, 0.88f, 0.95f, 0.90f };
-    hud_rect_draw(vw, vh, x, y, bw, 1.5f, br);
-    hud_rect_draw(vw, vh, x, y + bh - 1.5f, bw, 1.5f, br);
-    hud_rect_draw(vw, vh, x, y, 1.5f, bh, br);
-    hud_rect_draw(vw, vh, x + bw - 1.5f, y, 1.5f, bh, br);
-    const float fill[4] = { 1.0f, 0.70f, 0.25f, 1.0f };
-    hud_rect_draw(vw, vh, x + 2.0f, y + 2.0f, (bw - 4.0f) * t, bh - 4.0f, fill);
+    float x = px + pad;
+    float ty = py + pad;
+    const float fg[4]  = { 0.96f, 0.97f, 0.99f, 1.0f };
+    const float fg2[4] = { 0.72f, 0.75f, 0.82f, 0.85f };
+
+    // Заголовок: название карты (26px) и автор (15px, приглушённо)
+    if (head_h > 0.0f) {
+        hud_text_draw(vw, vh, x, ty + hud_text_ascent() * 0.9f,
+                      s_map_name, fg);
+        if (s_map_author[0])
+            hud_text_draw_small(vw, vh, x,
+                                ty + lh_mid + hud_text_ascent_small(),
+                                s_map_author, fg2);
+        ty += head_h;
+    }
+
+    // Подпись фазы слева, проценты — в правом углу панели
+    char pcts[16];
+    int pct = (int)(s_shown * 100.0f + 0.5f);
+    snprintf(pcts, sizeof pcts, "%d%%", pct);
+    hud_text_draw_small(vw, vh, x, ty + hud_text_ascent_small() * 0.9f,
+                        label ? label : "Загрузка уровня", fg2);
+    hud_text_draw_small(vw, vh, px + pw - pad - hud_text_width_small(pcts),
+                        ty + hud_text_ascent_small() * 0.9f, pcts, fg);
+    ty += lh * 1.35f;
+
+    // Полоса прогресса: подложка, заполнение и блик на "носике"
+    float barw = pw - pad * 2;
+    hud_rect_draw(vw, vh, x, ty, barw, bh,
+                  (const float[4]){0.0f, 0.0f, 0.0f, 0.55f});
+    float fw = (barw - 2.0f) * s_shown;
+    if (fw > 0.0f)
+        hud_rect_draw(vw, vh, x + 1.0f, ty + 1.0f, fw, bh - 2.0f,
+                      (const float[4]){1.0f, 0.55f, 0.18f, 1.0f});
+    if (fw > 8.0f && s_shown < 0.999f)
+        hud_rect_draw(vw, vh, x + 1.0f + fw - 6.0f, ty + 1.0f, 6.0f,
+                      bh - 2.0f, (const float[4]){1.0f, 0.85f, 0.55f, 1.0f});
+
     glDisable(GL_BLEND);
 
     // предъявить кадр: загрузка синхронная, без этого кадр не увидит никто
     if (win) SDL_GL_SwapWindow(win);
     // короткий слип — чтобы драйвер предъявил кадр, а не слил его с следующим
     SDL_Delay(8);
+}
+
+void loading_progress(float t, const char *label)
+{
+    int vw = 1280, vh = 720;
+    SDL_Window *win = SDL_GL_GetCurrentWindow();
+    if (win) SDL_GetWindowSizeInPixels(win, &vw, &vh);
+    if (vw < 2 || vh < 2) return;
+
+    // Название/автор карты появятся, когда map.json будет прочитан (фаза 1);
+    // до этого панель рисуется без них.
+    if (!s_map_name[0]) {
+        MapInfo mi;
+        mapdata_info(&mi);
+        if (mi.name[0]) {
+            snprintf(s_map_name, sizeof s_map_name, "%s", mi.name);
+            snprintf(s_map_author, sizeof s_map_author, "%s", mi.author);
+        }
+    }
+
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    // Плавное наполнение полосы: показанный прогресс догоняет цель
+    // экспоненциально (каждый кадр — 1/4 остатка), максимум ~12 кадров на
+    // фазу, затем доводка. Так панель "живёт", пока идёт тяжёлая фаза.
+    int frames = 0;
+    do {
+        float step = (t - s_shown) * 0.25f;
+        if (step < 0.004f) step = 0.004f;
+        if (t > s_shown) s_shown += step;
+        if (s_shown >= t) s_shown = t;
+        loading_frame(vw, vh, win, label);
+        frames++;
+    } while ((s_shown < t || (t >= 0.999f && frames < 2)) && frames < 14);
+
+    // Доводка точно в цель (одним кадром), чтобы процент добрался до нужного
+    if (s_shown < t) {
+        s_shown = t;
+        loading_frame(vw, vh, win, label);
+    }
 }
 
 void loading_end(void)
