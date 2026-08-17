@@ -3,8 +3,12 @@
 // ----------------------------------------------------------------------------
 //  Рельеф из карты высот + материал img/ground.png с наштампованными
 //  пучками травы (дальняя трава "вшита" в текстуру — дешёвый LOD).
-//  Рендер узла также запускает каскадные тени (shadow_render) и рисует
-//  сам рельеф с псевдо-PBR освещением в стиле Half-Life 2.
+//
+//  Геометрия — ТАЙЛЫ 128x128 м, каждый в 4 LOD-уровнях (квадродерево с
+//  упрощением: ровные участки склеиваются в большие квады, на склонах —
+//  мелкие). LOD выбирается по дистанции тайла до игрока, тайлы за
+//  экраном (frustum) не рисуются. Стыки уровней закрывают "юбки" —
+//  геометрия без дыр. На дальние LOD приходится минимум полигонов.
 // ============================================================================
 #ifndef TERRAIN_H
 #define TERRAIN_H
@@ -12,6 +16,16 @@
 #include "render_ctx.h"
 #include "scene.h"
 #include "world.h"
+
+// --- Тайл рельефа: 128x128 м, 4 LOD-уровня -----------------------------------
+#define TERRAIN_LODS 4
+#define TERRAIN_TILE 128.0f
+typedef struct {
+    float xmin, xmax, zmin, zmax;   // границы тайла по XZ (метры)
+    float ymin, ymax;               // диапазон высот (ymin с запасом на юбку)
+    GLuint  first[TERRAIN_LODS];    // первый индекс LOD'а в общем IBO
+    GLsizei count[TERRAIN_LODS];    // сколько индексов у LOD'а
+} TerrainTile;
 
 typedef struct TerrainParams {
     const WorldState *world;        // данные мира: размеры, высоты, поле
@@ -23,7 +37,9 @@ typedef struct TerrainParams {
     GLint u_heightmin, u_heightmax, u_texscale;
     GLint u_statictex, u_static_on, u_worldsize;   // статические тени
     GLint u_wetness_mask;           // маска мокрости (unit 8)
-    int vert_count;                // сколько вершин рисуем
+    TerrainTile *tiles;             // массив тайлов (tiles_n штук)
+    int tiles_n;
+    int vert_count;                // индексов в геометрии (все тайлы и LOD)
 } TerrainParams;
 
 // Создаёт узел Terrain: строит сетку рельефа, материал земли (с травой),
@@ -35,6 +51,9 @@ void terrain_node_render(SceneNode *n, float dt);
 
 // Освобождает GL-ресурсы узла (программа, геометрия, текстура земли).
 void terrain_cleanup(SceneNode *n);
+
+// Сколько тайлов 128x128 м в текущем рельефе (для HUD). 0 — рельеф не создан.
+int terrain_tile_count(void);
 
 // --- Статические тени (режим r_shadows_mode 2) ---------------------------------
 // Трассирует лучи от солнца по рельефу и объектам карты один раз и
