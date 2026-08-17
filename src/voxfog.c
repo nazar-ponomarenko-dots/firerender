@@ -405,7 +405,9 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         glBindTexture(GL_TEXTURE_3D, s_tex3d[c]);
     }
     glUniformMatrix4fv(u_invviewproj, 1, GL_FALSE, invvp);
-    glUniform3f(u_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
+    // Позиция ВИДОВОЙ камеры: лучи строятся из invviewproj, а в 3-м лице
+    // камера (глаз) стоит сзади персонажа — не совпадает с cam_pos.
+    glUniform3f(u_campos, rc->view_pos[0], rc->view_pos[1], rc->view_pos[2]);
     glUniform1f(u_znear, rc->znear);
     glUniform1f(u_zfar, rc->zfar);
     glUniform3f(u_sundir, rc->light_dir[0][0], rc->light_dir[0][1],

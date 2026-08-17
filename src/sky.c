@@ -137,9 +137,12 @@ void sky_node_render(SceneNode *n, float dt)
     glDisable(GL_DEPTH_TEST);          // небо рисуется первым, без глубины
     glDepthMask(GL_FALSE);             // и не пишет в буфер глубины
     glUseProgram(p->prog);
-    glUniform3f(p->u_forward, rc->cam_fwd[0], rc->cam_fwd[1], rc->cam_fwd[2]);
-    glUniform3f(p->u_right, rc->cam_right[0], rc->cam_right[1], rc->cam_right[2]);
-    glUniform3f(p->u_up, rc->cam_up[0], rc->cam_up[1], rc->cam_up[2]);
+    // Базис ВИДОВОЙ камеры (реальный рендер): в 1-м лице совпадает со
+    // взглядом, в 3-м лице — камера стоит сзади персонажа. Иначе небо
+    // разъезжалось со сценой в 3-м лице.
+    glUniform3f(p->u_forward, rc->view_fwd[0], rc->view_fwd[1], rc->view_fwd[2]);
+    glUniform3f(p->u_right, rc->view_right[0], rc->view_right[1], rc->view_right[2]);
+    glUniform3f(p->u_up, rc->view_up[0], rc->view_up[1], rc->view_up[2]);
     glUniform1f(p->u_tanfov, tanf(rc->cam_fov_deg * 3.14159f / 360.0f));
     glUniform1f(p->u_aspect, rc->cam_aspect);
     // Солнце — первый направленный источник (индекс 0)

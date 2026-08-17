@@ -282,8 +282,8 @@ void particles_draw(const RendererContext *rc)
     glEnable(GL_BLEND);
     glUseProgram(p->prog);
     glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, rc->viewproj);
-    glUniform3f(p->u_camright, rc->cam_right[0], rc->cam_right[1], rc->cam_right[2]);
-    glUniform3f(p->u_camup, rc->cam_up[0], rc->cam_up[1], rc->cam_up[2]);
+    glUniform3f(p->u_camright, rc->view_right[0], rc->view_right[1], rc->view_right[2]);
+    glUniform3f(p->u_camup, rc->view_up[0], rc->view_up[1], rc->view_up[2]);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex);
     glBindVertexArray(p->vao);

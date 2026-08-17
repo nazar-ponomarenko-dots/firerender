@@ -27,10 +27,12 @@
 #include "field.h"
 #include "fx.h"
 #include "lua_engine.h"
+#include "loading.h"
 #include "mapdata.h"
 #include "material.h"
 #include "objects.h"
 #include "particles.h"
+#include "playerbox.h"
 #include "renderer.h"
 #include "resources.h"
 #include "selection.h"
@@ -392,6 +394,7 @@ static void scene_attach_nodes(Game *g)
     FR_ATTACH(field_node);
     FR_ATTACH(sel_node);
     FR_ATTACH(cam_node);
+    FR_ATTACH(playerbox_node);
     FR_ATTACH(mm_node);
     FR_ATTACH(hud_node);
 #undef FR_ATTACH
@@ -455,6 +458,7 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->obj_node = objects_make_node(w, rc);
     g->field_node = field_make_node(w, g->field_pos, g->field_size, rc);
     g->sel_node = selection_make_node(g->root, rc);
+    g->playerbox_node = playerbox_make_node(g->cam, rc);
     g->mm_node = minimap_make_node(w, wt->tex_base, rc);
     g->hud_node = hud_make_node(w, rc);
     g->fauna_node = fauna_make_node(rc);
@@ -568,21 +572,30 @@ static void audio_load_map(Game *g)
 }
 
 // Грузит карту и строит сцену. Вызывается по "НОВАЯ ИГРА"/"ПРОДОЛЖИТЬ".
+// Пока грузится мир — экран загрузки: фон img/loading.png + полоса
+// прогресса справа снизу с подписью фазы (loading.c предъявляет кадры).
 int game_load_world(Game *g)
 {
+    loading_begin();
+    loading_progress(0.05f, "Загрузка уровня");
     WorldTextures wt;
-    if (world_load_geometry(g, &wt) != 0) return -1;   // фаза 1: данные карты
+    if (world_load_geometry(g, &wt) != 0) { loading_end(); return -1; } // фаза 1
+    loading_progress(0.30f, "Собираем сцену");
     if (scene_build(g, &wt) != 0) {
         // scene_build уже освободила частичную сцену (scene_teardown внутри);
         // здесь — откат данных фазы 1, иначе они утекают.
         world_unload_geometry(g);
         SDL_Log("World load failed: scene_build");
+        loading_end();
         return -1;                                       // фаза 2: сцена
     }
+    loading_progress(0.60f, "Настройки карты");
     map_apply();                                       // фаза 3: cvar'ы/команды
+    loading_progress(0.75f, "Звук карты");
     audio_load_map(g);                                 // фаза 4: звук карты
 
     // Статические тени (режим 2): готовим карту теней сразу при загрузке
+    loading_progress(0.85f, "Тени и маски");
     if (cvar_get("r_shadows_mode") == 2.0f)
         terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
     // Мокрость: запечённая маска "под крышей" (всегда, полезна для мокрости)
@@ -590,7 +603,10 @@ int game_load_world(Game *g)
     SDL_Log("World loaded (%.0fx%.0f m)", g->world.world_w, g->world.world_d);
 
     // Скрипт карты (lua/maps/<карта>.lua): после сцены и сущностей
+    loading_progress(0.95f, "Скрипт карты");
     lua_engine_map(g->map_name);
+    loading_progress(1.0f, "Готово");
+    loading_end();
     return 0;
 }
 
@@ -611,6 +627,7 @@ static void scene_teardown(Game *g)
     entity_shutdown();           // ~ entity_* (kill освобождает свои узлы)
     hud_cleanup(g->hud_node);    // ~ hud_make_node (последний из узлов)
     minimap_cleanup(g->mm_node); // ~ minimap_make_node
+    playerbox_cleanup(g->playerbox_node); // ~ playerbox_make_node
     selection_cleanup(g->sel_node);
     field_cleanup(g->field_node);
     if (g->fauna_node) fauna_cleanup(g->fauna_node);
@@ -626,6 +643,7 @@ static void scene_teardown(Game *g)
     g->root = NULL;
     g->cam_node = g->sun_node = g->sky_node = g->terr_node = g->wheat_node = NULL;
     g->obj_node = g->field_node = g->sel_node = g->mm_node = g->hud_node = NULL;
+    g->playerbox_node = NULL;
     g->fauna_node = g->particles_node = g->decals_node = g->water_node = NULL;
     g->cam = NULL;
     g->mm = NULL;

@@ -288,7 +288,7 @@ SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
     p->rc = rc;
     p->world = w;                              // квантованные высоты (GRND/ALT)
     p->fps = 60.0f;
-    p->visible = 1;                // панель видна с первой секунды (G — вкл/выкл)
+    p->visible = 0;                // дебаг-панель по умолчанию выключена (G — вкл/выкл)
     p->last_x = rc->cam_pos[0];
     p->last_y = rc->cam_pos[1];
     p->last_z = rc->cam_pos[2];

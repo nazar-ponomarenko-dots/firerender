@@ -8,6 +8,7 @@
 #include "renderer.h"
 
 #include "app.h"
+#include "actions.h"
 #include "audio.h"
 #include "bloom.h"
 #include "camera.h"
@@ -219,6 +220,21 @@ static void renderer_ctx_fill(Game *g)
         camera_dirs(cam, rc->cam_fwd, rc->cam_right);
         vec3_cross(rc->cam_right, rc->cam_fwd, rc->cam_up);
         vec3_normalize(rc->cam_up);
+        // Видовой базис — откуда РЕАЛЬНО рендерится кадр. Узел Camera
+        // пересчитывает его каждый кадр (в 3-м лице камера стоит сзади
+        // персонажа); скайбокс/биллборды/SSR/воксельный туман берут его.
+        if (g->cam->view_fwd[0] || g->cam->view_fwd[1] || g->cam->view_fwd[2]) {
+            memcpy(rc->view_pos, g->cam->view_pos, sizeof rc->view_pos);
+            memcpy(rc->view_fwd, g->cam->view_fwd, sizeof rc->view_fwd);
+            memcpy(rc->view_right, g->cam->view_right, sizeof rc->view_right);
+            memcpy(rc->view_up, g->cam->view_up, sizeof rc->view_up);
+        } else {                        // до первого camera_node_update
+            memcpy(rc->view_pos, rc->cam_pos, sizeof rc->view_pos);
+            memcpy(rc->view_fwd, rc->cam_fwd, sizeof rc->view_fwd);
+            memcpy(rc->view_right, rc->cam_right, sizeof rc->view_right);
+            memcpy(rc->view_up, rc->cam_up, sizeof rc->view_up);
+        }
+        rc->cam_duck = g_act[A_DUCK] ? 1 : 0;
         frustum_build(&rc->frustum, rc->viewproj);   // culling цветного прохода
     }
     // Мокрость (дождь) — плавный 0..1 из fx.c (нарастает/высыхает секундами).

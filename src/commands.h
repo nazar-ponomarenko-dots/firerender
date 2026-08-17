@@ -11,7 +11,7 @@
 // --- Команды-действия (вешаются на бинды в config.cfg) ------------------------
 void cmd_noclip(const char *args);
 void cmd_toggle_map(const char *args);
-void cmd_toggle_hud(const char *args);
+void cmd_toggle_debug(const char *args);
 void cmd_toggle_crosshair(const char *args);
 void cmd_toggle_shadows(const char *args);
 void cmd_toggle_fog(const char *args);
@@ -26,7 +26,7 @@ void cmd_maps_list(const char *args);
 void cmd_restart(const char *args);
 void cmd_changelevel(const char *args);
 
-void cmd_r_drawhud(const char *args);
+void cmd_r_drawdebug(const char *args);
 void cmd_mat_wireframe(const char *args);
 void cmd_thirdperson(const char *args);
 void cmd_firstperson(const char *args);

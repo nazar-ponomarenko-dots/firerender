@@ -40,10 +40,17 @@ typedef struct RendererContext {
     float viewproj[16];      // вид * проекция (считает узел Camera)
     float cam_pos[3];        // позиция игрока
     float cam_fwd[3], cam_right[3], cam_up[3];   // базис взгляда
+    // Действительный базис ВИДОВОЙ камеры — откуда РЕАЛЬНО рендерится кадр.
+    // В 1-м лице совпадает с cam_*; в 3-м лице камера стоит сзади персонажа.
+    // Скайбокс, биллборды частиц, SSR и воксельный туман берут базис ОТСЮДА —
+    // иначе небо и лучи разъезжались со сценой в 3-м лице.
+    float view_pos[3];
+    float view_fwd[3], view_right[3], view_up[3];
     float cam_yaw, cam_pitch;
     float cam_fov_deg, cam_aspect;
     float cam_vy;                // вертикальная скорость (HUD, физика ходьбы)
     int cam_fly;                 // режим полёта (ветер, HUD)
+    int cam_duck;                // присед (рамка коллизии персонажа в 3-м лице)
     float znear, zfar;
     // Окно: размер в пикселях (актуальный, обновляет input.c/renderer)
     int vw, vh;
@@ -89,6 +96,11 @@ typedef struct RendererContext {
     int shadow_cascade;                  // индекс каскада
     int shadow_dyn, shadow_static;       // рисовать динамику/статику
     int shadow_cull;                     // culling по боксу каскада
+    // Дальнобойность теней: на сколько метров тень объекта высотой 1 м
+    // уходит от него по горизонтали (зависит от угла солнца). Каскады 0/1
+    // рисуют не только объекты внутри бокса, но и дальние, чья длинная
+    // тень достаёт до бокса (иначе у игрока нет теней от дальних деревьев).
+    float shadow_slope;
     // Фрустум цветного прохода (экстракция из viewproj в renderer_ctx_fill)
     Frustum frustum;
     float wetness;             // мокрость 0..1 (из fx.c)

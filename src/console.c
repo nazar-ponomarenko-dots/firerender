@@ -919,6 +919,7 @@ void console_init(void)
     cvar_register_ex("sv_timescale", 1.0f, 0.01f, 10.0f, CVAR_ARCHIVE | CVAR_CHEAT, "скорость времени (чит)");
     cvar_register_ex("host_framerate", 0.0f, 0.0f, 1000.0f, CVAR_ARCHIVE, "лимит FPS (0 = нет)");
     cvar_register_ex("cam_thirdperson", 0.0f, 0, 1, CVAR_ARCHIVE, "вид от третьего лица");
+    cvar_register_ex("cam_tpd", 4.0f, 1.0f, 12.0f, CVAR_ARCHIVE, "дистанция камеры 3-го лица, м");
     cvar_register_ex("snd_master", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "общая громкость");
     cvar_register_ex("snd_sfx", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость звуков (шаги, эффекты)");
     cvar_register_ex("snd_dialog", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость диалогов");

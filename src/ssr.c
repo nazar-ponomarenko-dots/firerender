@@ -193,7 +193,9 @@ void ssr_render(SsrParams *s, GLuint scene_tex, GLuint scene_depth,
     // — текущий (uBlend всё равно 0)
     glUniformMatrix4fv(s->u_prevviewproj, 1, GL_FALSE,
                        s->have_prev ? s->prev_vp : rc->viewproj);
-    glUniform3f(s->u_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
+    // Позиция ВИДОВОЙ камеры (совпадает с viewproj, из которого ssr.fs
+    // восстанавливает мировые точки): в 3-м лице это камера за персонажем.
+    glUniform3f(s->u_campos, rc->view_pos[0], rc->view_pos[1], rc->view_pos[2]);
     glUniform2f(s->u_texel, 1.0f / (float)s->vw, 1.0f / (float)s->vh);
     glUniform2f(s->u_worldsize, w->world_w, w->world_d);
     glUniform4f(s->u_params, cvar_get("r_ssr_steps"), cvar_get("r_ssr_maxdist"),

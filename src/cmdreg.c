@@ -68,7 +68,7 @@ static const ConCmdDesc s_cmds[] = {
 
     // Команды-действия (commands.c) — доступны сразу, в т.ч. в меню
     { "toggle_map",    "показать/скрыть мини-карту", cmd_toggle_map },
-    { "toggle_hud",    "показать/скрыть HUD",        cmd_toggle_hud },
+    { "toggle_debug",  "показать/скрыть дебаг-панель", cmd_toggle_debug },
     { "toggle_crosshair","показать/скрыть прицел",   cmd_toggle_crosshair },
     { "toggle_shadows","вкл/выкл тени",              cmd_toggle_shadows },
     { "toggle_fog",    "вкл/выкл объёмный туман",    cmd_toggle_fog },
@@ -79,7 +79,7 @@ static const ConCmdDesc s_cmds[] = {
     { "noclip",        "полёт сквозь мир (чит)",     cmd_noclip },
     { "restart",       "перезапустить текущую карту", cmd_restart },
     { "changelevel",   "changelevel <карта>",        cmd_changelevel },
-    { "r_drawhud",     "r_drawhud [0/1] — HUD",      cmd_r_drawhud },
+    { "r_drawdebug",   "r_drawdebug [0/1] — дебаг-панель", cmd_r_drawdebug },
     { "mat_wireframe", "mat_wireframe [0/1]",        cmd_mat_wireframe },
     { "thirdperson",   "вид от третьего лица",       cmd_thirdperson },
     { "firstperson",   "вид от первого лица",        cmd_firstperson },

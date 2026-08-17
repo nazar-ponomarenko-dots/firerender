@@ -425,15 +425,19 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
 static void objects_shadow_draw(ObjectsParams *p, const RendererContext *rc)
 {
     if (p->count <= 0) return;
-    float r = rc->shadow_box_cur * 0.7071f + 40.0f;   // бокс + диагональ+запас
-    float r2 = r * r;
     glDisable(GL_CULL_FACE);   // биллборды — с двух сторон
     glUseProgram(p->shadow_prog);
     glUniformMatrix4fv(p->s_viewproj, 1, GL_FALSE, rc->shadow_vp);
     glBindVertexArray(p->vao);
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
-        // отсечение по боксу каскада (от камеры)
+        // отсечение по боксу каскада (от камеры). Но объект рисует и дальний,
+        // если его ДЛИННАЯ ТЕНЬ достаёт до бокса: тень уходит по направлению
+        // солнца на height*shadow_slope метров. Иначе ближние каскады не
+        // рисуют дальние деревья, хотя их тень лежит рядом с игроком.
+        float reach = it->height * rc->shadow_slope + it->width * 0.5f;
+        float r = rc->shadow_box_cur * 0.7071f + 6.0f + reach;
+        float r2 = r * r;
         float dx = rc->cam_pos[0] - it->pos[0];
         float dz = rc->cam_pos[2] - it->pos[2];
         if (dx * dx + dz * dz > r2) continue;
