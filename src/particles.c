@@ -25,12 +25,14 @@
 #include <SDL3/SDL.h>
 
 // Инстанс-атрибуты: pos(xyz) + size(sxy) + color(rgb) + alpha + vel(xyz)
+// + plain (1 = без текстуры, яркий круг)
 typedef struct {
     float pos[3];
     float size[2];   // x = ширина, y = длина стрика (для streak)
     float col[3];
     float alpha;
     float vel[3];    // скорость (для стрика: направление растяжения)
+    float plain;     // 1 = чистый диск, без текстуры
 } ParticleInst;
 
 typedef struct {
@@ -42,11 +44,14 @@ typedef struct {
     float gravity;
     float drag;
     float sway;
+    float turb;             // турбулентность (закручивание)
+    float ph;               // случайная фаза (каждая частица качается по-своему)
     float wind[3];
     float alpha0, alpha1;   // альфа в начале и конце жизни
     float sizek;            // прирост размера в секунду (из size0/size1)
     int blend;              // 0 альфа / 1 аддитив
     int streak;             // вытянуть вдоль скорости
+    int plain;              // без текстуры — яркий диск (снег)
     int bounce;             // отскок от земли
     int collide;            // 1 = гибнет о террейн/воду, 2 = ложится и гаснет
     int active;
@@ -132,6 +137,10 @@ SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc)
                           (const void *)(9 * sizeof(float)));
     glEnableVertexAttribArray(5);
     glVertexAttribDivisor(5, 1);
+    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ParticleInst),
+                          (const void *)(12 * sizeof(float)));
+    glEnableVertexAttribArray(6);
+    glVertexAttribDivisor(6, 1);
     glBindVertexArray(0);
 
     s_p = p;
@@ -184,7 +193,22 @@ void particles_emit(const ParticleParams *par)
         float l = sqrtf(vx * vx + vy * vy + vz * vz);
         if (l > 0.001f) { vx /= l; vy /= l; vz /= l; }
     }
-    float sp = par->speed0 + frand() * (par->speed1 - par->speed0);
+    // Разброс скоростей (снег): множитель по весам bucket_w. Гравитация
+    // масштабируется тем же множителем — иначе drag за ~1 с гасит стартовую
+    // скорость к терминальной (gravity/drag), и все частицы падают одинаково.
+    float mul = 1.0f;
+    if (par->nbucket > 0) {
+        float wsum = 0.0f;
+        for (int i = 0; i < par->nbucket; i++) wsum += par->bucket_w[i];
+        if (wsum > 0.0f) {
+            float r = frand() * wsum;
+            for (int i = 0; i < par->nbucket; i++) {
+                r -= par->bucket_w[i];
+                if (r <= 0.0f) { mul = par->bucket_mul[i]; break; }
+            }
+        }
+    }
+    float sp = (par->speed0 + frand() * (par->speed1 - par->speed0)) * mul;
     q->x = par->pos[0]; q->y = par->pos[1]; q->z = par->pos[2];
     q->vx = vx * sp + par->wind[0];
     q->vy = vy * sp + par->wind[1];
@@ -195,6 +219,9 @@ void particles_emit(const ParticleParams *par)
     q->gravity = par->gravity;
     q->drag = par->drag;
     q->sway = par->sway;
+    q->turb = par->turb;
+    q->ph = frand() * 6.2832f;          // фаза: свой цикл качания/закрутки
+    if (mul != 1.0f) q->gravity *= mul; // разброс скоростей — и гравитации
     q->wind[0] = par->wind[0];
     q->wind[1] = par->wind[1];
     q->wind[2] = par->wind[2];
@@ -204,6 +231,7 @@ void particles_emit(const ParticleParams *par)
     q->sizek = (par->size1 - par->size0) / q->max_life;
     q->blend = par->blend;
     q->streak = par->streak;
+    q->plain = par->plain;
     q->bounce = par->bounce;
     q->collide = par->collide;
     q->active = 1;
@@ -231,11 +259,19 @@ void particles_update(float dt)
         float dr = 1.0f - q->drag * dt;
         if (dr < 0.0f) dr = 0.0f;
         q->vx *= dr; q->vy *= dr; q->vz *= dr;
-        // Ветер и покачивание (снег/пыль)
+        // Ветер и покачивание (снег/пыль): у каждой частицы своя фаза —
+        // соседние хлопья качаются не синхронно.
         float t = q->max_life - q->life;
-        q->vx += (q->wind[0] + q->sway * sinf(t * 2.5f)) * dt;
+        q->vx += (q->wind[0] + q->sway * sinf(t * 2.5f + q->ph)) * dt;
         q->vy += q->wind[1] * dt;
-        q->vz += (q->wind[2] + q->sway * cosf(t * 2.1f)) * dt;
+        q->vz += (q->wind[2] + q->sway * cosf(t * 2.1f + q->ph)) * dt;
+        // Турбулентность: медленное закручивание траектории (вихрь):
+        // круговое движение в XZ c другой частотой + лёгкая болтанка по Y.
+        if (q->turb > 0.001f) {
+            q->vx += q->turb * 2.2f * cosf(t * 1.6f + q->ph * 2.0f) * dt;
+            q->vz += q->turb * 2.2f * sinf(t * 1.9f + q->ph * 2.0f) * dt;
+            q->vy += q->turb * 0.7f * sinf(t * 0.8f + q->ph) * dt;
+        }
 
         q->x += q->vx * dt;
         q->y += q->vy * dt;
@@ -298,6 +334,7 @@ void particles_draw(const RendererContext *rc)
         it->col[0] = q->r; it->col[1] = q->g; it->col[2] = q->b;
         it->alpha = q->alpha1 + (q->alpha0 - q->alpha1) * k;   // fade по жизни
         it->vel[0] = q->vx; it->vel[1] = q->vy; it->vel[2] = q->vz;
+        it->plain = q->plain ? 1.0f : 0.0f;
     }
     if (n_alpha + n_add == 0) return;
 

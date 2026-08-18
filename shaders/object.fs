@@ -26,6 +26,13 @@ uniform samplerCube uReflection;
 // Шум мокрости (img/noise.png, юнит 11): пятна "мокрее / почти сухо"
 uniform sampler2D uNoise;
 
+// Снежный покров: общий блок snow.glsl. Биллборды: снег на верхушках
+// (крона вверху PNG, vUV.y -> 0 из-за переворота UV).
+uniform float uSnowCover;
+uniform sampler2D uSnowMask;
+uniform vec2 uWorldSize;
+#include "snow.glsl"
+
 // Свет: все направленные из map.json (индекс 0 — солнце, у него тени)
 #define SUN_MAX_LIGHTS 4
 uniform vec3 uLightDir[SUN_MAX_LIGHTS];
@@ -133,6 +140,14 @@ void main() {
                 + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
     wet *= mix(0.05, 1.8, noise * noise);
     c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
+
+    // Снежный покров (общий блок snow.glsl): крона у биллборда — верх
+    // картинки (v=0 после переворота UV, см. object.vs).
+    {
+        float atop = 1.0 - smoothstep(0.0, 0.7, vUV.y);    // вверх по дереву
+        float a = snow_amount(vWorldPos, atop);
+        if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
+    }
 
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;

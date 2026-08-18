@@ -8,6 +8,7 @@ layout(location = 2) in vec2 aInstSize;
 layout(location = 3) in vec3 aInstColor;
 layout(location = 4) in float aInstAlpha;
 layout(location = 5) in vec3 aInstVel;
+layout(location = 6) in float aInstPlain;   // 1 = без текстуры (яркий круг)
 
 uniform mat4 uViewProj;
 uniform vec3 uCamRight;
@@ -18,6 +19,7 @@ out vec3 vColor;
 out float vAlpha;
 out float vIsStreak;
 out float vStreakLen;
+out float vPlain;
 
 void main()
 {
@@ -25,6 +27,7 @@ void main()
     vColor = aInstColor;
     vAlpha = aInstAlpha;
     vIsStreak = (length(aInstVel) > 0.01) ? 1.0 : 0.0;
+    vPlain = aInstPlain;
     vec3 world;
     if (vIsStreak > 0.5) {
         vec3 v = normalize(aInstVel);

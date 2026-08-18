@@ -753,7 +753,8 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
 }
 
 // --- Wetness mask (baked "under roof" detection) ---------------------------
-// Текстура мокрости: R8, 0 = под нависающим (сухо), 255 = открытое небо (мокрое)
+// текстура видимости неба: RG8. R = 255 = открытое небо
+// (дождь/снег попадают), G = 255 = под крышей (сухо).
 #define WETNESS_MASK_W 512
 #define WETNESS_MASK_H 512
 #define WETNESS_MASK_MAX_H 500.0f   // макс. высота луча вверх
@@ -792,7 +793,7 @@ void terrain_wetness_mask_bake(const WorldState *w)
     if (s_wetness_mask_baked) return; // already baked this session
     shobjs_build(w);   // строим список объектов (цилиндры крон)
 
-    unsigned char *tex = malloc((size_t)WETNESS_MASK_W * WETNESS_MASK_H);
+    unsigned char *tex = malloc((size_t)WETNESS_MASK_W * WETNESS_MASK_H * 2);
     if (!tex) return;
 
     Uint64 t0 = SDL_GetTicks();
@@ -812,8 +813,11 @@ void terrain_wetness_mask_bake(const WorldState *w)
                 if (ray_hits_object_up(x, py, z)) { dry = 1; break; }
             }
 
-            // В OpenGL первый ряд = v=0 (НИЗ текстуры), z=0 -> v=0
-            tex[j * WETNESS_MASK_W + i] = dry ? 0 : 255;
+            // В OpenGL первый ряд = v=0 (НИЗ текстуры), z=0 -> v=0.
+            // R = открытое небо (падает дождь/снег), G = под крышей (сухо).
+            size_t k = ((size_t)j * WETNESS_MASK_W + i) * 2;
+            tex[k]     = dry ? 0 : 255;
+            tex[k + 1] = dry ? 255 : 0;
             total_px++;
             if (dry) dry_px++;
         }
@@ -828,8 +832,8 @@ void terrain_wetness_mask_bake(const WorldState *w)
         glGenTextures(1, &s_wetness_mask_tex);
     glBindTexture(GL_TEXTURE_2D, s_wetness_mask_tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, WETNESS_MASK_W, WETNESS_MASK_H,
-                 0, GL_RED, GL_UNSIGNED_BYTE, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, WETNESS_MASK_W, WETNESS_MASK_H,
+                 0, GL_RG, GL_UNSIGNED_BYTE, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -845,6 +849,16 @@ int terrain_wetness_mask_have(void)
 }
 
 GLuint terrain_wetness_mask_tex(void)
+{
+    return s_wetness_mask_tex;
+}
+
+int terrain_snow_mask_have(void)
+{
+    return terrain_wetness_mask_have();
+}
+
+GLuint terrain_snow_mask_tex(void)
 {
     return s_wetness_mask_tex;
 }

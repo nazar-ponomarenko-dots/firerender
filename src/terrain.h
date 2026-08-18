@@ -71,5 +71,9 @@ int terrain_shadows_have(void);
 void terrain_wetness_mask_bake(const WorldState *w);
 int terrain_wetness_mask_have(void);
 GLuint terrain_wetness_mask_tex(void);
+// Маска "открыто небу" для снега: та же запечённая текстура (RG8:
+// R = открытое небо, G = под крышей).
+int terrain_snow_mask_have(void);
+GLuint terrain_snow_mask_tex(void);
 
 #endif

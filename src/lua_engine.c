@@ -649,6 +649,7 @@ static int l_fx_register(lua_State *ls)
     GET_VEC("wind", pp.wind);
     GET_NUM("blend", tmp); if (tmp > 0.5f) pp.blend = 1;
     GET_NUM("streak", tmp); if (tmp > 0.5f) pp.streak = 1;
+    GET_NUM("plain", tmp); if (tmp > 0.5f) pp.plain = 1;
     GET_NUM("bounce", tmp); if (tmp > 0.5f) pp.bounce = 1;
     // collide: 1 = гибнет о террейн/воду, 2 = ложится и гаснет (снег)
     GET_NUM("collide", tmp); pp.collide = (int)tmp;

@@ -76,6 +76,14 @@ uniform float uShadowGrad[4];         // глубина до полной тем
 uniform float uShadowOn;          // 1 = тени включены (клавиша [)
 uniform float uWetness;        // мокрость 0..1 (fx.c)
 
+// Снежный покров: общий блок snow.glsl. Трава/одуванчик/пшеница: белые
+// шапки на верхушках (vUVBase.y = 0 — верх квада, PNG верхний ряд).
+uniform float uSnowCover;
+uniform sampler2D uSnowMask;
+uniform sampler2D uNoise;
+uniform vec2 uWorldSize;
+#include "snow.glsl"
+
 // Растения светятся прямым светом и CSM-тенями солнца; никакого AO —
 // поле остаётся золотым, тени от растений на землю кладут каскады.
 
@@ -174,6 +182,15 @@ void main() {
     vec3 V = normalize(uCamPos - vWorldPos);
     float wet = clamp(uWetness, 0.0, 1.0);
     c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.5);
+
+    // Снежный покров (общий блок snow.glsl): снег лежит на ВЕРХУшках
+    // растений (шапки травы/одуванчиков/колосьев), на открытых небу
+    // участках. Белые кончики растут с накоплением.
+    {
+        float atop = 1.0 - smoothstep(0.0, 0.6, vUVBase.y);
+        float a = snow_amount(vWorldPos, atop);
+        if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
+    }
 
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;

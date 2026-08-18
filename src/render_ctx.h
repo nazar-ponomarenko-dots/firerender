@@ -104,6 +104,8 @@ typedef struct RendererContext {
     // Фрустум цветного прохода (экстракция из viewproj в renderer_ctx_fill)
     Frustum frustum;
     float wetness;             // мокрость 0..1 (из fx.c)
+    float snowcover;           // снежный покров 0..1 (из fx.c, растёт под снегом)
+    float world_size[2];       // размер мира (X, Z), м — UV маски снега
     float sun_glow;            // яркость солнечного диска 0..1 (гаснет в дождь)
     // Кубомап отражений воды: флаг "центр устарел" — renderer_frame рендерит
     // 6 граней из позиции игрока, когда игрок ушёл дальше порога (см. renderer.c)
@@ -125,6 +127,9 @@ typedef struct {
     GLint u_shadowbias[SHADOW_CASCADES], u_shadowdepth[SHADOW_CASCADES];
     GLint u_shadowgrad[SHADOW_CASCADES], u_shadow_on;
     GLint u_wetness;    // мокрость 0..1
+    GLint u_snowcover;  // снежный покров 0..1
+    GLint u_snowmask;   // маска "открыто небу" (unit 8, RG8: R=снег, G=сухо под крышей)
+    GLint u_worldsize;  // размер мира (X, Z) — для UV маски снега
     GLint u_reflection; // кубомап отражений (unit 9): мокрая земля/деревья
     GLint u_noise;      // img/noise.png (unit 11): неравномерность мокрости
 } SceneUniforms;

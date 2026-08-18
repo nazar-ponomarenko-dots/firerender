@@ -108,10 +108,18 @@ float fx_weather_intensity(void)
 
 // --- Wetness state -----------------------------------------------------------
 static float s_wetness = 0.0f;         // текущий уровень мокрости 0..1
-static float s_wetness_target = 0.0f;  // целевой (1 под дождём, 0 без)
+static float s_wetness_target = 0.0f;  // целевая (1 под дождём, 0 без)
 static float s_wetness_ramp_up = 1.0f;   // скорость нарастания (сек^-1) — 1 сек до 1.0
 static float s_wetness_ramp_down = 0.18f; // скорость высыхания (сек^-1) — ~5.5 сек до 0
 static float s_wet_force = -1.0f;      // принудительная мокрость (<0 = выкл, тест)
+
+// --- Снежный покров (snowcover) ------------------------------------------------
+// Растёт, пока идёт снег (эмиттер "snow", следует за игроком): открытые небу
+// поверхности покрываются снегом (террейн, меши, GLB). Снег идёт МЕДЛЕННО
+// дождя: нарастает ~60 с, тает ~60 с после снегопада.
+static float s_snowcover = 0.0f;       // текущее покрытие 0..1
+static const float S_SNOW_UP = 1.0f / 60.0f;    // сек^-1 нарастания (~60 с)
+static const float S_SNOW_DOWN = 1.0f / 60.0f;  // сек^-1 таяния (~60 с)
 
 static FxEmitter *emitter_find(const char *name)
 {
@@ -205,12 +213,11 @@ void fx_update(float dt)
 
     // Проверка активного дождя для мокрости
     int rain_active = 0;
+    int snow_active = 0;
     for (int i = 0; i < FX_MAX_EMITTERS; i++) {
-        if (s_emitters[i].active && s_emitters[i].follow &&
-            strcmp(s_emitters[i].name, "rain") == 0) {
-            rain_active = 1;
-            break;
-        }
+        if (!s_emitters[i].active || !s_emitters[i].follow) continue;
+        if (strcmp(s_emitters[i].name, "rain") == 0) rain_active = 1;
+        if (strcmp(s_emitters[i].name, "snow") == 0) snow_active = 1;
     }
     if (!rain_active) {
         // Дождь закончился: сбрасываем нарастание, возвращаем громкость ветра
@@ -309,6 +316,14 @@ void fx_update(float dt)
         s_wetness = s_wetness + s_wetness_ramp_up * dt > s_wetness_target ? s_wetness_target : s_wetness + s_wetness_ramp_up * dt;
     else if (s_wetness > s_wetness_target)
         s_wetness = s_wetness - s_wetness_ramp_down * dt < s_wetness_target ? s_wetness_target : s_wetness - s_wetness_ramp_down * dt;
+
+    // Снежный покров: медленно нарастает под снегопадом, тает после.
+    if (snow_active)
+        s_snowcover += S_SNOW_UP * dt;
+    else
+        s_snowcover -= S_SNOW_DOWN * dt;
+    if (s_snowcover < 0.0f) s_snowcover = 0.0f;
+    if (s_snowcover > 1.0f) s_snowcover = 1.0f;
 }
 
 // --- Wetness getters ---------------------------------------------------------
@@ -329,6 +344,11 @@ void fx_force_wetness(float v)
 float fx_wetness_target(void)
 {
     return s_wetness_target;
+}
+
+float fx_snowcover(void)
+{
+    return s_snowcover;
 }
 
 // --- Консоль и управление ------------------------------------------------------
@@ -531,16 +551,25 @@ void fx_register_builtin(void)
             .gravity = 5.0f, .drag = 1.2f };
         fx_register("splash", &pp, 1);
     }
-    // Снег: медленно падает, покачивается. collide=2: ложится на рельеф
-    // и поверхность воды, коротко гаснет (не уходит сквозь землю/море).
+    // Снег: БЕЗ текстуры — чистый белый диск (plain). Падают с разной
+    // скоростью: 10% крупных в 10 раз быстрее, 40% в 2 раза, 40% обычных
+    // и 10% мелких в 2 раза медленнее (bucket: скорость × гравитация —
+    // иначе drag сводит все к одной терминальной скорости). Жизнь длинная:
+    // частицы реально долетают до земли (спавн высоко над камерой).
+    // Турбулентность + закручивание в полёте. collide=2: ложится на
+    // рельеф и поверхность воды, коротко гаснет.
     {
         ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.1f,
             .speed0 = 0.5f, .speed1 = 1.2f,
-            .life0 = 4.0f, .life1 = 8.0f,
+            .life0 = 20.0f, .life1 = 50.0f,
             .size0 = 0.08f, .size1 = 0.05f,
-            .alpha0 = 0.9f, .alpha1 = 0.0f,
+            .alpha0 = 1.0f, .alpha1 = 0.15f,
             .r = 1.0f, .g = 1.0f, .b = 1.0f,
-            .gravity = 0.4f, .drag = 1.0f, .sway = 0.7f, .collide = 2 };
+            .gravity = 0.4f, .drag = 1.0f, .sway = 0.7f, .turb = 0.5f,
+            .plain = 1, .collide = 2,
+            .nbucket = 4,
+            .bucket_mul = { 10.0f, 2.0f, 1.0f, 0.5f },
+            .bucket_w   = { 0.1f, 0.4f, 0.4f, 0.1f } };
         fx_register("snow", &pp, 1);
     }
     // Пыль (шаги/сухость): лёгкая, серая, покачивается

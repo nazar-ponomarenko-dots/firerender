@@ -63,6 +63,12 @@ uniform vec2 uWorldSize;           // размер мира (для UV)
 // Маска мокрости: запечённая R8 текстура, 0 = под нависающим (сухо), 1 = открытое небо
 uniform sampler2D uWetnessMask;
 
+// Снежный покров: общий блок snow.glsl (uSnowCover, маска unit 8, шум).
+// Террейн: снег лежит на горизонтальных открытых участках. Включение в
+// конце uniform-блока (нужны uNoise/uWorldSize), реализация — snow.glsl.
+uniform float uSnowCover;
+uniform sampler2D uSnowMask;
+
 // Кубомап отражений воды (юнит 9, scene_uniforms_bind): мокрая земля
 // становится глянцевой и отражает окружение (небо, горы, деревья).
 uniform samplerCube uReflection;
@@ -104,6 +110,8 @@ uniform int uSpotCount;
 #define SHADOW_LIMIT 256.0f     // дальше — теней нет вообще
 
 out vec4 FragColor;
+
+#include "snow.glsl"
 
 // Дешёвый хеш — лёгкий разброс цвета земли, чтобы поле не было ровной заливкой
 float hash12(vec2 p) {
@@ -190,6 +198,11 @@ void main() {
              * (1.0 - smoothstep(uField.w, uField.w + 8.0, wp.y));
     base = mix(base, uFieldColor, fx * fz * uFieldBlend);
     base *= 0.94 + 0.12 * hash12(vWorldPos.xz * 0.5);
+    // Снежный покров (общий блок snow.glsl): открытые небу пологие участки.
+    {
+        float a = snow_amount(vWorldPos, smoothstep(0.35, 0.70, N.y));
+        if (a > 0.001) base = snow_color(base, vWorldPos, a);
+    }
     vec3 V = normalize(uCamPos - vWorldPos);
 
     // дешёвый fresnel — лёгкое "env-отражение" неба на склонах

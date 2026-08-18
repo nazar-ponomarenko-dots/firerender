@@ -23,6 +23,7 @@
 #include "resources.h"
 #include "sky.h"
 #include "ssr.h"
+#include "terrain.h"
 #include "voxfog.h"
 #include "water.h"
 #include "world.h"
@@ -242,6 +243,9 @@ static void renderer_ctx_fill(Game *g)
     // яркости; сверху добавляется яркий рассеянный «свет от неба», который
     // компенсирует потерянные 80% освещённости.
     rc->wetness = fx_wetness();
+    rc->snowcover = fx_snowcover();
+    rc->world_size[0] = g->world.world_w;
+    rc->world_size[1] = g->world.world_d;
     float light_dim = 1.0f - 0.8f * rc->wetness;   // 1.0 -> 0.20
     // Свет: направленные источники (0 = солнце)
     float dir_sum = 0.0f;
@@ -388,6 +392,9 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     su->u_fogon    = glGetUniformLocation(prog, "uFogOn");
     su->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
     su->u_wetness = glGetUniformLocation(prog, "uWetness");
+    su->u_snowcover = glGetUniformLocation(prog, "uSnowCover");
+    su->u_snowmask  = glGetUniformLocation(prog, "uSnowMask");
+    su->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
     su->u_reflection = glGetUniformLocation(prog, "uReflection");
     su->u_noise = glGetUniformLocation(prog, "uNoise");
     for (int c = 0; c < SHADOW_CASCADES; c++) {
@@ -451,6 +458,18 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniform1f(su->u_shadow_on, rc->shadow_on ? 1.0f : 0.0f);
     if (su->u_wetness >= 0)
         glUniform1f(su->u_wetness, rc->wetness);
+    if (su->u_snowcover >= 0)
+        glUniform1f(su->u_snowcover, rc->snowcover);
+    // Маска снега: запечённая "видимость неба" (та же, что мокрость, RG8).
+    // unit 8 делит юнит с картой мокрости у террейна — это ОДНА и та же
+    // текстура.
+    if (su->u_snowmask >= 0 && terrain_snow_mask_have()) {
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, terrain_snow_mask_tex());
+        glUniform1i(su->u_snowmask, 8);
+    }
+    if (su->u_worldsize >= 0)
+        glUniform2f(su->u_worldsize, rc->world_size[0], rc->world_size[1]);
     // Кубомап отражений воды на юните 9 (для мокрой земли/деревьев; вода
     // держит его на юните 7 отдельно — не конфликтует). Внутри прохода
     // граней кубомапа его НЕ биндим: текстура прикреплена к текущему FBO —

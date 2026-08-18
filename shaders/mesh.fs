@@ -22,6 +22,13 @@ uniform samplerCube uReflection;
 // Шум мокрости (img/noise.png, юнит 11): пятна "мокрее / почти сухо"
 uniform sampler2D uNoise;
 
+// Снежный покров: общий блок snow.glsl. Меши/GLB: снег на верхних гранях
+// (нормаль вверх) на открытых небу участках.
+uniform float uSnowCover;
+uniform sampler2D uSnowMask;
+uniform vec2 uWorldSize;
+#include "snow.glsl"
+
 #define SUN_MAX_LIGHTS 4
 uniform vec3 uLightDir[SUN_MAX_LIGHTS];
 uniform vec3 uLightColor[SUN_MAX_LIGHTS];
@@ -118,6 +125,13 @@ void main() {
     // двухсторонняя геометрия: переворачиваем нормаль к камере, чтобы
     // внутренние грани (и дубли вершин без нормалей) не выглаживались в тьму
     if (dot(N, V) < 0.0) N = -N;
+
+    // Снежный покров (общий блок snow.glsl): только верхние грани, открытое
+    // небо — снег на ящиках, камнях, домах (любой меш/GLB).
+    {
+        float a = snow_amount(vWorldPos, smoothstep(0.35, 0.70, N.y));
+        if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
+    }
 
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
     float shadow = mesh_shadow(vWorldPos);
