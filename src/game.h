@@ -31,6 +31,7 @@ typedef struct {
     SceneNode *particles_node, *decals_node;
     SceneNode *water_node;       // вода: лужи/озёра/реки/моря (water.c)
     SceneNode *sel_node, *mm_node, *hud_node;
+    SceneNode *playerbox_node;   // бокс коллизии персонажа (3-е лицо)
     CameraParams *cam;         // параметры узла Camera
     MinimapParams *mm;         // параметры узла Minimap
     HudParams *hud;            // параметры узла DebugHUD

@@ -8,6 +8,7 @@
 #include "renderer.h"
 
 #include "app.h"
+#include "actions.h"
 #include "audio.h"
 #include "bloom.h"
 #include "camera.h"
@@ -22,6 +23,7 @@
 #include "resources.h"
 #include "sky.h"
 #include "ssr.h"
+#include "terrain.h"
 #include "voxfog.h"
 #include "water.h"
 #include "world.h"
@@ -219,6 +221,21 @@ static void renderer_ctx_fill(Game *g)
         camera_dirs(cam, rc->cam_fwd, rc->cam_right);
         vec3_cross(rc->cam_right, rc->cam_fwd, rc->cam_up);
         vec3_normalize(rc->cam_up);
+        // Видовой базис — откуда РЕАЛЬНО рендерится кадр. Узел Camera
+        // пересчитывает его каждый кадр (в 3-м лице камера стоит сзади
+        // персонажа); скайбокс/биллборды/SSR/воксельный туман берут его.
+        if (g->cam->view_fwd[0] || g->cam->view_fwd[1] || g->cam->view_fwd[2]) {
+            memcpy(rc->view_pos, g->cam->view_pos, sizeof rc->view_pos);
+            memcpy(rc->view_fwd, g->cam->view_fwd, sizeof rc->view_fwd);
+            memcpy(rc->view_right, g->cam->view_right, sizeof rc->view_right);
+            memcpy(rc->view_up, g->cam->view_up, sizeof rc->view_up);
+        } else {                        // до первого camera_node_update
+            memcpy(rc->view_pos, rc->cam_pos, sizeof rc->view_pos);
+            memcpy(rc->view_fwd, rc->cam_fwd, sizeof rc->view_fwd);
+            memcpy(rc->view_right, rc->cam_right, sizeof rc->view_right);
+            memcpy(rc->view_up, rc->cam_up, sizeof rc->view_up);
+        }
+        rc->cam_duck = g_act[A_DUCK] ? 1 : 0;
         frustum_build(&rc->frustum, rc->viewproj);   // culling цветного прохода
     }
     // Мокрость (дождь) — плавный 0..1 из fx.c (нарастает/высыхает секундами).
@@ -226,6 +243,9 @@ static void renderer_ctx_fill(Game *g)
     // яркости; сверху добавляется яркий рассеянный «свет от неба», который
     // компенсирует потерянные 80% освещённости.
     rc->wetness = fx_wetness();
+    rc->snowcover = fx_snowcover();
+    rc->world_size[0] = g->world.world_w;
+    rc->world_size[1] = g->world.world_d;
     float light_dim = 1.0f - 0.8f * rc->wetness;   // 1.0 -> 0.20
     // Свет: направленные источники (0 = солнце)
     float dir_sum = 0.0f;
@@ -372,6 +392,9 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     su->u_fogon    = glGetUniformLocation(prog, "uFogOn");
     su->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
     su->u_wetness = glGetUniformLocation(prog, "uWetness");
+    su->u_snowcover = glGetUniformLocation(prog, "uSnowCover");
+    su->u_snowmask  = glGetUniformLocation(prog, "uSnowMask");
+    su->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
     su->u_reflection = glGetUniformLocation(prog, "uReflection");
     su->u_noise = glGetUniformLocation(prog, "uNoise");
     for (int c = 0; c < SHADOW_CASCADES; c++) {
@@ -435,6 +458,18 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniform1f(su->u_shadow_on, rc->shadow_on ? 1.0f : 0.0f);
     if (su->u_wetness >= 0)
         glUniform1f(su->u_wetness, rc->wetness);
+    if (su->u_snowcover >= 0)
+        glUniform1f(su->u_snowcover, rc->snowcover);
+    // Маска снега: запечённая "видимость неба" (та же, что мокрость, RG8).
+    // unit 8 делит юнит с картой мокрости у террейна — это ОДНА и та же
+    // текстура.
+    if (su->u_snowmask >= 0 && terrain_snow_mask_have()) {
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, terrain_snow_mask_tex());
+        glUniform1i(su->u_snowmask, 8);
+    }
+    if (su->u_worldsize >= 0)
+        glUniform2f(su->u_worldsize, rc->world_size[0], rc->world_size[1]);
     // Кубомап отражений воды на юните 9 (для мокрой земли/деревьев; вода
     // держит его на юните 7 отдельно — не конфликтует). Внутри прохода
     // граней кубомапа его НЕ биндим: текстура прикреплена к текущему FBO —
@@ -704,6 +739,26 @@ void renderer_frame(Game *g, float dt, int draw_3d)
     SceneNode *world = g->root;
     int did_3d = 0;
 
+    // Подводные эффекты: следим за тем, под водой ли глаза игрока, и плавно
+    // вводим/выводим постобработку (тонирование, искажение, виньетка). Тон
+    // берём из водоёма (water_underwater); время копится для анимации волн.
+    if (world && draw_3d) {
+        static float s_under = 0.0f;
+        static float s_undtime = 0.0f;
+        float tint[3] = { 0.08f, 0.22f, 0.30f };
+        int inw = g->world_loaded &&
+                  water_underwater(&g->world, s_rc.cam_pos, tint);
+        float target = inw ? 1.0f : 0.0f;
+        float rate = 1.6f;                 // ~0.6 с до полного входа/выхода
+        if (s_under < target) {
+            s_under += rate * dt; if (s_under > target) s_under = target;
+        } else if (s_under > target) {
+            s_under -= rate * dt; if (s_under < 0.0f) s_under = 0.0f;
+        }
+        if (s_under > 0.0f) s_undtime += dt;   // волны идут, пока эффект виден
+        bloom_set_underwater(s_under, tint, s_undtime);
+    }
+
     // Кубомап отражений — статический (загружен из cubemaps/ при старте).
     // Рендер в реальном времени отключён для производительности.
     // Для обновления используйте консольную команду cubemap_capture.
@@ -801,11 +856,19 @@ void renderer_end(Game *g, float dt)
         float mw = hud_text_width(g->ui_msg);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.55f };
         const float fg[4] = { 0.9f, 0.95f, 1.0f, 1.0f };
+        // Блендинг включаем САМИ: hud_text_draw/hud_rect_draw по контракту
+        // GL-состояние не ставят (hud.h). Раньше состояние «утекало» из блока
+        // прицела, и при r_crosshair 0 сообщение рисовалось без альфы —
+        // непрозрачный фон и залитые «дырки» в буквах.
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         float my = s_vh * 0.62f;
         hud_rect_draw(s_vw, s_vh, (s_vw - mw) * 0.5f - 16.0f, my - 2.0f,
                       mw + 32.0f, hud_text_line_height() + 8.0f, bg);
         hud_text_draw(s_vw, s_vh, (s_vw - mw) * 0.5f,
                       my + hud_text_ascent(), g->ui_msg, fg);
+        glDisable(GL_BLEND);
     }
 
     // snd_debug: панелька справа сверху — какие звуки играют сейчас

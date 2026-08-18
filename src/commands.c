@@ -51,14 +51,11 @@ void cmd_noclip(const char *args)
         return;
     }
     if (!g->cam) return;
-    g->cam->cam.fly = !g->cam->cam.fly;
-    if (!g->cam->cam.fly) {
-        g->cam->cam.vy = 0;
-        g->cam->cam.vx = g->cam->cam.vz = 0;
-        g->cam->cam.pos[1] = sample_height(&g->world, g->cam->cam.pos[0],
-                                           g->cam->cam.pos[2]) + EYE_H;
-    }
-    SDL_Log("Mode: %s", g->cam->cam.fly ? "noclip" : "walk");
+    // Noclip — вкл/выкл коллизии персонажа БЕЗ телепортации: персонаж
+    // остаётся на месте, просто проходит сквозь рельеф и объекты (и перестанет,
+    // когда noclip выключен). Полёт (fly) — отдельный режим.
+    g->cam->cam.noclip = !g->cam->cam.noclip;
+    SDL_Log("Noclip: %s", g->cam->cam.noclip ? "ON" : "OFF");
 }
 
 void cmd_toggle_map(const char *args)
@@ -70,7 +67,7 @@ void cmd_toggle_map(const char *args)
     SDL_Log("Map: %s", g->mm->visible ? "ON" : "OFF");
 }
 
-void cmd_toggle_hud(const char *args)
+void cmd_toggle_debug(const char *args)
 {
     (void)args;
     Game *g = game_instance();
@@ -192,7 +189,7 @@ void cmd_changelevel(const char *args)
     cmd_map_select(args);   // смена карты (у нас без сохранения состояния)
 }
 
-void cmd_r_drawhud(const char *args)
+void cmd_r_drawdebug(const char *args)
 {
     Game *g = game_instance();
     float v;
@@ -200,10 +197,10 @@ void cmd_r_drawhud(const char *args)
         if (!g->hud) return;
         g->hud->visible = v > 0.5f;
         selection_set_on(g->hud->visible);
-        SDL_Log("HUD: %s", g->hud->visible ? "ON" : "OFF");
+        SDL_Log("Debug: %s", g->hud->visible ? "ON" : "OFF");
         return;
     }
-    console_print("r_drawhud = %d", g->hud && g->hud->visible);
+    console_print("r_drawdebug = %d", g->hud && g->hud->visible);
 }
 
 void cmd_mat_wireframe(const char *args)

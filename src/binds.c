@@ -25,7 +25,7 @@ static const struct { SDL_Scancode sc; const char *cmd; } s_defaults[] = {
     { SDL_SCANCODE_LEFTBRACKET, "toggle_shadows" },
     { SDL_SCANCODE_P,           "toggle_fog" },
     { SDL_SCANCODE_G,           "toggle_map" },
-    { SDL_SCANCODE_H,           "toggle_hud" },
+    { SDL_SCANCODE_H,           "toggle_debug" },
     { SDL_SCANCODE_Q,           "demo" },
     { SDL_SCANCODE_M,           "fx_sparks" },
     { SDL_SCANCODE_COMMA,       "fx_smoke" },

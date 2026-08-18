@@ -15,6 +15,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 // --- Звуки игрока (шаги/прыжок/приземление) ------------------------------------
 // Грузятся лениво, через ресурсы: карта может переопределить их из zip.
@@ -131,14 +132,33 @@ void camera_update(Camera *cam, const WorldState *w,
     float fwd[3], right[3];
     camera_dirs(cam, fwd, right);
     // Движение — через действия из биндов (+forward/-forward и т.п.)
-    float maxspeed = cvar_get(cam->fly ? "cl_flightspeed" : "cl_walkspeed");
-    if (!cam->fly) {                 // sv_maxspeed перекрывает ходьбу (HL-стиль)
+    // noclip летает со скоростью полёта (как старый fly-контроллер)
+    float maxspeed = cvar_get((cam->fly || cam->noclip) ? "cl_flightspeed"
+                                                        : "cl_walkspeed");
+    if (!cam->fly && !cam->noclip) {   // sv_maxspeed перекрывает ходьбу (HL-стиль)
         float ms = cvar_get("sv_maxspeed");
         if (ms > 0.0f) maxspeed = ms;
     }
-    if (maxspeed <= 0.0f) maxspeed = cam->fly ? CAM_SPEED : WALK_SPEED;
+    if (maxspeed <= 0.0f) maxspeed = (cam->fly || cam->noclip)
+                                   ? CAM_SPEED : WALK_SPEED;
     if (g_act[A_SPEED]) maxspeed *= 4.0f;          // +speed — бег
     float speed = maxspeed * dt;
+
+    // NOCLIP: коллизии персонажа временно выключены. Отдельный контроллер,
+    // как у полёта (fly): свободное перемещение ПО ВЗГЛЯДУ (вперёд/назад с
+    // вертикальной компонентой), Space/Ctrl — вверх/вниз. Гравитации, земли
+    // и объектов нет. Положение НЕ телепортируется — при выключении noclip
+    // персонаж остаётся там, где был, и снова подчиняется коллизии ходьбы.
+    if (cam->noclip) {
+        if (g_act[A_FORWARD]) { cam->pos[0] += fwd[0]*speed; cam->pos[1] += fwd[1]*speed; cam->pos[2] += fwd[2]*speed; }
+        if (g_act[A_BACK])    { cam->pos[0] -= fwd[0]*speed; cam->pos[1] -= fwd[1]*speed; cam->pos[2] -= fwd[2]*speed; }
+        if (g_act[A_RIGHT])   { cam->pos[0] += right[0]*speed; cam->pos[2] += right[2]*speed; }
+        if (g_act[A_LEFT])    { cam->pos[0] -= right[0]*speed; cam->pos[2] -= right[2]*speed; }
+        if (g_act[A_JUMP]) cam->pos[1] += speed;
+        if (g_act[A_DOWN]) cam->pos[1] -= speed;
+        cam->vx = cam->vz = 0; cam->vy = 0;   // ходьба стартует с нуля
+        s_was_air = 0;
+    } else
 
     if (cam->fly) {
         // --- полёт: свободное перемещение по взгляду ---
@@ -156,10 +176,17 @@ void camera_update(Camera *cam, const WorldState *w,
         bool duck = g_act[A_DUCK];
         float eye = duck ? EYE_DUCK : EYE_H;
         float ground = sample_height(w, cam->pos[0], cam->pos[2]) + eye;
+        // За краем карты земли нет: игрок летит вниз (без невидимой стены,
+        // sample_height иначе клэмпил высоту до края — игрок «висел» над краем)
+        bool offmap = cam->pos[0] < 0.0f || cam->pos[0] > w->world_w ||
+                      cam->pos[2] < 0.0f || cam->pos[2] > w->world_d;
+        if (offmap) ground = -1e30f;
         if (duck != s_prev_duck) {
             s_prev_duck = duck;
-            cam->pos[1] = ground;    // мгновенно сесть/встать
-            cam->vy = 0;
+            if (ground > -1e29f) {     // за краем карты мгновенно не садимся
+                cam->pos[1] = ground;    // мгновенно сесть/встать
+                cam->vy = 0;
+            }
             s_was_air = 0;
         }
         bool on_ground = cam->pos[1] <= ground + 0.01f && cam->vy <= 0.01f;
@@ -232,8 +259,10 @@ void camera_update(Camera *cam, const WorldState *w,
         }
         cam->pos[0] += cam->vx * dt;
         cam->pos[2] += cam->vz * dt;
-        // Коллизии объектов карты (collision=1): не проходить сквозь них
-        objects_collide(&cam->pos[0], &cam->pos[2], 0.6f);
+        // Коллизии объектов карты (collision=1): не проходить сквозь них.
+        // Радиус персонажа = половина ширины/глубины коллизии (1 м -> 0.5 м,
+        // см. camera.h PLAYER_HALF_W); пшеница раздвигается отдельно в wheat.vs.
+        objects_collide(&cam->pos[0], &cam->pos[2], PLAYER_HALF_W);
 
         float gravity = cvar_get("sv_gravity");
         if (gravity <= 0.0f) gravity = GRAVITY;
@@ -243,6 +272,7 @@ void camera_update(Camera *cam, const WorldState *w,
         // (вода глубже роста) — плаваем. Плавучесть выталкивает к
         // поверхности, а течение реки (water_flow_at) сносит игрока.
         float wl = water_surface_at(w, cam->pos[0], cam->pos[2]);
+        if (offmap) wl = -1e30f;       // за картой воды тоже нет
         bool in_water = wl > ground - 0.05f;     // поверхность выше "дна"
         if (in_water && cam->pos[1] < wl - 0.05f) {   // глаза под водой
             // Плавучесть: под водой гравитация гасится, выталкивание
@@ -319,11 +349,6 @@ void camera_update(Camera *cam, const WorldState *w,
             s_rustle_timer = 0.0f;
         }
     }
-    // не выходить за край мира
-    if (cam->pos[0] < 2.0f) cam->pos[0] = 2.0f;
-    if (cam->pos[0] > w->world_w - 2.0f) cam->pos[0] = w->world_w - 2.0f;
-    if (cam->pos[2] < 2.0f) cam->pos[2] = 2.0f;
-    if (cam->pos[2] > w->world_d - 2.0f) cam->pos[2] = w->world_d - 2.0f;
     // позиция игрока — для позиционных звуков (шаги и т.п.)
     s_player_pos[0] = cam->pos[0];
     s_player_pos[1] = cam->pos[1];
@@ -411,25 +436,50 @@ void camera_node_update(SceneNode *n, float dt)
     }
 
     // Матрицы вида и проекции. Вид от третьего лица (cvar cam_thirdperson):
-    // камера сзади-сверху персонажа, смотрит на него.
+    // chase-камера — стоит на сфере радиуса cam_tpd вокруг головы персонажа
+    // вдоль НАПРАВЛЕНИЯ ВЗГЛЯДА (включая pitch: камера крутится и по
+    // вертикали); цель — голова персонажа. Взгляд камеры = направление
+    // взгляда игрока, поэтому sky/биллборды в renderer читают реальный
+    // видовой базис.
     float fwd[3], up[3] = {0, 1, 0}, center[3], view[16], proj[16];
     camera_dirs(&p->cam, fwd, NULL);
     center[0] = p->cam.pos[0] + fwd[0];
     center[1] = p->cam.pos[1] + fwd[1];
     center[2] = p->cam.pos[2] + fwd[2];
     if (cvar_get("cam_thirdperson") > 0.5f) {
+        float dist = cvar_get("cam_tpd");   // дистанция камеры, м
+        if (dist < 1.0f) dist = 4.0f;
+        if (dist > 12.0f) dist = 12.0f;
+        // Голова персонажа — центр orbита (чуть выше точки глаз)
+        float head[3] = {
+            p->cam.pos[0],
+            p->cam.pos[1] + 0.3f,
+            p->cam.pos[2],
+        };
+        // Камера — на сфере взгляда: pos - fwd*dist (полный 3D-взгляд,
+        // поэтому мышь вверх/вниз реально крутит камеру вокруг персонажа).
         float eye[3] = {
-            p->cam.pos[0] - fwd[0] * 4.0f,
-            p->cam.pos[1] + 1.7f,
-            p->cam.pos[2] - fwd[2] * 4.0f,
+            head[0] - fwd[0] * dist,
+            head[1] - fwd[1] * dist,
+            head[2] - fwd[2] * dist,
         };
         // Камера не проваливается в рельеф (на склонах/у обрывов)
         float ground = sample_height(p->world, eye[0], eye[2]) + 0.35f;
         if (eye[1] < ground) eye[1] = ground;
-        mat4_lookat(view, eye, p->cam.pos, up);
+        mat4_lookat(view, eye, head, up);
+        // Действительный видовой базис (откуда реально смотрит рендер)
+        memcpy(p->view_pos, eye, sizeof p->view_pos);
     } else {
         mat4_lookat(view, p->cam.pos, center, up);
+        memcpy(p->view_pos, p->cam.pos, sizeof p->view_pos);
     }
+    // Базис ВИДОВОЙ камеры — из готовой матрицы вида (column-major):
+    // right = (m0, m4, m8), up = (m1, m5, m9), forward = -(m2, m6, m10).
+    // В 1-м лице он совпадает с camera_dirs, в 3-м лице — это реальное
+    // направление рендера (небо/биллборды/лучи берут его, а не взгляд игрока).
+    p->view_right[0] = view[0]; p->view_right[1] = view[4]; p->view_right[2] = view[8];
+    p->view_up[0]    = view[1]; p->view_up[1]    = view[5]; p->view_up[2]    = view[9];
+    p->view_fwd[0]   = -view[2]; p->view_fwd[1]  = -view[6]; p->view_fwd[2]  = -view[10];
     mat4_perspective(proj, p->fov_deg * 3.14159f / 180.0f, p->aspect, p->znear, p->zfar);
     mat4_mul(p->viewproj, proj, view);
 }

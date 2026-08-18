@@ -19,6 +19,26 @@ static BloomParams *s_bloom_p = NULL;   // для hot-reload (shader_on_reshade)
 static void bloom_prog_init(BloomParams *b);   // uniform'ы (id уже готовы)
 static void bloom_reshade(void);               // ниже: replace + prog_init
 
+// --- Подводные эффекты (передаются в композит) ---------------------------------
+// renderer обновляет состояние каждый кадр (плавный вход/выход из воды);
+// bloom_render шлёт их в uniform'ы композита.
+static float s_underwater = 0.0f;
+static float s_water_tint[3] = { 0.08f, 0.22f, 0.30f };
+static float s_under_time = 0.0f;
+
+void bloom_set_underwater(float amount, const float tint[3], float time)
+{
+    if (amount < 0.0f) amount = 0.0f;
+    if (amount > 1.0f) amount = 1.0f;
+    s_underwater = amount;
+    if (tint) {
+        s_water_tint[0] = tint[0];
+        s_water_tint[1] = tint[1];
+        s_water_tint[2] = tint[2];
+    }
+    if (time > 0.0f) s_under_time = time;
+}
+
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 
@@ -83,6 +103,9 @@ static void bloom_prog_init(BloomParams *b)
     b->u_sat       = glGetUniformLocation(b->prog_composite, "uSat");
     b->u_contrast  = glGetUniformLocation(b->prog_composite, "uContrast");
     b->u_wetness   = glGetUniformLocation(b->prog_composite, "uWetness");
+    b->u_underwater = glGetUniformLocation(b->prog_composite, "uUnderwater");
+    b->u_watertint  = glGetUniformLocation(b->prog_composite, "uWaterTint");
+    b->u_time       = glGetUniformLocation(b->prog_composite, "uTime");
 }
 
 // Hot-reload: replace балансирует refcount (release старой + новая ссылка);
@@ -265,6 +288,13 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
     // Мокрость (дождь): в композите снижает цветастость
     if (b->u_wetness >= 0)
         glUniform1f(b->u_wetness, fx_wetness());
+    // Подводные эффекты (renderer обновляет состояние в bloom_set_underwater)
+    if (b->u_underwater >= 0) {
+        glUniform1f(b->u_underwater, s_underwater);
+        glUniform3f(b->u_watertint, s_water_tint[0], s_water_tint[1],
+                    s_water_tint[2]);
+        glUniform1f(b->u_time, s_under_time);
+    }
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 

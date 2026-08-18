@@ -592,7 +592,8 @@ static int l_fx_weather(lua_State *ls)
 // engine.fx_register("имя", { ... }) — свой пресет из Lua.
 // Таблица: dir={x,y,z}, spread, speed={min,max}, life={min,max},
 // size={min,max}, alpha={a0,a1}, color={r,g,b}, gravity, drag, sway,
-// wind={x,y,z}, blend (0/1), streak (0/1), bounce (0/1), count.
+// wind={x,y,z}, blend (0/1), streak (0/1), bounce (0/1),
+// collide (0/1/2 — столкновение с террейном/водой), count.
 static int l_fx_register(lua_State *ls)
 {
     const char *name = luaL_checkstring(ls, 1);
@@ -648,7 +649,10 @@ static int l_fx_register(lua_State *ls)
     GET_VEC("wind", pp.wind);
     GET_NUM("blend", tmp); if (tmp > 0.5f) pp.blend = 1;
     GET_NUM("streak", tmp); if (tmp > 0.5f) pp.streak = 1;
+    GET_NUM("plain", tmp); if (tmp > 0.5f) pp.plain = 1;
     GET_NUM("bounce", tmp); if (tmp > 0.5f) pp.bounce = 1;
+    // collide: 1 = гибнет о террейн/воду, 2 = ложится и гаснет (снег)
+    GET_NUM("collide", tmp); pp.collide = (int)tmp;
     GET_NUM("count", tmp); if (tmp > 0.0f) count = (int)tmp;
 
 #undef GET_VEC

@@ -45,6 +45,7 @@ uniform float uHeightMin, uHeightMax;
 uniform float uTime;
 uniform float uHaze;         // сила дымки (0 = нет), растёт с мокротой
 uniform float uHazeH;        // толщина слоя, м
+uniform vec3 uWColor;        // тон тумана над водоёмами (средний цвет воды)
 
 // CSM-тени солнца (отдельные сэмплеры — GLSL 330)
 uniform sampler2DShadow uShadowMap0;
@@ -66,8 +67,9 @@ out vec4 FragColor;
 #define SHADOW_BOX2 48.0f
 #define SHADOW_LIMIT 256.0f
 
-// Плотность в точке мира: каскад по дистанции от камеры
-float fog_density(vec3 p) {
+// Плотность в точке мира: каскад по дистанции от камеры.
+// Возвращает vec2: x = базовая плотность (R), y = туман над водой (G).
+vec2 fog_density(vec3 p) {
     float dist = length(p - uCamPos);
     vec3 uvw;
     if (uFogMode > 0.5) {
@@ -81,13 +83,13 @@ float fog_density(vec3 p) {
     else if (dist < C2_HALF)
         uvw = (p - uFogCenter2) / uFogBox2 + 0.5;
     else
-        return 0.0;
+        return vec2(0.0);
     if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 ||
         uvw.z < 0.0 || uvw.z > 1.0)
-        return 0.0;
-    if (dist < C0_HALF) return texture(uFogTex0, uvw).r;
-    if (dist < C1_HALF) return texture(uFogTex1, uvw).r;
-    return texture(uFogTex2, uvw).r;
+        return vec2(0.0);
+    if (dist < C0_HALF) return texture(uFogTex0, uvw).rg;
+    if (dist < C1_HALF) return texture(uFogTex1, uvw).rg;
+    return texture(uFogTex2, uvw).rg;
 }
 
 // Резкая видимость солнца (PCF, без градиента) — чёткие god rays
@@ -188,8 +190,13 @@ void main() {
         float t = (float(i) + 0.5 + jit * 0.8) * stepLen;
         if (t >= march) break;
         vec3 p = uCamPos + dir * t;
-        float d = (fog_density(p) * base_fog_scale()
+        vec2 fd = fog_density(p);
+        // базовый туман гаснет в дождь, водный — нет (испарение над водой
+        // сильнее именно в сырости)
+        float db = (fd.x * base_fog_scale()
                   + haze_density(p) + rain_fog_density(t)) * uStrength;
+        float dw = fd.y * uStrength;               // туман над водоёмом
+        float d = db + dw;
         if (d <= 0.001) continue;
         float od = d * stepLen;                    // оптическая толщина
         float ext = exp(-od);                      // Beer-Lambert
@@ -211,10 +218,13 @@ void main() {
         lit = max(lit, mix(0.0, 0.32, uWetness));   // в дождь — серый свет неба
         // ореол у самого солнца (Mie-подобный пик в тумане)
         float glare = pow(sunHit, 8.0) * uGlare * sunShadow * rainDim;
+        // Цвет шага: базовый тёплый туман, а над водой подмешан тон
+        // водоёма (uWColor, чуть светлее) — взвешено по плотностям.
+        vec3 stepCol2 = mix(stepCol, uWColor * 1.15, dw / max(d, 1e-4));
         // Прирост рассеянного света: правильно Beer-Lambert (1 - ext), НЕ od.
         // od в плотном узком слое (низкая дымка) огромно и переоценивало бы
         // свет -> белое свечение. (1 - ext) упирается в 1, белого нет.
-        inscat += stepCol * (1.0 - ext) * trans * (lit + glare * (1.0 - trans));
+        inscat += stepCol2 * (1.0 - ext) * trans * (lit + glare * (1.0 - trans));
         trans *= ext;
         if (trans < 0.01) break;                   // дальше не видно — хватит
     }

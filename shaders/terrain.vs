@@ -14,6 +14,9 @@
 
 layout (location = 0) in vec2 aPos;   // x,z вершины на плоскости
 layout (location = 1) in vec2 aUV;    // координаты в карте 0..1
+layout (location = 2) in float aDrop; // юбка: на сколько метров опустить вершину
+                                      // ниже высоты рельефа (0 = поверхность,
+                                      // >0 = нижняя кромка юбки на стыках LOD)
 
 uniform mat4 uViewProj;               // вид * проекция (из узла Camera)
 uniform sampler2D uHeightmap;         // высоты рельефа (0 = низ, 1 = пик)
@@ -25,7 +28,7 @@ out vec3 vWorldPos;
 
 void main() {
     float t = texture(uHeightmap, aUV).r;
-    float h = mix(uHeightMin, uHeightMax, t);
+    float h = mix(uHeightMin, uHeightMax, t) - aDrop;
     vec3 pos = vec3(aPos.x, h, aPos.y);
     vUV = aUV;
     vWorldPos = pos;

@@ -161,6 +161,17 @@ void shadow_render(SceneNode *root, RendererContext *rc)
     const int sizes[SHADOW_CASCADES] = {
         g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3]
     };
+    // Наклон тени: насколько далеко по горизонтали уходит тень объекта
+    // высотой 1 м (горизонталь / вертикаль по направлению солнца). Низкое
+    // солнце — длинные тени: дальние деревья должны рисоваться в ближних
+    // каскадах, иначе их тень (лежащая рядом с игроком) исчезает — узлы
+    // (vegetation/objects) добавляют к радиусу culling height*shadow_slope.
+    {
+        float hy = sd[1] > 0.05f ? sd[1] : 0.05f;
+        float hl = sqrtf(sd[0]*sd[0] + sd[2]*sd[2]);
+        float slope = hl / hy;
+        rc->shadow_slope = slope > 12.0f ? 12.0f : slope;   // потолок от пологих
+    }
 
     GLint prev_fbo = 0, prev_vp[4] = { 0, 0, 0, 0 };
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);

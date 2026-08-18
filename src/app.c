@@ -308,7 +308,7 @@ static int menu_audio(void)
 
 static int menu_graphics(void)
 {
-    menu_start("ГРАФИКА", 13, 460.0f);
+    menu_start("ГРАФИКА", 14, 460.0f);
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
@@ -343,6 +343,11 @@ static int menu_graphics(void)
     cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
     cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
     ui_sep(&s_ui);
+    if (ui_button(&s_ui, "СБРОСИТЬ НАСТРОЙКИ ГРАФИКИ")) {
+        int n = cvar_reset_graphics();
+        console_save_config();          // сразу в config.cfg (дефолты не пишутся)
+        console_print("графика: сброшено к дефолтам (%d cvar)", n);
+    }
     if (ui_button(&s_ui, "НАЗАД")) return SCR_ACT_BACK;
     return s_screen;
 }

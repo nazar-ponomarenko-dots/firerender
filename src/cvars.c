@@ -185,3 +185,19 @@ void cvar_save_config(const char *path)
     }
     fclose(f);
 }
+
+// Сброс графических cvar'ов: все, чьё имя начинается на "r_" (рендер),
+// возвращаются к значению по умолчанию. Чит-переменные пропускаются
+// (сбрасывать их без sv_cheats нельзя — cvar_set их отклоняет).
+int cvar_reset_graphics(void)
+{
+    int n = 0;
+    for (int i = 0; i < s_count; i++) {
+        Cvar *c = &s_cvars[i];
+        if (strncmp(c->name, "r_", 2) != 0) continue;
+        if (c->flags & CVAR_CHEAT) continue;
+        cvar_set(c->name, c->def);
+        n++;
+    }
+    return n;
+}

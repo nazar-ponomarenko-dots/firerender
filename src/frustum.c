@@ -57,13 +57,17 @@ int frustum_test_sphere(const Frustum *f, float x, float y, float z, float r)
 
 int frustum_test_aabb(const Frustum *f, const float *min, const float *max)
 {
+    // Плоскость хранится так, что точка внутри/на границе фрустума даёт
+    // n*p + d >= 0. Бокс НЕ пересекает фрустум только если он ЦЕЛИКОМ по
+    // внешнюю сторону какой-то плоскости — для этого достаточно проверить
+    // одну его вершину: ту, что МАКСИМИЗИРУЕТ n*p по каждой оси (p-vertex).
+    // Если даже она за плоскостью (n*p+d < 0) — весь бокс снаружи.
     for (int i = 0; i < 6; i++) {
-        // Вершина, наиболее близкая к плоскости (для направленности наружу)
-        float px = f->p[i][0] > 0 ? min[0] : max[0];
-        float py = f->p[i][1] > 0 ? min[1] : max[1];
-        float pz = f->p[i][2] > 0 ? min[2] : max[2];
+        float px = f->p[i][0] > 0 ? max[0] : min[0];
+        float py = f->p[i][1] > 0 ? max[1] : min[1];
+        float pz = f->p[i][2] > 0 ? max[2] : min[2];
         float d = f->p[i][0] * px + f->p[i][1] * py + f->p[i][2] * pz + f->p[i][3];
-        if (d < 0.0f) return 0;   // даже ближайшая вершина снаружи
+        if (d < 0.0f) return 0;   // самая «внутренняя» вершина снаружи
     }
     return 1;
 }

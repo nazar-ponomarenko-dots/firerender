@@ -118,6 +118,8 @@ typedef struct {
     float ground_height;      // высота дымки у земли, м
     float density_field;      // доп. туман над полем пшеницы
     float field_height;       // высота полевого тумана, м
+    float density_water;      // туман над водоёмами (на метр пути)
+    float water_height;       // высота тумана над уровнем воды, м
     float color[3];           // БАЗОВЫЙ цвет тумана (везде)
     float color_sun[3];       // цвет солнечного рассеяния (тёплый, у солнца)
     float glare;              // ореол у самого солнца
@@ -144,6 +146,9 @@ typedef struct {
 typedef struct {
     float grass_density, wheat_density;  // шт/м2 вплотную к камере
     float grass_floor, wheat_floor;      // минимум на всей карте
+    float dandelion_density;             // одуванчики шт/м2 у камеры (редкие,
+                                         // добавляются СВЕРХ травы)
+    float dandelion_floor;               // минимум одуванчиков на карте
     float dyn_radius, vis_radius;        // радиусы динамики/видимости
     float falloff;                       // радиус падения плотности
 } MapVeg;

@@ -16,12 +16,11 @@
 //  а не стоят строго вертикально. Нормаль считается от тех же квантованных
 //  высот (g_hq), поэтому растения лежат точно на поверхности.
 //
-//  Спрайты — слои 2D-массива 256x178 (0=grass.png, 1=wheat_lod0,
-//  2=wheat_lod1, 3=wheat_lod2); LOD пшеницы выбирается в шейдере по
-//  дистанции (до 5 м / 5-25 м / дальше). Тип, поворот,
-//  размер, тон, наклон — атрибуты экземпляра (10 float). Поле пшеницы
-//  задаёт main.c через g_field_*. Отрисовка — 4 инстанс-вызова
-//  (2 статики + 2 динамики), один шейдер.
+//  Спрайты — слои 2D-массива 256x178 (0/1/2=grass.png/grass1.png/grass2.png,
+//  3=dandelions.png, 4-6=wheat_lod0/1/2.png); LOD пшеницы выбирается в шейдере
+//  по дистанции. Вид, поворот, размер, тон, наклон — атрибуты экземпляра
+//  (12 float). Поле пшеницы задаёт main.c через g_field_*. Отрисовка —
+//  4 инстанс-вызова (2 статики + 2 динамики), один шейдер.
 // ============================================================================
 #include "vegetation.h"
 
@@ -34,6 +33,7 @@
 #include "shader.h"
 #include "shadow.h"
 #include "sky.h"
+#include "water.h"
 #include "world.h"
 #include "fx.h"
 
@@ -48,13 +48,80 @@
 
 // Плотности и радиусы — из map/map.json (veg = { ... }); значения по
 // умолчанию совпадают с прежними константами.
-static float s_grass_density = 3.0f;    // трава: шт/м2 вплотную к камере
+static float s_grass_density = 1.2f;     // трава: шт/м2 вплотную к камере
 static float s_wheat_density = 140.0f;  // пшеница: шт/м2 вплотную к камере
-static float s_grass_floor = 0.004f;    // минимум травы на ВСЕЙ карте
+static float s_grass_floor = 0.012f;     // минимум травы на ВСЕЙ карте
 static float s_wheat_floor = 1.0f;      // минимум пшеницы в поле
+static float s_dandelion_density = 0.05f;   // одуванчики шт/м2 у камеры (редкие)
+static float s_dandelion_floor   = 0.002f;  // минимум одуванчиков на карте
 static float s_falloff_r = 16.0f;       // радиус падения плотности (LOD)
 static float s_dyn_r = 48.0f;           // радиус динамического слоя
 static float s_vis_r = 220.0f;          // радиус статики, м (у земли)
+
+// --- Слои спрайтов 2D-массива (порядок загрузки = индекс) --------------------
+#define VEG_LAY_GRASS0  0   // img/grass.png    — трава, вид 1 (высокая)
+#define VEG_LAY_GRASS1  1   // img/grass1.png   — трава, вид 2 (средняя)
+#define VEG_LAY_GRASS2  2   // img/grass2.png   — трава, вид 3 (низкая)
+#define VEG_LAY_DANDE   3   // img/dandelions.png — одуванчик
+#define VEG_LAY_WHEAT0  4   // img/wheat_lod0.png
+#define VEG_LAY_WHEAT1  5   // img/wheat_lod1.png
+#define VEG_LAY_WHEAT2  6   // img/wheat_lod2.png
+#define VEG_LAYERS      7
+// Граница класса "пшеница" в атрибуте layer (iAttr.w): всё, что >= 3.5,
+// рисуется с LOD-лестницей 4..6; меньшее (0/1/2 — трава, 3 — одуванчик)
+// сэмплируется как есть.
+#define VEG_WHEAT_BASE  4.0f
+#define VEG_WHEAT_MARK  3.5f
+
+// --- Гибкая таблица видов растительности ---------------------------------------
+// Каждый вид — строка: масштаб, тон, наклон, утапливание, вес появления и
+// индекс слоя 2D-массива спрайтов. Трава (3 вида) и одуванчик рисуются
+// одним потоком экземпляров; вид выбирается по весу. Новый вид = одна строка
+// текстуры в массиве + одна строка здесь. Плотность всей «травяной» группы
+// одна (s_grass_density) — веса распределяют её между видами.
+typedef struct {
+    float s0, s1;      // мин/макс масштаб (м)
+    float t0, t1;      // мин/макс тон
+    float lean;        // максимальный наклон вбок (амплитуда, рад)
+    float sink;        // доля высоты, утапливаемая в почву
+    float weight;      // доля вида среди всей травяной группы (0..~1)
+    float layer;       // слой 2D-массива спрайтов (см. VEG_LAY_*)
+} VegKind;
+#define VEG_KINDS 4
+#define VEG_KIND_DANDELION 3   // индекс одуванчика в таблице s_kinds
+static const VegKind s_kinds[VEG_KINDS] = {
+    //             s0    s1    t0    t1   lean  sink  weight layer
+    { 0.32f, 0.62f, 0.78f, 1.06f, 0.26f, 0.46f, 0.30f, VEG_LAY_GRASS0 },  // высокая густая
+    { 0.22f, 0.46f, 0.85f, 1.12f, 0.25f, 0.40f, 0.28f, VEG_LAY_GRASS1 },  // средняя
+    { 0.18f, 0.38f, 0.72f, 0.98f, 0.25f, 0.36f, 0.26f, VEG_LAY_GRASS2 },  // низкая рыхлая
+    { 0.30f, 0.55f, 0.95f, 1.15f, 0.15f, 0.40f, 0.0f,  VEG_LAY_DANDE  },  // одуванчик (вне весов, редкий по плотности)
+};
+// Сумма весов ТРАВЫ (одуванчик выбирается отдельно по p_dande, его вес
+// в таблицу не входит при нормировке выбора вида).
+static float s_grass_total = 0.0f;
+static float veg_grass_total(void)
+{
+    if (s_grass_total > 0.0f) return s_grass_total;
+    float t = 0.0f;
+    for (int i = 0; i < VEG_KINDS; i++)
+        if (i != VEG_KIND_DANDELION) t += s_kinds[i].weight;
+    s_grass_total = t > 0.0f ? t : 1.0f;
+    return s_grass_total;
+}
+// Выбор вида ТРАВЫ по весу (одуванчик не участвует — он редкий и
+// выбирается своей вероятностью). pick ∈ [0..grass_total) → индекс вида.
+static int veg_pick_kind(unsigned int *rng)
+{
+    float total = veg_grass_total();
+    float pick = frnd(rng) * total;
+    float acc = 0.0f;
+    for (int i = 0; i < VEG_KINDS; i++) {
+        if (i == VEG_KIND_DANDELION) continue;   // одуванчик — отдельно
+        acc += s_kinds[i].weight;
+        if (pick < acc) return i;
+    }
+    return 0;
+}
 #define VEG_CHUNK       16.0f     // сторона чанка в метрах
 #define VEG_REGEN_TOL    3.0f     // пересоздать чанк, если плотность сменилась больше
 // Радиус видимости СТАТИЧЕСКОГО слоя вокруг камеры: дальше спрайты меньше
@@ -226,6 +293,13 @@ static float veg_density(float r, float d0, float floor)
 
 // Генерирует растения чанка (cx, cy). Плотность — по расстоянию до камеры
 // (camx, camz); если static_run == true, берётся только пол (вся карта).
+//
+// Травяная ГРУППА = 3 вида травы + одуванчик. Плотность группы = плотность
+// травы + СОБСТВЕННАЯ (малая) плотность одуванчиков — они добавляются
+// СВЕРХ травы и не разбавляют её. Каждый кандидат группы становится
+// одуванчиком с вероятностью d_dande / (d_grass + d_dande) — редкие точки.
+// Остальные кандидаты распределяются между 3 видами травы по весам s_kinds.
+//
 // Экземпляр — 12 float: x y z, nx nz (нормаль земли), yaw, scale, tint,
 // layer, lean, dh/dx, dh/dz (уклон земли — для посадки на рельеф без
 // выборки текстуры высот в шейдере). Семя зависит от координат чанка —
@@ -237,9 +311,13 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
     float x0 = (float)cx * VEG_CHUNK, z0 = (float)cy * VEG_CHUNK;
     float r = static_run ? 1e9f : sqrtf((x0 + 8.0f - camx) * (x0 + 8.0f - camx)
                                       + (z0 + 8.0f - camz) * (z0 + 8.0f - camz));
-    // Плотность у камеры — из cvar'ов (меню «Графика»: r_*_density)
+    // Плотности у камеры — из cvar'ов (меню «Графика»). Одуванчики — своя
+    // малая плотность, добавляется СВЕРХ травы (не ест её долю).
+    float dg_g = veg_density(r, cvar_get("r_grass_density"), s_grass_floor);
+    float dg_d = veg_density(r, cvar_get("r_dandelion_density"),
+                             s_dandelion_floor);
     float dw = veg_density(r, cvar_get("r_wheat_density"), s_wheat_floor);
-    float dg = veg_density(r, cvar_get("r_grass_density"), s_grass_floor);
+    float dg = dg_g + dg_d;                      // вся травяная группа
     if (dwo) *dwo = dw;
     if (dgo) *dgo = dg;
     float wmax = dw > 2.0f * dg ? dw : 2.0f * dg;
@@ -250,6 +328,9 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
     // Статика и динамика — РАЗНЫЕ сиды: иначе у них совпадают позиции растений
     // (динамика рисуется поверх статики в тех же точках — "наслаивание").
     if (static_run) rng ^= 0x5bd1e995u;
+    // Вероятность одуванчика среди травяной группы (редкие пятна).
+    float p_dande = dg > 1e-4f ? dg_d / dg : 0.0f;
+    if (p_dande > 1.0f) p_dande = 1.0f;
     int gc = 0, wc = 0;
     float e = VEG_SLOPE_E;
     for (int i = 0; i < cands; i++) {
@@ -261,6 +342,8 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
                      z >= w->field_z0 && z <= w->field_z0 + w->field_d);
         float gy = sample_height(w, x, z);
         if (gy < w->min_height + 4.0f) continue;    // крайние низины — тоже
+        // Под водой растительности нет: дно моря/реки/лужи остаётся чистым
+        if (water_surface_at(w, x, z) > gy) continue;
         // уклон и нормаль земли (знаковые разности — как в normal map)
         float sdx = sample_height(w, x + e, z)
                   - sample_height(w, x - e, z);
@@ -287,16 +370,19 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
         if (wheat) {
             dst[6] = 0.18f + 0.14f * frnd(&rng); // колос: узкий, 0.18..0.32 м
             dst[7] = 0.90f + 0.20f * frnd(&rng); // тон
-            dst[8] = 1.0f;                       // слой: пшеница
+            dst[8] = VEG_WHEAT_BASE;             // вид: пшеница (layer 4)
             dst[9] = 0.0f;                       // без наклона
         } else {
-            dst[6] = 0.30f + 0.30f * frnd(&rng); // пучок: 0.30..0.60 м (выше)
-            dst[7] = 0.80f + 0.30f * frnd(&rng); // тон (зелёный разброс)
-            dst[8] = 0.0f;                       // слой: трава
-            dst[9] = (frnd(&rng) - 0.5f) * 0.5f; // наклон вбок, как в жизни
-            // пучок УТОПЛЕН в землю на 45% высоты: торчит большая часть —
-            // трава растёт из почвы, но стоит чуть выше (подняли)
-            dst[1] -= 0.45f * dst[6];
+            // Травяная группа: одуванчик с вероятностью p_dande (редкий,
+            // не разбавляет траву), иначе один из 3 видов по весам.
+            int kind = frnd(&rng) < p_dande ? VEG_KIND_DANDELION
+                                            : veg_pick_kind(&rng);
+            const VegKind *k = &s_kinds[kind];
+            dst[6] = k->s0 + (k->s1 - k->s0) * frnd(&rng);   // масштаб (м)
+            dst[7] = k->t0 + (k->t1 - k->t0) * frnd(&rng);   // тон
+            dst[8] = k->layer;                    // слой спрайта (вид)
+            dst[9] = (frnd(&rng) - 0.5f) * k->lean;  // наклон вбок, как в жизни
+            dst[1] -= k->sink * dst[6];           // утапливание в почву
         }
         dst[10] = sdx / (2.0f * e);              // уклон: dh/dx, dh/dz
         dst[11] = sdz / (2.0f * e);
@@ -497,13 +583,16 @@ static void veg_update(const float cam_pos[3], VegParams *p)
         float dx = (float)(i * 16 + 8) - cam_pos[0];
         float dz = (float)(j * 16 + 8) - cam_pos[2];
         float r = sqrtf(dx*dx + dz*dz);
-        float tgd = veg_density(r, cvar_get("r_grass_density"), s_grass_floor);
+        float tgd = veg_density(r, cvar_get("r_grass_density"), s_grass_floor)
+                  + veg_density(r, cvar_get("r_dandelion_density"),
+                                s_dandelion_floor);
         float twd = veg_density(r, cvar_get("r_wheat_density"), s_wheat_floor);
-        // ВАЖНО: та же формула плотности, что пишет veg_gen_chunk (из cvar'ов).
-        // Раньше цель считалась из map.json-констант (s_*_density), а чанк
-        // запоминал плотность из cvar'ов — из-за рассогласования КАЖДЫЙ чанк
-        // не проходил допуск, и вся растительность пересоздавалась на каждом
-        // переходе чанка (regen storm).
+        // ВАЖНО: та же формула плотности, что пишет veg_gen_chunk (травяная
+        // группа = трава + одуванчики, из cvar'ов). Раньше цель считалась
+        // из map.json-констант (s_*_density), а чанк запоминал плотность из
+        // cvar'ов — из-за рассогласования КАЖДЫЙ чанк не проходил допуск, и
+        // вся растительность пересоздавалась на каждом переходе чанка
+        // (regen storm).
         bool need_gen = (!c->g && !c->w) ||
                         fabsf(c->dg_d - tgd) > VEG_REGEN_TOL ||
                         fabsf(c->dw_d - twd) > VEG_REGEN_TOL;
@@ -730,14 +819,15 @@ void veg_node_render(SceneNode *n, float dt)
     // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
     // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
     {
-        static float s_prev_w = -1.0f, s_prev_g = -1.0f;
+        static float s_prev_w = -1.0f, s_prev_g = -1.0f, s_prev_d = -1.0f;
         float w = cvar_get("r_wheat_density");
         float g = cvar_get("r_grass_density");
-        if (w != s_prev_w || g != s_prev_g) {
-            s_prev_w = w;
-            s_prev_g = g;
+        float d = cvar_get("r_dandelion_density");
+        if (w != s_prev_w || g != s_prev_g || d != s_prev_d) {
+            s_prev_w = w; s_prev_g = g; s_prev_d = d;
             g_chunk_cam[0] = g_chunk_cam[1] = INT_MAX;
-            SDL_Log("Veg density changed: wheat %.0f, grass %.1f", w, g);
+            SDL_Log("Veg density changed: wheat %.0f, grass %.1f, dandelion %.2f",
+                    w, g, d);
         }
     }
     veg_update(rc->cam_pos, p);
@@ -864,6 +954,8 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
         s_wheat_density = v.wheat_density;
         s_grass_floor = v.grass_floor;
         s_wheat_floor = v.wheat_floor;
+        s_dandelion_density = v.dandelion_density;
+        s_dandelion_floor   = v.dandelion_floor;
         s_falloff_r = v.falloff;
         s_dyn_r = v.dyn_radius;
         s_vis_r = v.vis_radius;
@@ -871,41 +963,52 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
         // применяются при перегенерации чанков.
         cvar_register("r_wheat_density", s_wheat_density, "пшеница шт/м2");
         cvar_register("r_grass_density", s_grass_density, "трава шт/м2");
-        SDL_Log("Veg cfg: wheat %.0f/m2, grass %.1f/m2, dyn %.0fm, vis %.0fm",
-                s_wheat_density, s_grass_density, s_dyn_r, s_vis_r);
+        cvar_register("r_dandelion_density", s_dandelion_density,
+                      "одуванчики шт/м2 (сверх травы)");
+        SDL_Log("Veg cfg: wheat %.0f/m2, grass %.1f/m2, dandelion %.2f/m2, "
+                "dyn %.0fm, vis %.0fm",
+                s_wheat_density, s_grass_density, s_dandelion_density,
+                s_dyn_r, s_vis_r);
     }
     GLuint prog = make_program("shaders/wheat.vs", "shaders/wheat.fs");
-    // LOD пшеницы: 0 — старая текстура, 1 — склейка 3-4 старых,
-    // 2 — склейка 16+ старых. Все слои уложены в один 2D-массив
-    // 256x178 (самый большой слой задаёт холст, остальные слева сверху).
-    int ww = 0, wh = 0;
-    unsigned char *wheat_lod0 = load_img("img/wheat_lod0.png", &ww, &wh, STBI_rgb_alpha);
-    int w1 = 0, h1 = 0, w2 = 0, h2 = 0, aw = 0, ah = 0;
-    unsigned char *wheat_lod1 = load_img("img/wheat_lod1.png", &w1, &h1, STBI_rgb_alpha);
-    unsigned char *wheat_lod2 = load_img("img/wheat_lod2.png", &w2, &h2, STBI_rgb_alpha);
-    unsigned char *grass_img = load_img("img/grass.png", &aw, &ah, STBI_rgb_alpha);
-    if (!prog || !wheat_lod0 || !wheat_lod1 || !wheat_lod2 || !grass_img) return NULL;
-    int cw = w2 > ww ? w2 : ww;           // холст: 256x178
-    int ch = h2 > wh ? h2 : wh;
-    if (w1 > cw) cw = w1;
-    if (h1 > ch) ch = h1;
-
-    // Спрайты травы и пшеницы — в 2D-массиве: вся растительность рисуется
-    // одним draw call, а слой выбирает, чей спрайт показывать (0=трава,
-    // 1/2/3 = LOD пшеницы; чем дальше от камеры, тем выше LOD).
+    // Спрайты растений в один 2D-массив (холст = самый большой слой,
+    // остальные прижаты к левому верхнему углу):
+    //   слой 0  травa вид 1 (высокая)   img/grass.png      128x128
+    //   слой 1  трава вид 2 (средняя)   img/grass1.png     128x128
+    //   слой 2  трава вид 3 (низкая)    img/grass2.png     128x128
+    //   слой 3  одуванчик               img/dandelions.png 128x128
+    //   слой 4  пшеница lod0            img/wheat_lod0.png 128x178
+    //   слой 5  пшеница lod1            img/wheat_lod1.png 152x178
+    //   слой 6  пшеница lod2            img/wheat_lod2.png 256x178
+    // Порядок индексов ДОЛЖЕН совпадать с VEG_LAY_* (см. верх файла).
+    int ww[7] = {0}, hh[7] = {0};
+    unsigned char *img[7];
+    static const char *const path[7] = {
+        "img/grass.png", "img/grass1.png", "img/grass2.png",
+        "img/dandelions.png",
+        "img/wheat_lod0.png", "img/wheat_lod1.png", "img/wheat_lod2.png",
+    };
+    for (int i = 0; i < 7; i++)
+        img[i] = load_img(path[i], &ww[i], &hh[i], STBI_rgb_alpha);
+    if (!prog) return NULL;
+    for (int i = 0; i < 7; i++)
+        if (!img[i]) { SDL_Log("veg: texture %s missing", path[i]); return NULL; }
+    // Холст: максимум по каждому измерению (определяет пшеница lod2).
+    int cw = 1, ch = 1;
+    for (int i = 0; i < 7; i++) {
+        if (ww[i] > cw) cw = ww[i];
+        if (hh[i] > ch) ch = hh[i];
+    }
+    // Спрайты — в 2D-массиве: вся растительность рисуется одним draw call,
+    // а слой (атрибут layer экземпляра) выбирает, чей спрайт показывать.
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, cw, ch, 4, 0,
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, cw, ch, VEG_LAYERS, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, aw, ah, 1,
-                    GL_RGBA, GL_UNSIGNED_BYTE, grass_img);
-    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 1, ww, wh, 1,
-                    GL_RGBA, GL_UNSIGNED_BYTE, wheat_lod0);
-    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 2, w1, h1, 1,
-                    GL_RGBA, GL_UNSIGNED_BYTE, wheat_lod1);
-    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 3, w2, h2, 1,
-                    GL_RGBA, GL_UNSIGNED_BYTE, wheat_lod2);
+    for (int i = 0; i < 7; i++)
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, ww[i], hh[i], 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, img[i]);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

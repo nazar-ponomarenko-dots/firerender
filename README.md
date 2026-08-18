@@ -302,7 +302,7 @@ engine.glb("models/vaz-2105.glb", 0, 5, 0, 1) -- статичный меш (.glb
 Команды по умолчанию: `WASD` — `+forward/+back/+left/+right`, `Space` —
 `+jump`, `Ctrl` — `+down`, `Shift` — `+speed`, `F` — `toggle_fly`,
 `[` — `toggle_shadows`, `P` — `toggle_fog`, `G` — `toggle_map`,
-`H` — `toggle_hud`, `Q` — `demo`.
+`H` — `toggle_debug` (дебаг-панель, по умолчанию выключена), `Q` — `demo`.
 
 Мышь — обзор (колесо — FOV), `` ` `` — консоль, `ESC` — пауза/назад.
 

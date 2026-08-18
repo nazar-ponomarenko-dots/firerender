@@ -29,6 +29,11 @@ uniform float uWindBoost;              // мокрость 0..1: в дождь �
 out vec2 vUV;
 flat out float vLayer;   // LOD целый для всего квада (не интерполировать)
 
+// Виды (iAttr.w): 0/1/2 — три вида травы, 3 — одуванчик, 4 — пшеница
+// (см. wheat.vs). Пшеница получает LOD 4..6, остальное — как есть.
+#define WHEAT_BASE 4.0
+#define WHEAT_MARK 3.5
+
 void main() {
     // Густую растительность (70 шт/м2) в карте теней прореживаем на 40%:
     // плотные тени от пшеницы на пшенице должны быть цельными, а не
@@ -46,7 +51,7 @@ void main() {
     // геометрию спрайта.
     float layer = iAttr.w;
     float wx = 128.0;
-    if (layer > 0.5) {
+    if (layer > WHEAT_MARK) {
         float dist = length(iPos.xz - uCamPos.xz);
         float ss1 = smoothstep(4.6, 5.4, dist);
         float ss2 = smoothstep(24.5, 25.5, dist);
@@ -57,7 +62,7 @@ void main() {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             return;
         }
-        layer = 1.0 + ss1 + ss2;
+        layer = WHEAT_BASE + ss1 + ss2;   // непрерывный слой 4..5..6
         wx = mix(128.0, 152.0, ss1);
         // lod2: сразу максимальная ширина (x10) на всей дистанции — как
         // в wheat.vs, тень повторяет геометрию спрайта.
@@ -83,8 +88,8 @@ void main() {
     float hw = aPos.x * iAttr.y * wmul;
     vec3 wp = iPos + hvec * hw;
     wp.y = iPos.y + (iSlope.x * hvec.x + iSlope.y * hvec.z) * hw;
-    // пшеница (слой 1) вытянута в высоту в 3 раза — как в wheat.vs
-    float ht = iAttr.y * (iAttr.w > 0.5 ? 3.0 : 1.0);
+    // пшеница (вид 4+) вытянута в высоту в 3 раза — как в wheat.vs
+    float ht = iAttr.y * (iAttr.w > WHEAT_MARK ? 3.0 : 1.0);
     float lc = cos(iLean), ls = sin(iLean);
     vec3 lt = hvec * (aPos.y * ls * iAttr.y * wmul)
             + up  * (aPos.y * lc * ht);
@@ -114,8 +119,8 @@ void main() {
     // слой для альфа-теста в shadowveg.fs отсекается по GL_NEAREST —
     // переключение силуэта происходит в середине полосы, где в кадре
     // спрайт уже смешан наполовину.
-    if (layer < 0.5)  vUV *= vec2(128.0 / 256.0, 128.0 / 178.0);
-    else              vUV *= vec2(wx / 256.0, 1.0);
+    if (layer < WHEAT_MARK)  vUV *= vec2(128.0 / 256.0, 128.0 / 178.0);
+    else                     vUV *= vec2(wx / 256.0, 1.0);
     vLayer = layer;
     gl_Position = uViewProj * vec4(wp, 1.0);
 }

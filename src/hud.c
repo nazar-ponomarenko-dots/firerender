@@ -30,7 +30,7 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
-#define HUD_LINES 12
+#define HUD_LINES 13
 #define HUD_LINE_LEN 96
 #define HUD_MAX_GLYPHS 1536
 
@@ -288,7 +288,7 @@ SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
     p->rc = rc;
     p->world = w;                              // квантованные высоты (GRND/ALT)
     p->fps = 60.0f;
-    p->visible = 1;                // панель видна с первой секунды (G — вкл/выкл)
+    p->visible = 0;                // дебаг-панель по умолчанию выключена (G — вкл/выкл)
     p->last_x = rc->cam_pos[0];
     p->last_y = rc->cam_pos[1];
     p->last_z = rc->cam_pos[2];
@@ -554,6 +554,8 @@ void hud_node_update(SceneNode *n, float dt)
              w->tex_w, w->tex_h, w->world_w, w->world_d);
     snprintf(p->lines[i++], HUD_LINE_LEN, "GRID: %dx%d | TRIS: %d",
              w->grid_w, w->grid_h, w->vert_count / 3);
+    snprintf(p->lines[i++], HUD_LINE_LEN, "TILES: %d (128 m, 4 LOD)",
+             terrain_tile_count());
     snprintf(p->lines[i++], HUD_LINE_LEN, "HEIGHTS: %.0f..%.0f | band %.0f..%.0f",
              w->min_height, w->max_height, w->band_h0, w->band_h1);
     snprintf(p->lines[i++], HUD_LINE_LEN, "VEG: %d+%d g, %d+%d w",

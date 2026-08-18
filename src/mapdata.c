@@ -56,6 +56,8 @@ static MapFog s_fog = {
     .ground_height = 5.0f,
     .density_field = 0.032f,
     .field_height = 8.0f,
+    .density_water = 0.030f,
+    .water_height = 4.0f,
     .color = { 0.52f, 0.56f, 0.60f },      // базовый цвет тумана (дымка)
     .color_sun = { 0.85f, 0.62f, 0.45f },  // тёплый к солнцу
     .glare = 0.20f,
@@ -80,8 +82,9 @@ static MapTerrain s_terrain = {
 
 // Растительность (veg = { ... })
 static MapVeg s_veg = {
-    .grass_density = 0.3f, .wheat_density = 140.0f,
-    .grass_floor = 0.004f, .wheat_floor = 1.0f,
+    .grass_density = 1.2f, .wheat_density = 140.0f,
+    .grass_floor = 0.012f, .wheat_floor = 1.0f,
+    .dandelion_density = 0.05f, .dandelion_floor = 0.002f,
     .dyn_radius = 48.0f, .vis_radius = 220.0f,
     .falloff = 16.0f,
 };
@@ -363,7 +366,7 @@ static void parse_water(const JsonNode *obj)
     case WATER_SEA:
         w->depth = 6.0f;
         w->color[0] = 0.04f; w->color[1] = 0.16f; w->color[2] = 0.22f;
-        w->alpha = 0.9f;
+        w->alpha = 0.94f;
         w->wave_amp = 0.18f;
         w->wave_speed = 0.8f;
         w->foam = 0.6f;
@@ -594,6 +597,10 @@ int mapdata_load(const char *path)
                                               s_fog.density_field);
         s_fog.field_height = (float)json_num(json_find(fg, "field_height"),
                                              s_fog.field_height);
+        s_fog.density_water = (float)json_num(json_find(fg, "density_water"),
+                                              s_fog.density_water);
+        s_fog.water_height = (float)json_num(json_find(fg, "water_height"),
+                                             s_fog.water_height);
         const JsonNode *col = json_find(fg, "color");
         if (col && json_array_len(col) == 3)
             parse_vec3(col, s_fog.color, 0.0f);
@@ -654,6 +661,12 @@ int mapdata_load(const char *path)
                                             s_veg.grass_floor);
         s_veg.wheat_floor = (float)json_num(json_find(vg, "wheat_floor"),
                                             s_veg.wheat_floor);
+        s_veg.dandelion_density =
+            (float)json_num(json_find(vg, "dandelion_density"),
+                            s_veg.dandelion_density);
+        s_veg.dandelion_floor =
+            (float)json_num(json_find(vg, "dandelion_floor"),
+                            s_veg.dandelion_floor);
         s_veg.dyn_radius = (float)json_num(json_find(vg, "dyn_radius"),
                                            s_veg.dyn_radius);
         s_veg.vis_radius = (float)json_num(json_find(vg, "vis_radius"),

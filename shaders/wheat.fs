@@ -24,8 +24,12 @@ in float vTint;
 flat in float vLayer;   // из wheat.vs — LOD целый для квада
 in float vHeight;      // высота растения в метрах (из wheat.vs)
 
-uniform sampler2DArray uVeg;      // массив спрайтов: 0=трава, 1-3=LOD пшеницы
+uniform sampler2DArray uVeg;      // массив спрайтов: 0-3 = трава/одуванчик, 4-6 = LOD пшеницы
 uniform vec3 uCamPos;             // позиция узла Camera
+
+// Вид (vLayer из wheat.vs): 0/1/2 — три вида травы, 3 — одуванчик,
+// 4 (и непрерывно 4..6 при LOD) — пшеница.
+#define WHEAT_MARK 3.5
 // ВСЕ направленные источники из map.json: индекс 0 — солнце (с тенями),
 // дальше — фоновые света. Растения светятся ото всех по чуть-чуть.
 #define SUN_MAX_LIGHTS 4
@@ -72,32 +76,44 @@ uniform float uShadowGrad[4];         // глубина до полной тем
 uniform float uShadowOn;          // 1 = тени включены (клавиша [)
 uniform float uWetness;        // мокрость 0..1 (fx.c)
 
+// Снежный покров: общий блок snow.glsl. Трава/одуванчик/пшеница: белые
+// шапки на верхушках (vUVBase.y = 0 — верх квада, PNG верхний ряд).
+uniform float uSnowCover;
+uniform sampler2D uSnowMask;
+uniform sampler2D uNoise;
+uniform vec2 uWorldSize;
+#include "snow.glsl"
+
 // Растения светятся прямым светом и CSM-тенями солнца; никакого AO —
 // поле остаётся золотым, тени от растений на землю кладут каскады.
 
 out vec4 FragColor;
 
-// Точные куски холста 256x178 для слоёв: трава 128x128, пшеница
-// lod0 128x178, lod1 152x178, lod2 256x178 (все слева сверху).
+// Точные куски холста 256x178 для слоёв: трава/одуванчик 128x128 (слева
+// сверху, кусок 128x128), пшеница lod0 128x178, lod1 152x178, lod2 256x178.
 vec2 grass_uv(vec2 u) { return u * vec2(128.0 / 256.0, 128.0 / 178.0); }
 vec2 lod0_uv(vec2 u)  { return u * vec2(128.0 / 256.0, 1.0); }
 vec2 lod1_uv(vec2 u)  { return u * vec2(152.0 / 256.0, 1.0); }
 vec2 lod2_uv(vec2 u)  { return u; }
 
-// Спрайт с плавным LOD: vLayer непрерывен (1..2..3, flat — один LOD на
-// весь квад). В короткой полосе перехода (0.8 м) соседние слои плавно
-// смешиваются по цвету И альфе — переход виден, но полоса призраков
-// узкая, края остаются чёткими. Вне полос — один тексель.
+// Спрайт с плавным LOD: vLayer непрерывен (4..5..6 для пшеницы, flat — один
+// LOD на весь квад). Травы/одуванчик (0..3) берутся как есть. В короткой
+// полосе перехода (0.8 м) соседние слои пшеницы плавно смешиваются по цвету
+// И альфе — переход виден, но полоса призраков узкая, края остаются
+// чёткими. Вне полос — один тексель.
 vec4 veg_sample(vec2 base, float lf, out vec2 uv_out) {
-    if (lf < 0.5) { uv_out = grass_uv(base); return texture(uVeg, vec3(uv_out, 0.0)); }
-    float li = floor(lf);
+    if (lf < WHEAT_MARK) {          // трава / одуванчик — как есть
+        uv_out = grass_uv(base);
+        return texture(uVeg, vec3(uv_out, lf));
+    }
+    float li = floor(lf);           // 4, 5 или 6
     float w = lf - li;
-    vec2 ua = li < 1.5 ? lod0_uv(base) : (li < 2.5 ? lod1_uv(base) : lod2_uv(base));
-    vec4 a = texture(uVeg, vec3(ua, li < 1.5 ? 1.0 : (li < 2.5 ? 2.0 : 3.0)));
+    vec2 ua = li < 4.5 ? lod0_uv(base) : (li < 5.5 ? lod1_uv(base) : lod2_uv(base));
+    vec4 a = texture(uVeg, vec3(ua, li < 4.5 ? 4.0 : (li < 5.5 ? 5.0 : 6.0)));
     uv_out = ua;
     if (w > 0.001) {
-        vec2 ub = li < 1.5 ? lod1_uv(base) : (li < 2.5 ? lod2_uv(base) : lod2_uv(base));
-        vec4 b = texture(uVeg, vec3(ub, li < 2.5 ? 2.0 : 3.0));
+        vec2 ub = li < 4.5 ? lod1_uv(base) : lod2_uv(base);
+        vec4 b = texture(uVeg, vec3(ub, li < 5.5 ? 5.0 : 6.0));
         uv_out = mix(ua, ub, w);
         return mix(a, b, w);
     }
@@ -167,6 +183,15 @@ void main() {
     float wet = clamp(uWetness, 0.0, 1.0);
     c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.5);
 
+    // Снежный покров (общий блок snow.glsl): снег лежит на ВЕРХУшках
+    // растений (шапки травы/одуванчиков/колосьев), на открытых небу
+    // участках. Белые кончики растут с накоплением.
+    {
+        float atop = 1.0 - smoothstep(0.0, 0.6, vUVBase.y);
+        float a = snow_amount(vWorldPos, atop);
+        if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
+    }
+
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
 
@@ -176,8 +201,8 @@ void main() {
     // бессмысленна — оставляем лишь лёгкое разнообразие от ориентации.
     // База приглушена, чтобы растения не светились.
 
-    // блик на колосьях пшеницы (слой 1); трава — матовая
-    float layer = step(0.5, vLayer);
+    // блик на колосьях пшеницы (вид 4+); трава/одуванчик — матовые
+    float layer = step(WHEAT_MARK, vLayer);
 
 //    // тень от рельефа и соседних растений
     float shadow = veg_shadow(vWorldPos);

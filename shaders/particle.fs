@@ -1,11 +1,14 @@
 // particle.fs — спрайт частицы. Режим (альфа/аддитив) задаёт draw call.
 // Для стриков (vIsStreak > 0.5): маска капли (ярко в середине, затухание
 // к хвосту/голове) + вертикальный тайлинг текстуры для эффекта капель.
+// Для plain (vPlain > 0.5): БЕЗ текстуры — яркий круг с мягкой кромкой
+// (снежинки), цвет = чистый цвет пресета.
 in vec2 vUV;
 in vec3 vColor;
 in float vAlpha;
 in float vIsStreak;
 in float vStreakLen;
+in float vPlain;
 
 uniform sampler2D uTex;
 
@@ -15,6 +18,15 @@ void main()
 {
     float a = vAlpha;
     vec3 col = vColor;
+    if (vPlain > 0.5) {
+        // Чистый диск: максимально белый и яркий, без текстуры.
+        float d = length(vUV - 0.5);
+        if (d > 0.5) discard;
+        float mask = smoothstep(0.5, 0.28, d);   // мягкая кромка
+        col = col * (1.25 + 0.5 * mask);         // слегка выжигаем в белое
+        FragColor = vec4(col * a * mask, a * mask);
+        return;
+    }
     if (vIsStreak > 0.5) {
         // vUV.y = 0..1 вдоль стрика (0 = хвост, 1 = голова)
         float t = vUV.y;
