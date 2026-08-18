@@ -507,6 +507,8 @@ void fx_register_builtin(void)
     }
     // Дождь: тонкие стрики вниз, быстрые, слегка голубые. Ветер (косые
     // струи + порывы) подставляется каждый кадр в fx_update из интенсивности.
+    // collide=1: капля гибнет о рельеф и поверхность воды (не пролетает
+    // сквозь море/озеро/склон).
     {
         ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.12f,
             .speed0 = 18.0f, .speed1 = 30.0f,
@@ -514,7 +516,7 @@ void fx_register_builtin(void)
             .size0 = 0.06f, .size1 = 0.04f,
             .alpha0 = 0.5f, .alpha1 = 0.0f,
             .r = 0.7f, .g = 0.8f, .b = 1.0f,
-            .gravity = 6.0f, .drag = 0.1f, .streak = 1 };
+            .gravity = 6.0f, .drag = 0.1f, .streak = 1, .collide = 1 };
         fx_register("rain", &pp, 1);
     }
     // Брызги: мелкие всплески капель о землю (ливень, fx_update спавнит
@@ -529,7 +531,8 @@ void fx_register_builtin(void)
             .gravity = 5.0f, .drag = 1.2f };
         fx_register("splash", &pp, 1);
     }
-    // Снег: медленно падает, покачивается
+    // Снег: медленно падает, покачивается. collide=2: ложится на рельеф
+    // и поверхность воды, коротко гаснет (не уходит сквозь землю/море).
     {
         ParticleParams pp = { .dir = {0,-1,0}, .spread = 0.1f,
             .speed0 = 0.5f, .speed1 = 1.2f,
@@ -537,7 +540,7 @@ void fx_register_builtin(void)
             .size0 = 0.08f, .size1 = 0.05f,
             .alpha0 = 0.9f, .alpha1 = 0.0f,
             .r = 1.0f, .g = 1.0f, .b = 1.0f,
-            .gravity = 0.4f, .drag = 1.0f, .sway = 0.7f };
+            .gravity = 0.4f, .drag = 1.0f, .sway = 0.7f, .collide = 2 };
         fx_register("snow", &pp, 1);
     }
     // Пыль (шаги/сухость): лёгкая, серая, покачивается

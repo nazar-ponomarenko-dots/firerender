@@ -118,6 +118,8 @@ typedef struct {
     float ground_height;      // высота дымки у земли, м
     float density_field;      // доп. туман над полем пшеницы
     float field_height;       // высота полевого тумана, м
+    float density_water;      // туман над водоёмами (на метр пути)
+    float water_height;       // высота тумана над уровнем воды, м
     float color[3];           // БАЗОВЫЙ цвет тумана (везде)
     float color_sun[3];       // цвет солнечного рассеяния (тёплый, у солнца)
     float glare;              // ореол у самого солнца

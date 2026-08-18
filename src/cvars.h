@@ -76,4 +76,9 @@ const Cvar *cvar_at(int i);
 int cvar_load_config(const char *path);
 void cvar_save_config(const char *path);
 
+// Сброс ВСЕХ графических cvar'ов (имя начинается на "r_") к значениям по
+// умолчанию (def). Возвращает число сброшенных переменных. Чит-переменные
+// (CVAR_CHEAT) не трогаются.
+int cvar_reset_graphics(void);
+
 #endif

@@ -837,11 +837,19 @@ void renderer_end(Game *g, float dt)
         float mw = hud_text_width(g->ui_msg);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.55f };
         const float fg[4] = { 0.9f, 0.95f, 1.0f, 1.0f };
+        // Блендинг включаем САМИ: hud_text_draw/hud_rect_draw по контракту
+        // GL-состояние не ставят (hud.h). Раньше состояние «утекало» из блока
+        // прицела, и при r_crosshair 0 сообщение рисовалось без альфы —
+        // непрозрачный фон и залитые «дырки» в буквах.
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         float my = s_vh * 0.62f;
         hud_rect_draw(s_vw, s_vh, (s_vw - mw) * 0.5f - 16.0f, my - 2.0f,
                       mw + 32.0f, hud_text_line_height() + 8.0f, bg);
         hud_text_draw(s_vw, s_vh, (s_vw - mw) * 0.5f,
                       my + hud_text_ascent(), g->ui_msg, fg);
+        glDisable(GL_BLEND);
     }
 
     // snd_debug: панелька справа сверху — какие звуки играют сейчас

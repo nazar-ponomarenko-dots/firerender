@@ -16,6 +16,7 @@
 #include "gl_loader.h"
 #include "resources.h"
 #include "shader.h"
+#include "water.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -47,6 +48,7 @@ typedef struct {
     int blend;              // 0 альфа / 1 аддитив
     int streak;             // вытянуть вдоль скорости
     int bounce;             // отскок от земли
+    int collide;            // 1 = гибнет о террейн/воду, 2 = ложится и гаснет
     int active;
 } Particle;
 
@@ -203,6 +205,7 @@ void particles_emit(const ParticleParams *par)
     q->blend = par->blend;
     q->streak = par->streak;
     q->bounce = par->bounce;
+    q->collide = par->collide;
     q->active = 1;
 }
 
@@ -247,6 +250,27 @@ void particles_update(float dt)
                 q->vy = -q->vy * 0.35f;
                 q->vx *= 0.5f; q->vz *= 0.5f;
                 if (q->vy < 0.8f) q->bounce = 0;   // затухло — лежит
+            }
+        }
+
+        // Столкновение с поверхностью (дождь/снег): рельеф ИЛИ уровень воды —
+        // выше то из двух. Дождевая капля гибнет о воду/землю; снежинка
+        // ложится на поверхность и коротко гаснет.
+        if (q->collide && p->world && q->vy < 0.0f) {
+            float h = sample_height(p->world, q->x, q->z);
+            float ws = water_surface_at(p->world, q->x, q->z);
+            if (ws > h) h = ws;                    // вода выше рельефа — в воде
+            if (q->y <= h + 0.03f) {
+                if (q->collide == 1) {
+                    q->active = 0;                 // дождь: капля утонула
+                    continue;
+                }
+                // снег: ложится и гаснет (остаток жизни короткий — fade)
+                q->y = h + 0.03f;
+                q->vx = q->vy = q->vz = 0.0f;
+                q->gravity = 0.0f; q->sway = 0.0f;
+                if (q->life > 0.5f) q->life = 0.5f;
+                q->collide = 0;                    // лежит — больше не проверяем
             }
         }
     }

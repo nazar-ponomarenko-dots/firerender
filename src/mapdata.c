@@ -56,6 +56,8 @@ static MapFog s_fog = {
     .ground_height = 5.0f,
     .density_field = 0.032f,
     .field_height = 8.0f,
+    .density_water = 0.030f,
+    .water_height = 4.0f,
     .color = { 0.52f, 0.56f, 0.60f },      // базовый цвет тумана (дымка)
     .color_sun = { 0.85f, 0.62f, 0.45f },  // тёплый к солнцу
     .glare = 0.20f,
@@ -595,6 +597,10 @@ int mapdata_load(const char *path)
                                               s_fog.density_field);
         s_fog.field_height = (float)json_num(json_find(fg, "field_height"),
                                              s_fog.field_height);
+        s_fog.density_water = (float)json_num(json_find(fg, "density_water"),
+                                              s_fog.density_water);
+        s_fog.water_height = (float)json_num(json_find(fg, "water_height"),
+                                             s_fog.water_height);
         const JsonNode *col = json_find(fg, "color");
         if (col && json_array_len(col) == 3)
             parse_vec3(col, s_fog.color, 0.0f);

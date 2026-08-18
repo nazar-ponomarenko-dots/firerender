@@ -18,6 +18,7 @@
 #include "resources.h"
 #include "shader.h"
 #include "shadow.h"
+#include "water.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
@@ -33,6 +34,7 @@ static const int   s_res[VF_CASCADES] = { VF_RES0, VF_RES1, VF_RES2 };
 static int    s_on = 0;
 static MapFog s_cfg;   // настройки из map/map.json (fog = { ... })
 static const WorldState *s_world;   // рельеф и поле (плотность тумана)
+static float  s_wcol[3] = { 0.05f, 0.15f, 0.22f };   // тон тумана над водой
 
 static GLuint s_fbo = 0, s_tex = 0;   // приёмник композита bloom (полный экран)
 static GLuint s_prog = 0, s_vao = 0, s_vbo = 0;
@@ -45,6 +47,7 @@ static GLint u_wetness, u_skycolor;
 static GLint u_heightmap, u_worldsize, u_hmin, u_hmax, u_time;
 static GLint u_haze, u_hazeh;
 static GLint u_noise;   // img/noise.png (unit 12) — неравномерность дымки
+static GLint u_wcol;    // цвет тумана над водой (средний цвет водоёмов)
 static GLuint s_noise_tex = 0;
 static GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES], u_shadowbias[SHADOW_CASCADES];
 static GLint u_shadowgrad[SHADOW_CASCADES], u_shadowon;
@@ -67,9 +70,12 @@ int voxfog_mode(void)           { return s_mode; }
 GLuint voxfog_texture(void)     { return s_tex; }
 GLuint voxfog_fbo(void)         { return s_fbo; }
 
-// Плотность тумана в точке мира (на метр пути) — из map.json
-static float vf_density(float x, float y, float z)
+// Плотность тумана в точке мира (на метр пути) — из map.json.
+// Возвращает базовую плотность (земля/поле) и пишет в *wout плотность
+// тумана над водоёмами (уровень воды, цвет — из water.c).
+static float vf_density(float x, float y, float z, float *wout)
 {
+    *wout = 0.0f;
     float h = sample_height(s_world, x, z);
     float up = y - h;
     if (up < -1.0f) return 0.0f;              // под рельефом — тумана нет
@@ -82,16 +88,29 @@ static float vf_density(float x, float y, float z)
         z >= s_world->field_z0 && z <= s_world->field_z0 + s_world->field_d)
         if (up < s_cfg.field_height)
             d += s_cfg.density_field * (1.0f - up / s_cfg.field_height);
+    // туман над водоёмом: слой у поверхности воды (цвет — из водоёма,
+    // подаётся в шейдер отдельно). Тоньше слоя — плотнее.
+    if (s_cfg.density_water > 0.0f && s_cfg.water_height > 0.1f) {
+        float ws = water_surface_at(s_world, x, z);
+        if (ws > -1e8f) {
+            float uw = y - ws;
+            if (uw > 0.0f && uw < s_cfg.water_height) {
+                float dw = s_cfg.density_water * (1.0f - uw / s_cfg.water_height);
+                *wout = dw * s_cfg.strength;
+            }
+        }
+    }
     d *= s_cfg.strength;
     if (d > 0.2f) d = 0.2f;
     return d;
 }
 
-// Перестроить каскад c (центр закреплён к мировой сетке вокселей)
+// Перестроить каскад c (центр закреплён к мировой сетке вокселей).
+// Формат RG8: R = базовая плотность, G = плотность тумана над водой.
 static void vf_rebuild(int c)
 {
     float cell = s_box[c] / s_res[c];
-    unsigned char *buf = malloc((size_t)s_res[c] * s_res[c] * s_res[c]);
+    unsigned char *buf = malloc((size_t)s_res[c] * s_res[c] * s_res[c] * 2);
     if (!buf) return;
     const float *cen = s_center[c];
     for (int z = 0; z < s_res[c]; z++)
@@ -100,14 +119,16 @@ static void vf_rebuild(int c)
                 float wx = cen[0] + ((float)x + 0.5f - s_res[c] * 0.5f) * cell;
                 float wy = cen[1] + ((float)y + 0.5f - s_res[c] * 0.5f) * cell;
                 float wz = cen[2] + ((float)z + 0.5f - s_res[c] * 0.5f) * cell;
-                float d = vf_density(wx, wy, wz);
-                buf[(z * s_res[c] + y) * s_res[c] + x] =
-                    (unsigned char)(d * 255.0f);
+                float dw = 0.0f;
+                float d = vf_density(wx, wy, wz, &dw);
+                size_t k = (size_t)((z * s_res[c] + y) * s_res[c] + x) * 2;
+                buf[k]     = (unsigned char)(d * 255.0f);
+                buf[k + 1] = (unsigned char)(dw * 255.0f);
             }
     glBindTexture(GL_TEXTURE_3D, s_tex3d[c]);
     glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0,
                     s_res[c], s_res[c], s_res[c],
-                    GL_RED, GL_UNSIGNED_BYTE, buf);
+                    GL_RG, GL_UNSIGNED_BYTE, buf);
     free(buf);
 }
 
@@ -139,6 +160,7 @@ static void voxfog_prog_init(void)
     u_haze       = glGetUniformLocation(s_prog, "uHaze");
     u_hazeh      = glGetUniformLocation(s_prog, "uHazeH");
     u_noise      = glGetUniformLocation(s_prog, "uNoise");
+    u_wcol       = glGetUniformLocation(s_prog, "uWColor");
     for (int c = 0; c < VF_CASCADES; c++) {
         char name[64];
         snprintf(name, sizeof name, "uFogTex%d", c);
@@ -172,6 +194,7 @@ static void voxfog_prog_init(void)
         glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
     glUniform1i(u_heightmap, 10);                // карта высот (дымка у земли)
     glUniform1i(u_noise, 12);                    // img/noise.png (шум дымки)
+    glUniform3f(u_wcol, s_wcol[0], s_wcol[1], s_wcol[2]);   // тон тумана над водой
     glUseProgram(0);
 }
 
@@ -189,6 +212,26 @@ void voxfog_init(const WorldState *w, int vw, int vh)
 {
     s_world = w;
     mapdata_fog(&s_cfg);
+    // Тон тумана над водоёмами: средний тон всех водоёмов карты (взвешенный
+    // по радиусу/ширине, чтобы море не перекрашивало туман над лужей).
+    {
+        float sum[3] = { 0, 0, 0 }, tw = 0.0f;
+        int nw = mapdata_water_count();
+        for (int i = 0; i < nw; i++) {
+            const MapWater *mw = mapdata_water(i);
+            float wi = mw->type == WATER_RIVER ? mw->width
+                                               : (mw->radius > 1.0f ? mw->radius : 1.0f);
+            if (wi <= 0.0f) wi = 1.0f;
+            for (int k = 0; k < 3; k++) sum[k] += mw->color[k] * wi;
+            tw += wi;
+        }
+        if (tw > 0.0f) {
+            for (int k = 0; k < 3; k++) s_wcol[k] = sum[k] / tw;
+            // туман чуть светлее и мягче чистой воды — не стена, а испарение
+            float l = 0.5f * (s_wcol[0] + s_wcol[1] + s_wcol[2]) / 3.0f + 0.25f;
+            for (int k = 0; k < 3; k++) s_wcol[k] = s_wcol[k] * 0.6f + 0.4f * l;
+        }
+    }
     // Шум дымки: img/noise.png (REPEAT), общая текстура ресурсов
     if (!s_noise_tex)
         s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
@@ -208,8 +251,8 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, s_res[c], s_res[c], s_res[c],
-                     0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, s_res[c], s_res[c], s_res[c],
+                     0, GL_RG, GL_UNSIGNED_BYTE, NULL);
         memset(s_center[c], 0, sizeof s_center[c]);
     }
 
