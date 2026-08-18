@@ -29,7 +29,6 @@ static SDL_AudioDeviceID s_dev = 0;
 static SDL_AudioSpec s_dev_spec;           // формат устройства
 static SDL_AudioStream *s_chan[AUDIO_CHANNELS];
 static Sound *s_chan_snd[AUDIO_CHANNELS];  // звук, играющий на канале
-static float s_chan_vol[AUDIO_CHANNELS];
 
 // Фоновая петля
 static SDL_AudioStream *s_loop = NULL;
@@ -94,7 +93,6 @@ void audio_init(void)
         s_chan[i] = SDL_CreateAudioStream(NULL, &s_dev_spec);
         if (s_chan[i]) SDL_BindAudioStream(s_dev, s_chan[i]);
         s_chan_snd[i] = NULL;
-        s_chan_vol[i] = 1.0f;
     }
     s_loop = SDL_CreateAudioStream(NULL, &s_dev_spec);
     if (s_loop) SDL_BindAudioStream(s_dev, s_loop);
@@ -187,7 +185,6 @@ void audio_play(Sound *s, float volume, float pitch)
     SDL_SetAudioStreamGain(ch, volume * snd_gain("snd_sfx"));
     SDL_PutAudioStreamData(ch, s->data, (int)s->len);
     s_chan_snd[idx] = s;
-    s_chan_vol[idx] = volume;
 }
 
 void audio_loop_start(Sound *s, float volume)

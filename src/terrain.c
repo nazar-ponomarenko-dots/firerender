@@ -214,10 +214,12 @@ static int s_static_baked = 0;
 // кромки юбки drop = TERRAIN_SKIRT_DEPTH (шейдер: y = h - drop).
 
 #define TERRAIN_SKIRT_DEPTH 4.0f    // глубина юбки, м (скрывает стыки LOD)
-// Дистанции переключения LOD (до ближайшей точки тайла), м
-#define TERRAIN_LOD1_DIST 200.0f
-#define TERRAIN_LOD2_DIST 500.0f
-#define TERRAIN_LOD3_DIST 1200.0f
+// Дистанции переключения LOD (до ближайшей точки тайла), м.
+// Реализованы как cvar'ы r_terrain_lod1..3: можно тюнить дальность отрисовки
+// без пересборки (например, на слабых машинах уменьшить LOD3 = грубее дальний план).
+static float s_lod1 = 200.0f;
+static float s_lod2 = 500.0f;
+static float s_lod3 = 1200.0f;
 static const float s_lod_step[TERRAIN_LODS] = { 2.0f, 8.0f, 32.0f, 128.0f };
 
 // Растущие буферы вершин/индексов (один VBO+IBO на весь рельеф)
@@ -442,6 +444,11 @@ static void terrain_draw_tiles(const TerrainParams *p,
 {
     if (!p->tiles) return;               // OOM при построении — нечего рисовать
     int shadow = (rc->pass == RP_SHADOW);
+    // LOD-дистанции из cvar'ов (r_terrain_lod1..3) — применяются сразу
+    float lod1 = cvar_get("r_terrain_lod1");
+    float lod2 = cvar_get("r_terrain_lod2");
+    float lod3 = cvar_get("r_terrain_lod3");
+    s_lod1 = lod1; s_lod2 = lod2; s_lod3 = lod3;
     Frustum lf;                              // фрустум света (для тени)
     if (shadow) frustum_build(&lf, rc->shadow_vp);
     int dbg_t = 0, dbg_n = 0, dbg_lod[4] = {0};
@@ -460,9 +467,9 @@ static void terrain_draw_tiles(const TerrainParams *p,
                 : box <= 96.0f ? (d2 < 96.0f * 96.0f ? 1 : 2)
                 :                (d2 < 256.0f * 256.0f ? 2 : 3);
         } else {
-            lod = d2 < TERRAIN_LOD1_DIST * TERRAIN_LOD1_DIST ? 0
-                : d2 < TERRAIN_LOD2_DIST * TERRAIN_LOD2_DIST ? 1
-                : d2 < TERRAIN_LOD3_DIST * TERRAIN_LOD3_DIST ? 2 : 3;
+            lod = d2 < s_lod1 * s_lod1 ? 0
+                : d2 < s_lod2 * s_lod2 ? 1
+                : d2 < s_lod3 * s_lod3 ? 2 : 3;
         }
         if (!t->count[lod]) continue;
         dbg_t += t->count[lod] / 3; dbg_n++; dbg_lod[lod]++;
@@ -580,6 +587,14 @@ void terrain_node_render(SceneNode *n, float dt)
     (void)dt;
     TerrainParams *p = n->params;
     const RendererContext *rc = p->rc;
+
+    // Регистрация LOD-дистанций как cvar'ов (no-op при повторе).
+    cvar_register_ex("r_terrain_lod1", s_lod1, 10.0f, 2000.0f, CVAR_ARCHIVE,
+                     "рельеф LOD1: дальность детальной сетки, м");
+    cvar_register_ex("r_terrain_lod2", s_lod2, 20.0f, 4000.0f, CVAR_ARCHIVE,
+                     "рельеф LOD2: дальность средней сетки, м");
+    cvar_register_ex("r_terrain_lod3", s_lod3, 30.0f, 8000.0f, CVAR_ARCHIVE,
+                     "рельеф LOD3: дальность грубой сетки, м");
 
     // Теневой проход (RP_SHADOW): глубина рельефа в текущий каскад.
     // Оркестрацию делает shadow.c (см. shadow_render в renderer_frame).

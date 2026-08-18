@@ -18,6 +18,7 @@
 #include "events.h"
 #include "json.h"
 #include "render_ctx.h"
+#include "frustum.h"
 #include "resources.h"
 #include "shader.h"
 #include "stb_image.h"
@@ -181,6 +182,25 @@ static float read_comp(const unsigned char *bin, long base, const GlbAcc *a,
         case C_BYTE:   return (float)((signed char)p[0]);
     }
     return 0;
+}
+// Безопасное чтение индекса: только беззнаковые целые типа SCALAR.
+// Возвращает -1 на невалидный accessor/тип, иначе индекс в диапазоне [0,maxIdx].
+static long read_index(const unsigned char *bin, long base, const GlbAcc *a,
+                       int elem, long maxIdx)
+{
+    if (a->vec != 1) return -1;
+    long idx = -1;
+    int sz = comp_size(a->comp);
+    const unsigned char *p = bin + base + (long)elem * sz;
+    switch (a->comp) {
+        case C_UINT:   { unsigned int v; memcpy(&v, p, 4); idx = (long)v; break; }
+        case C_USHORT: { unsigned short v; memcpy(&v, p, 2); idx = (long)v; break; }
+        case C_UBYTE:  { idx = (long)p[0]; break; }
+        default: return -1;   // FLOAT/SHORT/BYTE ненадёжны как индексы → отбросить
+    }
+    if (idx < 0) return -1;
+    if (maxIdx > 0 && idx >= maxIdx) return -1;   // вне диапазона вершин примитива
+    return idx;
 }
 static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
                         int elem, float *out)
@@ -417,8 +437,10 @@ GlbModel *glb_parse_file(const char *path)
                     if (ai) {
                         long idx_base = ai->bufferView >= 0 && ai->bufferView < bv_n
                                         ? bvs[ai->bufferView].byteOffset + ai->byteOffset : 0;
-                        for (long i = 0; i < ai->count; i++)
-                            b_push_i(bk, base + (unsigned int)read_comp(bin, idx_base, ai, (int)i, 0));
+                        for (long i = 0; i < ai->count; i++) {
+                            long ii = read_index(bin, idx_base, ai, (int)i, nv);
+                            if (ii >= 0) b_push_i(bk, base + (unsigned int)ii);
+                        }
                     } else {
                         for (long i = 0; i < nv; i++) b_push_i(bk, base + (unsigned int)i);
                     }
@@ -530,6 +552,7 @@ typedef struct {
     SceneUniforms su;
     GLint u_model, u_tex, u_specular;
     float scale;
+    float radius;                  // огранич. сфера модели (в мировом масштабе)
 } GlbParams;
 
 static DrawItem *build_item(const GlbItem *gi, GLuint prog)
@@ -542,6 +565,8 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog)
     const size_t elem = 8 * sizeof(float);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->vcount * elem), NULL, GL_STATIC_DRAW);
     float *cpu = malloc((size_t)gi->vcount * 8 * sizeof(float));
+    if (!cpu) { SDL_Log("glb: нехватка памяти на CPU-буфер вершин"); glDeleteVertexArrays(1, &d->vao);
+                glDeleteBuffers(1, &d->vbo); free(d); return NULL; }
     for (int i = 0; i < gi->vcount; i++) {
         cpu[8 * i + 0] = gi->verts[3 * i + 0];
         cpu[8 * i + 1] = gi->verts[3 * i + 1];
@@ -626,11 +651,22 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     p->u_specular = glGetUniformLocation(prog, "uSpecular");
 
     p->items = calloc((size_t)gm->count, sizeof *p->items);
-    p->count = gm->count;
+    p->count = 0;
+    p->radius = 0.0f;
     for (int i = 0; i < gm->count; i++) {
         DrawItem *bi = build_item(&gm->items[i], prog);
-        p->items[i] = *bi; free(bi);   // структура скопирована — обёртку освободить
+        if (!bi) continue;                 // OOM-пропуск, p->items[i] остаётся нулевой
+        DrawItem *d = &p->items[p->count++];
+        *d = *bi; free(bi);                // структура скопирована — обёртку освободить
+        // огранич. сфера из геометрии бакета (вершины уже в мировых коорд. GLB)
+        for (int v = 0; v < gm->items[i].vcount; v++) {
+            float dx = gm->items[i].verts[3*v+0], dy = gm->items[i].verts[3*v+1],
+                  dz = gm->items[i].verts[3*v+2];
+            float r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 > p->radius) p->radius = r2;
+        }
     }
+    p->radius = sqrtf(p->radius) * p->scale;
     glb_model_free(gm);
 
     glUseProgram(prog);
@@ -650,6 +686,8 @@ void glb_node_render(SceneNode *n, float dt)
     (void)dt;
     GlbParams *p = n->params;
     if (!p || p->rc->pass == RP_SHADOW) return;
+    if (!frustum_test_sphere(&p->rc->frustum, n->pos[0], n->pos[1], n->pos[2], p->radius))
+        return;
 
     float model[16] = {
         p->scale, 0, 0, 0,

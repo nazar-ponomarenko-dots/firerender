@@ -563,14 +563,17 @@ void cmd_glb(const char *args)
     float pos[3] = { x, y, z };
     SceneNode *nd = NULL;
     // авто-выбор: есть скин+анимация -> скелетный путь (skinning)
-    if (glb_anim_has_anim(path))
+    int is_anim = glb_anim_has_anim(path);
+    if (is_anim)
         nd = glb_anim_make_node(path, pos, scale, renderer_context());
     else
         nd = glb_make_node(path, pos, scale, renderer_context());
     if (!nd) { console_print("glb: не удалось загрузить %s", path); return; }
     anim_last_hook();
     node_add(g->root, nd);
-    if (glb_anim_clip_count(nd) > 0) s_last_anim = nd;
+    // glb_anim_clip_count/… рассчитаны ТОЛЬКО на скелетный узел (AnimParams).
+    // Для статичного GlbInstance у него нет поля data — читать нельзя (SEGV).
+    if (is_anim && glb_anim_clip_count(nd) > 0) s_last_anim = nd;
     console_print("glb: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
 }
 

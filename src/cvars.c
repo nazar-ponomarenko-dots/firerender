@@ -8,12 +8,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-static Cvar s_cvars[CVARS_MAX];
-static int s_count = 0;
+// Реестр растёт динамически (realloc), лимита нет. ВАЖНО: Cvar содержит
+// фиксированные char[] (name/str/help), поэтому realloc лишь переносит
+// структуры; снаружи не держите `const Cvar*` между двумя cvar_register.
+static Cvar *s_cvars = NULL;
+static int  s_cap = 0;         // вместимость массива
+static int  s_count = 0;       // занято
 
 void cvar_init(void)
 {
+    free(s_cvars);
+    s_cvars = NULL;
+    s_cap = 0;
     s_count = 0;
+}
+
+// Выделяет слот под новую переменную (растит массив) или NULL.
+static Cvar *cvar_slot_new(void)
+{
+    if (s_count >= s_cap) {
+        int ncap = s_cap ? s_cap * 2 : CVARS_MAX;
+        Cvar *n = realloc(s_cvars, (size_t)ncap * sizeof *n);
+        if (!n) return NULL;
+        s_cvars = n;
+        s_cap = ncap;
+    }
+    return &s_cvars[s_count++];
 }
 
 int cvar_index(const char *name)
@@ -29,8 +49,8 @@ void cvar_register_ex(const char *name, float def, float min, float max,
 {
     if (!name || !name[0]) return;
     if (cvar_index(name) >= 0) return;
-    if (s_count >= CVARS_MAX) return;
-    Cvar *c = &s_cvars[s_count++];
+    Cvar *c = cvar_slot_new();
+    if (!c) return;
     snprintf(c->name, sizeof c->name, "%s", name);
     c->def = def;
     c->value = def;

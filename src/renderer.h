@@ -14,6 +14,7 @@
 #ifndef RENDERER_H
 #define RENDERER_H
 #include "game.h"
+#include "gpu.h"
 #include "render_ctx.h"
 #include "scene.h"
 
@@ -46,7 +47,7 @@ void renderer_set_wireframe(int on);
 
 // Cubemap reflection texture (6 граней от позиции игрока, вода сэмплит
 // её по вектору отражения; обновляется по мере движения игрока).
-GLuint renderer_refl_cubemap(void);
+GpuTex renderer_refl_cubemap(void);
 
 // Cubemap capture: отрендерить 6 граней в позиции pos и сохранить их
 // в cubemaps/*.png (размер size, лимит 512).

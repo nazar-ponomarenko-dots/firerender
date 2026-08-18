@@ -40,4 +40,15 @@ void events_unlisten(int type, EventListener fn, void *user);
 // Рассылка: все подписчики типа вызываются в порядке подписки.
 void events_emit(int type, const void *a, const void *b);
 
+// Отложенная рассылка: событие ставится в очередь и рассылается позже из
+// events_flush_deferred() в безопасной точке главного цикла. Позволяет
+// безопасно эмитить события изнутри колбэков (защита от reentrancy без
+// ручных снимков): слушатель, убравший/добавивший подписки в этом кадре,
+// не ломает итерацию. Хранится ТОЛЬКО (type, a, b) — без вложенного
+// владения (как и events_emit).
+void events_emit_deferred(int type, const void *a, const void *b);
+
+// Доставляет отложенные события в порядке добавления. Звать раз за кадр.
+void events_flush_deferred(void);
+
 #endif

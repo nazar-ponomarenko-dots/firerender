@@ -20,6 +20,7 @@
 #include "json.h"
 #include "resources.h"
 #include "shader.h"
+#include "frustum.h"
 #include "stb_image.h"
 
 #include <math.h>
@@ -46,7 +47,7 @@ static int tv(const char*t){ if(!t)return 1;
     if(!strcmp(t,"MAT4"))return 16;
     return 1; }
 
-typedef struct { int bufferView; long byteOffset; int comp, vec, norm; long count; } GA;
+typedef struct { int bufferView; long byteOffset; int comp, vec, norm; int stride; long count; } GA;
 typedef struct { long byteOffset, byteLength; int byteStride; } GB;
 
 static void m4id(float m[16]){ memset(m,0,16*sizeof(float)); m[0]=m[5]=m[10]=m[15]=1; }
@@ -70,14 +71,24 @@ static void quat_mat(float m[16],const float q[4],const float s[3],const float t
     m[12]=t[0]; m[13]=t[1]; m[14]=t[2];
 }
 static float rfv(const unsigned char*bin,long base,const GA*a,int elem,int comp){
-    int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->vec*sz+(long)comp*sz;
+    int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->stride+(long)comp*sz;
     switch(a->comp){ case C_FLOAT:{float v;memcpy(&v,p,4);return v;}
         case C_UINT:{unsigned v;memcpy(&v,p,4);return (float)v;}
         case C_USHORT:{unsigned short v;memcpy(&v,p,2);return (float)v;}
         case C_SHORT:{short v;memcpy(&v,p,2);return (float)v;}
         case C_UBYTE:return (float)p[0]; case C_BYTE:return (float)((signed char)p[0]);} return 0;}
+// Безопасное чтение индекса: только беззнаковые SCALAR-типы, диапазон [0,maxIdx].
+static long rfi(const unsigned char*bin,long base,const GA*a,int elem,long maxIdx){
+    if(a->vec!=1) return -1;
+    long idx=-1; int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->stride;
+    switch(a->comp){ case C_UINT:{unsigned v;memcpy(&v,p,4);idx=(long)v;break;}
+        case C_USHORT:{unsigned short v;memcpy(&v,p,2);idx=(long)v;break;}
+        case C_UBYTE:idx=(long)p[0];break; default:return -1;}
+    if(idx<0) return -1;
+    if(maxIdx>0&&idx>=maxIdx) return -1;
+    return idx;}
 static void rvv(const unsigned char*bin,long base,const GA*a,int elem,float*out){
-    long st=(long)a->vec*cs(a->comp); const unsigned char*p=bin+base+(long)elem*st;
+    long st=a->stride; const unsigned char*p=bin+base+(long)elem*st;
     float f[16]={0};
     for(int c=0;c<a->vec;c++) switch(a->comp){
         case C_FLOAT:{float v;memcpy(&v,p+(long)c*4,4);f[c]=v;break;}
@@ -149,10 +160,14 @@ AnimGlb *glb_anim_parse(const char *path)
         accs[i].comp=(int)json_num(json_find(a,"componentType"),C_FLOAT);
         accs[i].vec=tv(json_str(json_find(a,"type"),"SCALAR"));
         accs[i].norm=json_bool(json_find(a,"normalized"),0);
-        accs[i].count=(long)json_num(json_find(a,"count"),0);}
+        accs[i].count=(long)json_num(json_find(a,"count"),0);
+        // Шаг между элементами: byteStride bufferView если задан, иначе плотная упаковка.
+        int bv_i=accs[i].bufferView, elem_sz=cs(accs[i].comp)*accs[i].vec;
+        accs[i].stride=(bv_i>=0&&bv_i<bv_n&&bvs[bv_i].byteStride>0)?bvs[bv_i].byteStride:elem_sz;}
 
     AnimGlb*out=calloc(1,sizeof* out);
     out->nodes=calloc((size_t)node_n,sizeof* out->nodes);
+    if(!out||(node_n>0&&!out->nodes)){ SDL_Log("glb_anim: %s — нехватка памяти",path); free(out); free(file); return NULL; }
     out->nnode=node_n;
     for(int i=0;i<node_n;i++) out->nodes[i].parent=-1;
     // родители и дети
@@ -181,12 +196,15 @@ AnimGlb *glb_anim_parse(const char *path)
     if(nskin>0){
         out->skins=calloc((size_t)nskin,sizeof* out->skins); out->nskin=nskin;
         out->skin_of_node=calloc((size_t)node_n,sizeof* out->skin_of_node);
+        if(!out->skins||(node_n>0&&!out->skin_of_node)){ out->nskin=0; }
         for(int i=0;i<node_n;i++)out->skin_of_node[i]=-1;
         for(int s=0;s<nskin;s++){const JsonNode*sk=json_array_get(sk_a,s);
             const JsonNode*jn=json_find(sk,"joints"); int jc=jn&&jn->type==JSON_ARRAY?json_array_len(jn):0;
+            if(jc<0||jc>32*1024*1024) jc=0;      // потолок на число суставов
             AnimSkin*S=&out->skins[s]; S->joint_count=jc;
             S->joints=calloc((size_t)(jc?jc:1),sizeof* S->joints);
             S->inv_bind=calloc((size_t)(jc?jc:1)*16,sizeof* S->inv_bind);
+            if(!S->joints||!S->inv_bind){ S->joint_count=0; continue; }
             for(int j=0;j<jc;j++)S->joints[j]=(int)json_num(json_array_get(jn,j),-1);
             int ibm=(int)json_num(json_find(sk,"inverseBindMatrices"),-1);
             if(ibm>=0&&ibm<acc_n&&accs[ibm].vec==16&&acc_fits(&accs[ibm],bvs,bv_n,(long)bin_len)){
@@ -236,11 +254,13 @@ AnimGlb *glb_anim_parse(const char *path)
                 continue;
             }
             AnimPrim*o=realloc(out->prims,(size_t)(out->nprim+1)*sizeof* out->prims);
-            out->prims=o; AnimPrim*P=&out->prims[out->nprim++]; memset(P,0,sizeof* P);
+            if(!o) goto prim_fail; out->prims=o;
+            AnimPrim*P=&out->prims[out->nprim++]; memset(P,0,sizeof* P);
             P->verts=malloc((size_t)nv*3*sizeof(float));
             P->normals=malloc((size_t)nv*3*sizeof(float));
             P->uvs=calloc((size_t)nv*2,sizeof(float));
             if(aj&&aw){ P->bone_idx=malloc((size_t)nv*4); P->bone_w=malloc((size_t)nv*4*sizeof(float)); }
+            if(!P->verts||!P->normals||!P->uvs||(aj&&aw&&(!P->bone_idx||!P->bone_w))) goto prim_fail;
             long pb=ap->bufferView>=0&&ap->bufferView<bv_n?bvs[ap->bufferView].byteOffset+ap->byteOffset:0;
             long nb=an&&an->bufferView>=0?bvs[an->bufferView].byteOffset+an->byteOffset:0;
             long ub=au&&au->bufferView>=0?bvs[au->bufferView].byteOffset+au->byteOffset:0;
@@ -263,16 +283,26 @@ AnimGlb *glb_anim_parse(const char *path)
                 }
             }
             if(ai){ long ib=ai->bufferView>=0&&ai->bufferView<bv_n?bvs[ai->bufferView].byteOffset+ai->byteOffset:0;
-                P->indices=malloc((size_t)ai->count*sizeof(unsigned int));
-                for(long i=0;i<ai->count;i++) P->indices[i]=(unsigned int)rfv(bin,ib,ai,(int)i,0);
-                P->index_count=(int)ai->count;
+                P->indices=malloc((size_t)ai->count*sizeof(unsigned int)); if(!P->indices) goto prim_fail;
+                for(long i=0;i<ai->count;i++){ long ii=rfi(bin,ib,ai,(int)i,nv);
+                    if(ii>=0) P->indices[P->index_count++]=(unsigned int)ii; }
             }
             else {
                 P->indices=malloc((size_t)nv*sizeof(unsigned int));
+                if(!P->indices) goto prim_fail;
                 for(long i=0;i<nv;i++) P->indices[i]=(unsigned)i;
                 P->index_count=(int)nv;
             }
             P->vcount=(int)nv;
+            goto prim_ok;
+        prim_fail:
+            // Сбой аллокации: освободить недостроенный примитив и пропустить.
+            SDL_Log("glb_anim: %s — нехватка памяти на примитив",path);
+            free(P->verts); free(P->normals); free(P->uvs);
+            free(P->bone_idx); free(P->bone_w); free(P->indices);
+            out->nprim--;
+            continue;
+        prim_ok:;
             // материал (псевдо-PBR 2004)
             memcpy(P->tint,(float[]){1,1,1},sizeof P->tint); P->alpha=1; P->blend=MAT_BLEND_OPAQUE;
             P->cull=MAT_CULL_BACK; P->tile[0]=P->tile[1]=1; P->specular=0.2f;
@@ -344,6 +374,8 @@ AnimGlb *glb_anim_parse(const char *path)
                    acc_fits(&accs[outp],bvs,bv_n,(long)bin_len)){
                     GA*ti=&accs[inp],*vo=&accs[outp];
                     long nk=ti->count>16*1024*1024?0:ti->count;   // потолок против OOM/OOB
+                    // CUBICSPLINE требует output-count >= nk*3*comp (иначе rfv читает мимо акцессора)
+                    if(Samp->interp==ANIM_CUBIC&&vo->count<nk*3){ nk=0; }
                     Samp->comp=vo->vec; Samp->nkeys=nk;
                     // CUBICSPLINE хранит per key 3*comp (in-tangent, value,
                     // out-tangent); LINEAR/STEP — comp на ключ.
@@ -458,11 +490,14 @@ typedef struct{
     int skin_cap;           // вместимость skin[] (макс. joint_count по кожам)
     float*wtrs;             // рабочие TRS узлов: [i*10] = trans3+quat4+scl3 (анимир.)
     int cur_clip;           // номер активного клипа
+    float radius;           // огранич. сфера геометрии в мировом масштабе
 } AnimParams;
 
 // Глобальная матрица узла из рабочих TRS (анимир. компоненты в wtrs)
 static void node_global_mat(const AnimGlb*a,const float*wtrs,float*out,int idx){
     int chain[256],n=0,cur=idx;
+    // Петля с защитой от циклов родителя (p==cur) — глубина выше 256 обрезается,
+    // но такие иерархии патологические; остаётся консервативно.
     while(cur>=0&&n<256){chain[n++]=cur; int p=a->nodes[cur].parent; if(p==cur)break; cur=p;}
     m4id(out);
     for(int i=n-1;i>=0;i--){int ni=chain[i]; AnimNode*N=&a->nodes[ni];
@@ -593,7 +628,9 @@ static void anim_update(SceneNode*n,float dt){
 static void anim_render(SceneNode*n,float dt){
     (void)dt;
     AnimParams*p=n?n->params:NULL; if(!p||p->rc->pass==RP_SHADOW)return;
-    build_bones(p);
+    if(!frustum_test_sphere(&p->rc->frustum, n->pos[0], n->pos[1], n->pos[2], p->radius))
+        return;
+    // build_bones уже выполнен в anim_update для этого кадра — не дублируем.
     // Базовая матрица экземпляра: перенос + масштаб объекта. ВСЕ примитивы
     // рисуются в ней: скиннинг сам размещает геометрию (jointMatrix =
     // world[joint]*inverseBind уже в пространстве скелета), а внешний «удобный»
@@ -697,12 +734,18 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     p->u_specular=glGetUniformLocation(prog,"uSpecular"); p->u_bones=glGetUniformLocation(prog,"uBones");
     p->u_hasskin=glGetUniformLocation(prog,"uHasSkin"); p->u_uvtile=glGetUniformLocation(prog,"uUvTile");
     p->items=calloc((size_t)(a->ninst?a->ninst:1),sizeof* p->items); p->count=a->ninst;
+    p->radius=0.0f;
     for(int i=0;i<a->ninst;i++){
         AnimInstance*it=&a->instances[i]; AnimPrim*P=&a->prims[it->prim];
         int hs=(P->bone_idx&&it->skin>=0&&it->skin<a->nskin)?1:0;
         AnimDrawItem*bi=build_item(P,prog,hs,it->skin);
         p->items[i]=*bi; free(bi);   // структура скопирована — обёртку освободить
+        for(int v=0;v<P->vcount;v++){
+            float dx=P->verts[3*v+0], dy=P->verts[3*v+1], dz=P->verts[3*v+2];
+            float r2=dx*dx+dy*dy+dz*dz; if(r2>p->radius)p->radius=r2;
+        }
     }
+    p->radius=sqrtf(p->radius)*p->scale;
     p->node_world=malloc((size_t)(a->nnode? a->nnode:1)*16*sizeof(float));
     p->wtrs=calloc((size_t)(a->nnode? a->nnode:1)*10,sizeof(float));
     int jc=0; for(int s=0;s<a->nskin;s++)if(a->skins[s].joint_count>jc)jc=a->skins[s].joint_count;

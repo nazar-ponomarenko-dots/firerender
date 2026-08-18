@@ -310,9 +310,22 @@ static int input_word_start(void)
 }
 
 // --- Tab: дополнение имён команд и переменных ---------------------------------
-static const char *s_tab_matches[CON_MAX_COMMANDS + CVARS_MAX];
-static int s_tab_n = 0, s_tab_idx = 0;
+static const char **s_tab_matches = NULL;   // растущий массив совпадений
+static int s_tab_cap = 0, s_tab_n = 0, s_tab_idx = 0;
 static int s_tab_base_len = 0, s_tab_base_hash = 0;   // база последнего цикла
+
+static int tab_append(const char *m)
+{
+    if (s_tab_n + 1 > s_tab_cap) {
+        int ncap = s_tab_cap ? s_tab_cap * 2 : 128;
+        const char **n = realloc(s_tab_matches, (size_t)ncap * sizeof *n);
+        if (!n) return 0;
+        s_tab_matches = n;
+        s_tab_cap = ncap;
+    }
+    s_tab_matches[s_tab_n++] = m;
+    return 1;
+}
 
 static unsigned tab_hash(const char *s)
 {
@@ -338,11 +351,11 @@ static void input_complete(void)
         s_tab_n = 0;
         for (int i = 0; i < s_cmds_n; i++)
             if (strncmp(s_cmds[i].name, s_input + wstart, (size_t)wlen) == 0)
-                s_tab_matches[s_tab_n++] = s_cmds[i].name;
+                tab_append(s_cmds[i].name);
         for (int i = 0; i < cvar_count(); i++) {
             const Cvar *c = cvar_at(i);
             if (strncmp(c->name, s_input + wstart, (size_t)wlen) == 0)
-                s_tab_matches[s_tab_n++] = c->name;
+                tab_append(c->name);
         }
         if (s_tab_n == 0) return;        // нет совпадений — молчим
     }

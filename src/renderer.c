@@ -16,6 +16,7 @@
 #include "cvars.h"
 #include "game.h"
 #include "gl_loader.h"
+#include "gpu.h"
 #include "hud.h"
 #include "linalg.h"
 #include "mapdata.h"
@@ -44,9 +45,9 @@ static BloomParams s_bloom;
 // SSR — отражения экранного пространства (рельеф в дождь): сцена+отражение.
 static SsrParams s_ssr;
 // Кубомап отражений воды (6 граней, рендер от игрока — см. renderer_cubemap_pass)
-static GLuint s_refl_cubemap = 0;
-static GLuint s_refl_cubemap_fbo[6] = {0};
-static GLuint s_refl_cubemap_depth = 0;
+static GpuTex s_refl_cubemap = 0;
+static GpuFbo s_refl_cubemap_fbo[6] = {0};
+static GpuTex s_refl_cubemap_depth = 0;
 static int s_refl_cubemap_size = 256; // размер каждой грани
 static float s_cubemap_pos[3] = { 0, 0, 0 };  // центр последнего кубомапа
 static int s_cubemap_valid = 0;               // кубомап ещё не рендерился
@@ -54,8 +55,11 @@ static int s_cubemap_valid = 0;               // кубомап ещё не ре
 // без запаздывания при движении. 6 рендеров сцены 256x256 за кадр.
 static int s_active = 0;       // мир загружен: FBO существуют
 static int s_wire = 0;         // каркасный режим (cvar r_wireframe)
-static GLuint s_noise_tex = 0; // img/noise.png: неравномерность мокрости/дымки
+static GpuTex s_noise_tex = 0; // img/noise.png: неравномерность мокрости/дымки
 static int s_vw = 1280, s_vh = 720;   // размер окна в пикселях
+// Рендер-бэкенд (RHI): единственный девайс на процесс. Весь GL в этом файле
+// (пресет кадра, FBO граней, кубомап, состояние) — через gpu_*, не напрямую.
+static const GpuDevice *s_gpu = NULL;
 
 int renderer_vw(void) { return s_vw; }
 int renderer_vh(void) { return s_vh; }
@@ -66,27 +70,18 @@ void renderer_set_viewport(int vw, int vh)
 }
 
 // --- Cubemap reflection FBO ----------------------------------------------------
-static GLuint make_cubemap_color_tex(int size)
+static GpuTex make_cubemap_color_tex(int size)
 {
-    GLuint id;
-    glGenTextures(1, &id);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, id);
-    for (int face = 0; face < 6; face++) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8,
-                     size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    GpuTex id = gpu_tex_gen(s_gpu);
+    gpu_cubemap_rgba8(s_gpu, id, size);
+    gpu_tex_params_cubemap(s_gpu, id, 1);
     return id;
 }
 
-static GLuint load_cubemap_from_files(const char *dir, int *out_size)
+static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
 {
     static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
-    GLuint id = 0;
+    GpuTex id = 0;
     int size = 0;
     int first = 1;
 
@@ -119,22 +114,16 @@ static GLuint load_cubemap_from_files(const char *dir, int *out_size)
             continue;
         }
         if (first) {
-            glGenTextures(1, &id);
-            glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+            id = gpu_tex_gen(s_gpu);
             size = w;
             first = 0;
         }
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB8,
-                     w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
+        gpu_cubemap_face_rgb8(s_gpu, id, face, w, h, px);
         stbi_image_free(px);
     }
 
     if (id) {
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        gpu_tex_params_cubemap(s_gpu, id, 1);
         if (out_size) *out_size = size;
         SDL_Log("Loaded static cubemap from %s (%dx%d)", dir, size, size);
     }
@@ -145,9 +134,9 @@ static void make_cubemap_fbo(int size)
 {
     if (size <= 0) return;
     if (s_refl_cubemap) {
-        glDeleteTextures(1, &s_refl_cubemap);
-        glDeleteFramebuffers(6, s_refl_cubemap_fbo);
-        glDeleteTextures(1, &s_refl_cubemap_depth);
+        gpu_tex_delete(s_gpu, &s_refl_cubemap);
+        for (int i = 0; i < 6; i++) gpu_fbo_delete(s_gpu, &s_refl_cubemap_fbo[i]);
+        gpu_tex_delete(s_gpu, &s_refl_cubemap_depth);
     }
     s_refl_cubemap_size = size;
     // Try to load static cubemap from cubemaps/ directory
@@ -160,29 +149,21 @@ static void make_cubemap_fbo(int size)
         SDL_Log("Using static cubemap from cubemaps/ (%dx%d)", size, size);
     }
     // Глубина (общая для всех граней) - still needed for capture
-    glGenTextures(1, &s_refl_cubemap_depth);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, s_refl_cubemap_depth);
-    for (int face = 0; face < 6; face++) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24,
-                     size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    s_refl_cubemap_depth = gpu_tex_gen(s_gpu);
+    for (int face = 0; face < 6; face++)
+        gpu_cubemap_face_depth24(s_gpu, s_refl_cubemap_depth, face, size);
+    gpu_tex_params_cubemap(s_gpu, s_refl_cubemap_depth, 0);   // NEAREST
     // FBO для каждой грани (still needed for capture command)
     for (int face = 0; face < 6; face++) {
-        glGenFramebuffers(1, &s_refl_cubemap_fbo[face]);
-        glBindFramebuffer(GL_FRAMEBUFFER, s_refl_cubemap_fbo[face]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, s_refl_cubemap, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, s_refl_cubemap_depth, 0);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        s_refl_cubemap_fbo[face] = gpu_fbo_gen(s_gpu);
+        gpu_fbo_attach_cubemap_color(s_gpu, s_refl_cubemap_fbo[face],
+                                     s_refl_cubemap, face);
+        gpu_fbo_attach_cubemap_depth(s_gpu, s_refl_cubemap_fbo[face],
+                                     s_refl_cubemap_depth, face);
+        if (!gpu_fbo_complete(s_gpu))
             SDL_Log("Cubemap FBO face %d incomplete!", face);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gpu_bind_framebuffer(s_gpu, 0);
 }
 
 // --- Рендер-контекст: единое кадровое состояние сцены --------------------------
@@ -332,7 +313,7 @@ static void renderer_ctx_fill(Game *g)
             bias = sun->shadow_bias;
             bias_veg = sun->shadow_bias_veg;
         }
-        for (int c = 0; c < SHADOW_CASCADES; c++) {
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
             rc->shadow_tex[c] = shadow_texture(c);
             memcpy(rc->shadow_matrix[c], shadow_matrix(c),
                    sizeof rc->shadow_matrix[c]);
@@ -464,8 +445,8 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     // unit 8 делит юнит с картой мокрости у террейна — это ОДНА и та же
     // текстура.
     if (su->u_snowmask >= 0 && terrain_snow_mask_have()) {
-        glActiveTexture(GL_TEXTURE8);
-        glBindTexture(GL_TEXTURE_2D, terrain_snow_mask_tex());
+        gpu_active_texture(s_gpu, 8);
+        gpu_bind_2d(s_gpu, terrain_snow_mask_tex());
         glUniform1i(su->u_snowmask, 8);
     }
     if (su->u_worldsize >= 0)
@@ -475,21 +456,21 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     // граней кубомапа его НЕ биндим: текстура прикреплена к текущему FBO —
     // сэмплинг был бы фидбек-лупом (UB).
     if (su->u_reflection >= 0 && s_refl_cubemap && rc->pass != RP_CUBEMAP_FACE) {
-        glActiveTexture(GL_TEXTURE9);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, s_refl_cubemap);
+        gpu_active_texture(s_gpu, 9);
+        gpu_bind_cubemap(s_gpu, s_refl_cubemap);
         glUniform1i(su->u_reflection, 9);
     }
     // Шум мокрости/дымки (img/noise.png, REPEAT) — юнит 11
     if (su->u_noise >= 0 && s_noise_tex) {
-        glActiveTexture(GL_TEXTURE11);
-        glBindTexture(GL_TEXTURE_2D, s_noise_tex);
+        gpu_active_texture(s_gpu, 11);
+        gpu_bind_2d(s_gpu, s_noise_tex);
         glUniform1i(su->u_noise, 11);
     }
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         // Каскады на текстурных юнитах 3..6 (семплеры назначены при init)
         if (su->u_shadowmap[c] >= 0 && rc->shadow_tex[c]) {
-            glActiveTexture(GL_TEXTURE3 + c);
-            glBindTexture(GL_TEXTURE_2D, rc->shadow_tex[c]);
+            gpu_active_texture(s_gpu, 3 + c);
+            gpu_bind_2d(s_gpu, rc->shadow_tex[c]);
         }
         if (su->u_shadowmatrix[c] >= 0)
             glUniformMatrix4fv(su->u_shadowmatrix[c], 1, GL_FALSE,
@@ -499,11 +480,12 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         if (su->u_shadowgrad[c] >= 0)
             glUniform1f(su->u_shadowgrad[c], rc->shadow_grad[c]);
     }
-    glActiveTexture(GL_TEXTURE0);
+    gpu_active_texture(s_gpu, 0);
 }
 
 void renderer_setup(const WorldState *w, int vw, int vh)
 {
+    if (!s_gpu) s_gpu = gpu_create();   // RHI-бэкенд (GL): один на процесс
     memset(&s_bloom, 0, sizeof s_bloom);
     bloom_init(&s_bloom, vw, vh);
     ssr_init(&s_ssr, vw, vh);
@@ -531,10 +513,9 @@ void renderer_teardown(void)
     ssr_cleanup(&s_ssr);
     voxfog_cleanup();
     if (s_refl_cubemap) {
-        glDeleteTextures(1, &s_refl_cubemap);
-        glDeleteFramebuffers(6, s_refl_cubemap_fbo);
-        glDeleteTextures(1, &s_refl_cubemap_depth);
-        s_refl_cubemap = 0;
+        gpu_tex_delete(s_gpu, &s_refl_cubemap);
+        for (int i = 0; i < 6; i++) gpu_fbo_delete(s_gpu, &s_refl_cubemap_fbo[i]);
+        gpu_tex_delete(s_gpu, &s_refl_cubemap_depth);
     }
     if (s_noise_tex) {
         resources_texture_release(s_noise_tex);
@@ -549,7 +530,7 @@ void renderer_set_wireframe(int on)
     s_wire = on ? 1 : 0;
 }
 
-GLuint renderer_refl_cubemap(void)
+GpuTex renderer_refl_cubemap(void)
 {
     return s_refl_cubemap;
 }
@@ -608,11 +589,9 @@ void renderer_begin(void)
     prof_reset();
     float clear_rgb[3] = { 0.6f, 0.65f, 0.7f };
     if (s_active) sky_fog_color(clear_rgb);
-    glBindFramebuffer(GL_FRAMEBUFFER, s_active ? bloom_scene_fbo(&s_bloom) : 0);
-    glViewport(0, 0, s_vw, s_vh);
-    glClearColor(clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
-    glDepthMask(GL_TRUE);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    gpu_bind_framebuffer(s_gpu, s_active ? bloom_scene_fbo(&s_bloom) : 0);
+    gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
+    gpu_clear(s_gpu, clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
 }
 
 // --- Cubemap reflection pass ---------------------------------------------------
@@ -668,8 +647,7 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
     memcpy(orig_vp, rc->view_vp, sizeof orig_vp);
     Frustum orig_frustum;
     memcpy(&orig_frustum, &rc->frustum, sizeof orig_frustum);
-    GLint orig_fbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &orig_fbo);
+    int orig_fbo = gpu_fbo_current(s_gpu);
 
     float proj[16];
     mat4_perspective(proj, 90.0f * 3.14159f / 180.0f, 1.0f, rc->znear, rc->zfar);
@@ -704,14 +682,11 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
         vec3_normalize(rc->cam_up);
         frustum_build(&rc->frustum, viewproj);
 
-        glBindFramebuffer(GL_FRAMEBUFFER, s_refl_cubemap_fbo[face]);
-        glViewport(0, 0, s_refl_cubemap_size, s_refl_cubemap_size);
-        glClearColor(0.10f, 0.10f, 0.15f, 1.0f);
-        glDepthMask(GL_TRUE);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
+        gpu_bind_framebuffer(s_gpu, s_refl_cubemap_fbo[face]);
+        gpu_viewport(s_gpu, 0, 0, s_refl_cubemap_size, s_refl_cubemap_size);
+        gpu_clear(s_gpu, 0.10f, 0.10f, 0.15f, 1.0f);
+        gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 1);
+        gpu_cap(s_gpu, GPU_CAP_CULL_FACE, 1);
         render_part(world, 0.0f, 0);   // dt = 0: время сцены не двигать
     }
 
@@ -726,8 +701,8 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
     rc->cam_aspect = orig_aspect;
     memcpy(rc->view_vp, orig_vp, sizeof rc->view_vp);
     memcpy(&rc->frustum, &orig_frustum, sizeof rc->frustum);
-    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)orig_fbo);
-    glViewport(orig_vp[0], orig_vp[1], orig_vp[2], orig_vp[3]);
+    gpu_bind_framebuffer(s_gpu, (GpuFbo)orig_fbo);
+    gpu_viewport(s_gpu, orig_vp[0], orig_vp[1], orig_vp[2], orig_vp[3]);
 
     memcpy(s_cubemap_pos, pos, sizeof s_cubemap_pos);
     s_cubemap_valid = 1;
@@ -778,18 +753,14 @@ void renderer_frame(Game *g, float dt, int draw_3d)
                         (float)(t1 - t0) * 1000.0f /
                         (float)SDL_GetPerformanceFrequency());
         }
-#ifndef USE_GLES_PATH
-        glPolygonMode(GL_FRONT_AND_BACK, s_wire ? GL_LINE : GL_FILL);
-#endif
+gpu_wireframe(s_gpu, s_wire);
         render_3d(world, dt);
-#ifndef USE_GLES_PATH
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-#endif
+        gpu_wireframe(s_gpu, 0);
         did_3d = 1;
     }
     if (did_3d) {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, s_vw, s_vh);
+        gpu_bind_framebuffer(s_gpu, 0);
+        gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();
         // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
         // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
@@ -843,9 +814,9 @@ void renderer_end(Game *g, float dt)
         && cvar_get("r_crosshair") > 0.5f) {
         const float cx = s_vw * 0.5f, cy = s_vh * 0.5f;
         const float white[4] = { 1.0f, 1.0f, 1.0f, 0.9f };
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
+        gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
         // точка 3x3 px в центре
         hud_rect_draw(s_vw, s_vh, cx - 1.5f, cy - 1.5f, 3.0f, 3.0f, white);
     }
@@ -860,15 +831,15 @@ void renderer_end(Game *g, float dt)
         // GL-состояние не ставят (hud.h). Раньше состояние «утекало» из блока
         // прицела, и при r_crosshair 0 сообщение рисовалось без альфы —
         // непрозрачный фон и залитые «дырки» в буквах.
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
+        gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
         float my = s_vh * 0.62f;
         hud_rect_draw(s_vw, s_vh, (s_vw - mw) * 0.5f - 16.0f, my - 2.0f,
                       mw + 32.0f, hud_text_line_height() + 8.0f, bg);
         hud_text_draw(s_vw, s_vh, (s_vw - mw) * 0.5f,
                       my + hud_text_ascent(), g->ui_msg, fg);
-        glDisable(GL_BLEND);
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 0);
     }
 
     // snd_debug: панелька справа сверху — какие звуки играют сейчас
@@ -879,9 +850,9 @@ void renderer_end(Game *g, float dt)
         audio_active_names(sndbuf, sizeof sndbuf);
         snprintf(line, sizeof line, "SND: %s | steps: %d",
                  sndbuf[0] ? sndbuf : "-", g_step_calls);
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
+        gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.75f };
         hud_rect_draw(s_vw, s_vh, (float)s_vw - 470.0f, 8.0f, 462.0f, 26.0f, bg);
         // Текст по центру окошка: базовая линия = top + ascent
@@ -896,9 +867,9 @@ void renderer_end(Game *g, float dt)
         float total = prof_total_ms();
         float frame = dt * 1000.0f;
         float fps = frame > 0.001f ? 1000.0f / frame : 0.0f;
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
+        gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.75f };
         const float fg[4] = { 0.85f, 0.95f, 1.0f, 1.0f };
         const float dim[4] = { 0.62f, 0.66f, 0.74f, 1.0f };
@@ -960,15 +931,14 @@ void renderer_cubemap_capture_at(Game *g, const float *pos, int size)
     static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
 
     // Читаем каждую грань обратно из её FBO и сохраняем PNG
-    GLint orig_fbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &orig_fbo);
+    int orig_fbo = gpu_fbo_current(s_gpu);
     for (int face = 0; face < 6; face++) {
-        glBindFramebuffer(GL_FRAMEBUFFER, s_refl_cubemap_fbo[face]);
-        glViewport(0, 0, size, size);
+        gpu_bind_framebuffer(s_gpu, s_refl_cubemap_fbo[face]);
+        gpu_viewport(s_gpu, 0, 0, size, size);
         unsigned char *px = malloc((size_t)size * size * 3);
         unsigned char *flip = malloc((size_t)size * size * 3);
         if (px && flip) {
-            glReadPixels(0, 0, size, size, GL_RGB, GL_UNSIGNED_BYTE, px);
+            gpu_read_rgb(s_gpu, 0, 0, size, size, px);
             // PNG хранит строки сверху вниз, GL возвращает снизу вверх — флип по Y
             size_t row = (size_t)size * 3;
             for (int y = 0; y < size; y++)
@@ -995,8 +965,9 @@ void renderer_cubemap_capture_at(Game *g, const float *pos, int size)
         free(px);
         free(flip);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)orig_fbo);
-    glViewport(s_rc.view_vp[0], s_rc.view_vp[1], s_rc.view_vp[2], s_rc.view_vp[3]);
+    gpu_bind_framebuffer(s_gpu, (GpuFbo)orig_fbo);
+    gpu_viewport(s_gpu, s_rc.view_vp[0], s_rc.view_vp[1],
+                 s_rc.view_vp[2], s_rc.view_vp[3]);
 
     SDL_Log("cubemap_capture: done at (%.0f, %.0f, %.0f) size %d", pos[0], pos[1], pos[2], size);
 }

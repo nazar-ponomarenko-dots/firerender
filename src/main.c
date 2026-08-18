@@ -27,6 +27,7 @@
 #include "world.h"
 #include "game.h"
 #include "commands.h"
+#include "events.h"
 #include "renderer.h"
 #include "buildnum.h"
 #include "input.h"
@@ -356,6 +357,11 @@ int main(int argc, char *argv[])
 
         sync_cvars(&game);
         input_sync_mode();
+
+        // Отложенные события (events_emit_deferred) — безопасная точка после
+        // всех тиков, до рендера: колбэки не могут переиспользовать списки
+        // слушателей посреди итерации.
+        events_flush_deferred();
 
         // Рендер: сцена -> bloom/туман -> оверлеи (см. renderer.c)
         renderer_begin();

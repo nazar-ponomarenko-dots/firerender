@@ -1,11 +1,11 @@
 // ============================================================================
 //  selection.c — рамки выделения вокруг 3D-узлов сцены (см. selection.h)
+// ----------------------------------------------------------------------------
+//  Рисует через RHI (gpu.h) — не касается GL напрямую.
 // ============================================================================
 #include "selection.h"
 
-#include "gl_loader.h"
-#include "resources.h"
-#include "shader.h"
+#include "gpu.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -14,24 +14,24 @@
 
 static int s_on = 1;       // вкл/выкл (клавиша G, вместе с HUD)
 
+static const GpuDevice *s_gpu = NULL;
+
 SceneNode *selection_make_node(SceneNode *root, const RendererContext *rc)
 {
+    if (!s_gpu) s_gpu = gpu_create();
     // Тот же шейдер, что у рамки поля: позиция в мире + цвет. Новые файлы
     // не нужны — для линий этого хватает.
-    GLuint prog = make_program("shaders/field.vs", "shaders/field.fs");
+    GpuProg prog = gpu_program_new(s_gpu, "shaders/field.vs", "shaders/field.fs");
     if (!prog) return NULL;
 
-    GLuint vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glBindVertexArray(vao);
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 (GLsizeiptr)(SEL_MAX_NODES * 24 * 3 * sizeof(float)),
-                 NULL, GL_STREAM_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), NULL);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+    GpuVao vao = gpu_vao_gen(s_gpu);
+    gpu_vao_bind(s_gpu, vao);
+    GpuBuf vbo = gpu_buf_gen(s_gpu);
+    gpu_buf_bind_array(s_gpu, vbo);
+    gpu_buf_upload_array(s_gpu, NULL,
+                         (unsigned)(SEL_MAX_NODES * 24 * 3 * sizeof(float)), 1);
+    gpu_vertex_attr_3f(s_gpu, 0, 3 * (int)sizeof(float), NULL);
+    gpu_vao_bind(s_gpu, 0);
 
     SelParams *p = calloc(1, sizeof *p);
     p->prog = prog;
@@ -39,8 +39,8 @@ SceneNode *selection_make_node(SceneNode *root, const RendererContext *rc)
     p->vbo = vbo;
     p->rc = rc;
     p->root = root;
-    p->u_viewproj = glGetUniformLocation(prog, "uViewProj");
-    p->u_color    = glGetUniformLocation(prog, "uColor");
+    p->u_viewproj = gpu_program_loc(s_gpu, prog, "uViewProj");
+    p->u_color    = gpu_program_loc(s_gpu, prog, "uColor");
     return node_new("Selection", "Node3D", NULL, NULL, p,
                     NULL, selection_node_render);
 }
@@ -91,22 +91,21 @@ void selection_node_render(SceneNode *n, float dt)
     }
     if (nv == 0) return;
 
-    glEnable(GL_DEPTH_TEST);   // рёбра закрываются рельефом, как положено
-    glUseProgram(p->prog);
-    glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->rc->viewproj);
-    glUniform3f(p->u_color, 1.0f, 0.6f, 0.15f);   // оранжевый, как в Godot
-    glBindVertexArray(p->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, p->vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nv * sizeof(float)), v,
-                 GL_STREAM_DRAW);
-    glDrawArrays(GL_LINES, 0, nv / 3);
+    gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 1);   // рёбра закрываются рельефом
+    gpu_use_program(s_gpu, p->prog);
+    gpu_uniform_mat4(s_gpu, p->u_viewproj, p->rc->viewproj);
+    gpu_uniform_float3(s_gpu, p->u_color, 1.0f, 0.6f, 0.15f);   // оранжевый, как в Godot
+    gpu_vao_bind(s_gpu, p->vao);
+    gpu_buf_bind_array(s_gpu, p->vbo);
+    gpu_buf_upload_array(s_gpu, v, (unsigned)(nv * sizeof(float)), 1);
+    gpu_draw_arrays(s_gpu, GPU_PRIM_LINES, nv / 3);
 }
 
 void selection_cleanup(SceneNode *n)
 {
     if (!n) return;   // error-path scene_build: узел мог не создаться
     SelParams *p = n->params;
-    resources_program_release(p->prog);
-    glDeleteBuffers(1, &p->vbo);
-    glDeleteVertexArrays(1, &p->vao);
+    gpu_program_delete(s_gpu, &p->prog);
+    gpu_buf_delete(s_gpu, &p->vbo);
+    gpu_vao_delete(s_gpu, &p->vao);
 }
