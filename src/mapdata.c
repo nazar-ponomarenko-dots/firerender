@@ -80,8 +80,9 @@ static MapTerrain s_terrain = {
 
 // Растительность (veg = { ... })
 static MapVeg s_veg = {
-    .grass_density = 0.3f, .wheat_density = 140.0f,
-    .grass_floor = 0.004f, .wheat_floor = 1.0f,
+    .grass_density = 1.2f, .wheat_density = 140.0f,
+    .grass_floor = 0.012f, .wheat_floor = 1.0f,
+    .dandelion_density = 0.05f, .dandelion_floor = 0.002f,
     .dyn_radius = 48.0f, .vis_radius = 220.0f,
     .falloff = 16.0f,
 };
@@ -654,6 +655,12 @@ int mapdata_load(const char *path)
                                             s_veg.grass_floor);
         s_veg.wheat_floor = (float)json_num(json_find(vg, "wheat_floor"),
                                             s_veg.wheat_floor);
+        s_veg.dandelion_density =
+            (float)json_num(json_find(vg, "dandelion_density"),
+                            s_veg.dandelion_density);
+        s_veg.dandelion_floor =
+            (float)json_num(json_find(vg, "dandelion_floor"),
+                            s_veg.dandelion_floor);
         s_veg.dyn_radius = (float)json_num(json_find(vg, "dyn_radius"),
                                            s_veg.dyn_radius);
         s_veg.vis_radius = (float)json_num(json_find(vg, "vis_radius"),

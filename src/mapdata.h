@@ -144,6 +144,9 @@ typedef struct {
 typedef struct {
     float grass_density, wheat_density;  // шт/м2 вплотную к камере
     float grass_floor, wheat_floor;      // минимум на всей карте
+    float dandelion_density;             // одуванчики шт/м2 у камеры (редкие,
+                                         // добавляются СВЕРХ травы)
+    float dandelion_floor;               // минимум одуванчиков на карте
     float dyn_radius, vis_radius;        // радиусы динамики/видимости
     float falloff;                       // радиус падения плотности
 } MapVeg;

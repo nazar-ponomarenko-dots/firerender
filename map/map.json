@@ -40,10 +40,12 @@
     "fog_end": 1.6
   },
   "veg": {
-    "grass_density": 0.4,
+    "grass_density": 1.2,
     "wheat_density": 140,
-    "grass_floor": 0.004,
+    "grass_floor": 0.012,
     "wheat_floor": 1.0,
+    "dandelion_density": 0.05,
+    "dandelion_floor": 0.002,
     "dyn_radius": 48,
     "vis_radius": 220,
     "falloff": 16
