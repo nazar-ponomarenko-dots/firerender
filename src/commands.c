@@ -571,7 +571,7 @@ void cmd_glb(const char *args)
     if (!nd) { console_print("glb: не удалось загрузить %s", path); return; }
     anim_last_hook();
     node_add(g->root, nd);
-    // glb_anim_clip_count/… рассчитаны ТОЛЬКО на скелетный узел (AnimParams).
+    // glb_anim_clip_count/… работают ТОЛЬКО с AnimInstance3D (AnimParams).
     // Для статичного GlbInstance у него нет поля data — читать нельзя (SEGV).
     if (is_anim && glb_anim_clip_count(nd) > 0) s_last_anim = nd;
     console_print("glb: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
@@ -672,6 +672,153 @@ void cmd_glbanim_loop(const char *args)
     if (!nd) { console_print("glbanim_loop: нет анимик-узла"); return; }
     glb_anim_set_loop(nd, v);
     console_print("glbanim_loop: %s = %d", nd->name ? nd->name : "?", v?1:0);
+}
+// Поставить время клипа в секундах: glbanim_seek <сек> [имя-узла]
+void cmd_glbanim_seek(const char *args)
+{
+    float t = 0; char name[128] = "";
+    if (sscanf(args, "%f %127s", &t, name) < 1) { console_print("usage: glbanim_seek <сек> [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_seek: нет анимик-узла"); return; }
+    glb_anim_set_time(nd, t);
+    console_print("glbanim_seek: %s = %.3f с", nd->name ? nd->name : "?", t);
+}
+// Поставить кадр: glbanim_frame <кадр> [fps] [имя-узла] (fps по умолч. 24)
+void cmd_glbanim_frame(const char *args)
+{
+    int frame = 0; float fps = 24.0f; char name[128] = "";
+    int n = sscanf(args, "%d %f %127s", &frame, &fps, name);
+    if (n < 1) { console_print("usage: glbanim_frame <кадр> [fps] [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_frame: нет анимик-узла"); return; }
+    glb_anim_set_time(nd, frame / (fps > 0 ? fps : 24.0f));
+    console_print("glbanim_frame: %s = кадр %d @%.0f fps (%.3f с)",
+                  nd->name ? nd->name : "?", frame, fps, glb_anim_time(nd));
+}
+
+// ---- Инструмент anim: реестр всех анимик-моделей, обращение по индексу ---------
+//   anim                    — список всех загруженных моделей
+//   anim <N>                — инфо о модели с индексом N
+//   anim <N> pos x y z      — телепорт
+//   anim <N> move x y z [spd] — плавное движение к точке (spd=ед/с, по умолч. 5)
+//   anim <N> stop           — остановить плавное движение
+//   anim <N> clip <имя|№>   — переключить анимацию
+//   anim <N> play | pause   — играть / пауза
+//   anim <N> loop <0|1>     — зациклить / отключить цикл
+//   anim <N> speed <x>      — скорость воспроизведения
+//   anim <N> seek <сек>     — поставить время клипа
+//   anim <N> frame <n> [fps]— поставить кадр
+//   anim <N> on | off       — показать / скрыть (заморозить)
+//   anim <N> scale <s>      — масштаб модели
+//   anim <N> clips          — список клипов модели
+//   anim <N> remove         — выгрузить модель
+static void anim_show_state(SceneNode *nd)
+{
+    console_print("  pos(%.2f,%.2f,%.2f) scale=%.2g enabled=%d paused=%d loop=%d speed=%.2g time=%.3f клип=%s",
+                  nd->pos[0], nd->pos[1], nd->pos[2],
+                  glb_anim_scale_get(nd), glb_anim_enabled(nd),
+                  glb_anim_paused_get(nd), glb_anim_loop_get(nd),
+                  glb_anim_speed_get(nd), glb_anim_time(nd),
+                  glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+}
+void cmd_anim(const char *args)
+{
+    char a0[64] = "";
+    if (!args) args = "";
+    sscanf(args, "%63s", a0);
+    if (a0[0] == 0 || strcmp(a0, "list") == 0 || strcmp(a0, "help") == 0 || strcmp(a0, "?") == 0 ||
+        !(a0[0] >= '0' && a0[0] <= '9')) {
+        int n = glb_anim_count();
+        console_print("anim: моделей %d (спавн: glb/glbanim <файл> …); usage подсказка: anim help", n);
+        for (int i = 0; i < n; i++) {
+            SceneNode *nd = glb_anim_by_index(i);
+            if (!nd) continue;
+            console_print(" [%d] %s  pos(%.2f,%.2f,%.2f) %s%s клип=%s",
+                          i, glb_anim_path(nd) ? glb_anim_path(nd) : "?",
+                          nd->pos[0], nd->pos[1], nd->pos[2],
+                          glb_anim_enabled(nd) ? "" : " [off] ",
+                          glb_anim_loop_get(nd) ? "loop" : "",
+                          glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+        }
+        console_print("anim: usage: anim | anim <N> | anim <N> pos|move x y z [spd] | clip <имя|№> | play|pause | loop <0|1> | speed <x> | seek <сек> | frame <n> [fps] | on|off | scale <s> | clips | stop | remove");
+        return;
+    }
+    int idx = atoi(a0);
+    SceneNode *nd = glb_anim_by_index(idx);
+    if (!nd) { console_print("anim: нет модели с индексом %d (см. anim)", idx); return; }
+    char sub[24];
+    int n = sscanf(args, "%*s %23s", sub);
+    if (n < 1 || sub[0] == 0) { anim_show_state(nd); return; }
+
+    float p[3], spd;
+    if (strcmp(sub, "pos") == 0) {
+        if (sscanf(args, "%*s %*s %f %f %f", &p[0], &p[1], &p[2]) == 3) {
+            glb_anim_set_pos(nd, p);
+            console_print("anim %d: позиция (%.2f,%.2f,%.2f)", idx, p[0], p[1], p[2]);
+        } else console_print("usage: anim %d pos x y z", idx);
+        return;
+    }
+    if (strcmp(sub, "move") == 0) {
+        float tail[5]; int nr = sscanf(args, "%*s %*s %f %f %f %f", &p[0], &p[1], &p[2], &spd);
+        if (nr < 3) { console_print("usage: anim %d move x y z [spd] (spd = ед/с)", idx); return; }
+        if (nr < 4) spd = 5.0f;
+        glb_anim_move_to(nd, p, spd);
+        console_print("anim %d: движение к (%.2f,%.2f,%.2f) со скоростью %.1f", idx, p[0], p[1], p[2], spd);
+        (void)tail;
+        return;
+    }
+    if (strcmp(sub, "stop") == 0) { glb_anim_stop_move(nd); console_print("anim %d: движение остановлено", idx); return; }
+    if (strcmp(sub, "clip") == 0) {
+        char sel[64]; sscanf(args, "%*s %*s %63s", sel);
+        int cidx = atoi(sel);
+        if (!(sel[0] >= '0' && sel[0] <= '9')) cidx = glb_anim_clip_find(nd, sel);
+        if (cidx < 0) { console_print("anim %d: клип '%s' не найден", idx, sel); return; }
+        glb_anim_set_clip(nd, cidx);
+        console_print("anim %d: клип -> %s", idx, glb_anim_clip_name(nd, cidx) ? glb_anim_clip_name(nd, cidx) : "?");
+        return;
+    }
+    if (strcmp(sub, "play") == 0) { glb_anim_set_paused(nd, 0); console_print("anim %d: играет", idx); return; }
+    if (strcmp(sub, "pause") == 0) { glb_anim_set_paused(nd, 1); console_print("anim %d: пауза", idx); return; }
+    if (strcmp(sub, "loop") == 0) {
+        int v; if (sscanf(args, "%*s %*s %d", &v) != 1) { console_print("usage: anim %d loop <0|1>", idx); return; }
+        glb_anim_set_loop(nd, v); console_print("anim %d: loop=%d", idx, v ? 1 : 0); return;
+    }
+    if (strcmp(sub, "speed") == 0) {
+        float v; if (sscanf(args, "%*s %*s %f", &v) != 1) { console_print("usage: anim %d speed <x>", idx); return; }
+        glb_anim_set_speed(nd, v); console_print("anim %d: speed=%.2g", idx, v); return;
+    }
+    if (strcmp(sub, "seek") == 0) {
+        float v; if (sscanf(args, "%*s %*s %f", &v) != 1) { console_print("usage: anim %d seek <сек>", idx); return; }
+        glb_anim_set_time(nd, v); console_print("anim %d: время %.3f с", idx, v); return;
+    }
+    if (strcmp(sub, "frame") == 0) {
+        int fr; float fps = 24; sscanf(args, "%*s %*s %d %f", &fr, &fps);
+        glb_anim_set_time(nd, fr / (fps > 0 ? fps : 24.0f));
+        console_print("anim %d: кадр %d @%.0f fps (%.3f с)", idx, fr, fps, glb_anim_time(nd)); return;
+    }
+    if (strcmp(sub, "on") == 0 || strcmp(sub, "off") == 0) {
+        int on = sub[0] == 'o' && sub[1] == 'n';
+        glb_anim_set_enabled(nd, on);
+        console_print("anim %d: %s", idx, on ? "включён" : "выключен"); return;
+    }
+    if (strcmp(sub, "scale") == 0) {
+        float v; if (sscanf(args, "%*s %*s %f", &v) != 1) { console_print("usage: anim %d scale <s>", idx); return; }
+        glb_anim_set_scale(nd, v); console_print("anim %d: scale=%.2g", idx, v); return;
+    }
+    if (strcmp(sub, "clips") == 0) {
+        int nc = glb_anim_clip_count(nd);
+        console_print("anim %d: клипов %d, активный: %s", idx, nc,
+                      glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+        for (int i = 0; i < nc; i++)
+            console_print("  [%d] %s", i, glb_anim_clip_name(nd, i) ? glb_anim_clip_name(nd, i) : "?");
+        return;
+    }
+    if (strcmp(sub, "remove") == 0) {
+        console_print("anim %d: выгружаю %s", idx, glb_anim_path(nd) ? glb_anim_path(nd) : "?");
+        glb_anim_remove_node(nd);
+        return;
+    }
+    console_print("anim %d: неизвестная команда '%s' (см. anim help)", idx, sub);
 }
 
 // cubemap_capture [x y z] [size] — захватить кубомап отражений в позиции

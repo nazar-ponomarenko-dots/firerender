@@ -104,6 +104,9 @@ static const ConCmdDesc s_cmds[] = {
     { "glbanim_play",  "glbanim_play [имя-узла] — продолжить анимацию", cmd_glbanim_play },
     { "glbanim_speed", "glbanim_speed <x> [имя-узла] — скорость анимации", cmd_glbanim_speed },
     { "glbanim_loop",  "glbanim_loop <0|1> [имя-узла] — зациклить анимацию", cmd_glbanim_loop },
+    { "glbanim_seek",  "glbanim_seek <сек> [имя-узла] — поставить время клипа (с кадра)", cmd_glbanim_seek },
+    { "glbanim_frame", "glbanim_frame <кадр> [fps] [имя-узла] — поставить кадр (fps=24)", cmd_glbanim_frame },
+    { "anim", "anim [list|help] | anim <N> pos|move x y z [spd] | clip|play|pause|loop|speed|seek|frame|on|off|scale|clips|stop|remove", cmd_anim },
     { "cubemap_capture", "cubemap_capture [x y z] [size] — захват кубомапа отражений (6 PNG в cubemaps/)", cmd_cubemap_capture },
 };
 

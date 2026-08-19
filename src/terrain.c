@@ -434,11 +434,8 @@ static float terrain_tile_dist2(const TerrainTile *t, const float *p)
     return dx * dx + dy * dy + dz * dz;
 }
 
-// Рисует тайлы. Цветной проход: рисуем ВСЕ тайлы (без отсечения фрустумом),
-// LOD выбирается по дистанции до игрока — так нет «подгрузок» тайлов при
-// повороте камеры, а дальние LOD держат число полигонов малым. Теневой
-// проход: отсечение по орто-боксу каскада (rc->shadow_vp), т.к. в каскад
-// нужны только тайлы в объёме света.
+// Рисует тайлы. Цветной проход: отсечение фрустумом + LOD по дистанции.
+// Теневой проход: отсечение по орто-боксу каскада (rc->shadow_vp).
 static void terrain_draw_tiles(const TerrainParams *p,
                                const RendererContext *rc)
 {
@@ -451,14 +448,19 @@ static void terrain_draw_tiles(const TerrainParams *p,
     s_lod1 = lod1; s_lod2 = lod2; s_lod3 = lod3;
     Frustum lf;                              // фрустум света (для тени)
     if (shadow) frustum_build(&lf, rc->shadow_vp);
-    int dbg_t = 0, dbg_n = 0, dbg_lod[4] = {0};
     glBindVertexArray(p->vao);
     for (int i = 0; i < p->tiles_n; i++) {
         const TerrainTile *t = &p->tiles[i];
         float mn[3] = { t->xmin, t->ymin, t->zmin };
         float mx[3] = { t->xmax, t->ymax, t->zmax };
-        if (shadow && !frustum_test_aabb(&lf, mn, mx))
-            continue;
+        // Фрустум-куллинг: цветной проход использует камеру, теневой — свет
+        if (shadow) {
+            if (!frustum_test_aabb(&lf, mn, mx))
+                continue;
+        } else {
+            if (!frustum_test_aabb(&rc->frustum, mn, mx))
+                continue;
+        }
         float d2 = terrain_tile_dist2(t, rc->cam_pos);
         int lod;
         if (shadow) {
@@ -471,20 +473,11 @@ static void terrain_draw_tiles(const TerrainParams *p,
                 : d2 < s_lod2 * s_lod2 ? 1
                 : d2 < s_lod3 * s_lod3 ? 2 : 3;
         }
+        // Убрано: доклад в консоль "Terrain/frame: ..." каждые 240 кадров (шум).
         if (!t->count[lod]) continue;
-        dbg_t += t->count[lod] / 3; dbg_n++; dbg_lod[lod]++;
         glDrawElements(GL_TRIANGLES, t->count[lod], GL_UNSIGNED_INT,
                        (const void *)(uintptr_t)((size_t)t->first[lod] *
                                                  sizeof(GLuint)));
-    }
-    static int s_frames = 0; static long s_color = 0, s_sh = 0;
-    if (shadow) { s_sh += dbg_t; return; }
-    s_color += dbg_t;
-    if (++s_frames >= 240) {
-        SDL_Log("Terrain/frame: color %d tris (%d tiles) [lod %d/%d/%d/%d] | shadow avg %d tris",
-                dbg_t, dbg_n, dbg_lod[0], dbg_lod[1], dbg_lod[2], dbg_lod[3],
-                (int)(s_sh / 240));
-        s_frames = 0; s_sh = 0; (void)s_color;
     }
 }
 

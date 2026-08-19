@@ -72,7 +72,7 @@ typedef struct {
     int vcount;
     unsigned int *indices; int index_count;
     // скиннинг
-    unsigned char *bone_idx;           // 4 * vcount (ubyte, JOINTS_0)
+    int *bone_idx;                     // 4 * vcount (JOINTS_0: ubyte/us-ort
     float *bone_w;                     // 4 * vcount (WEIGHTS_0)
     // материал (псевдо-PBR 2004)
     float tint[3]; float alpha; int blend; int cull;
@@ -121,6 +121,24 @@ const char *glb_anim_current_clip(SceneNode *n);  // имя активного �
 void glb_anim_set_speed(SceneNode *n, float speed); // множитель времени воспроизведения
 void glb_anim_set_paused(SceneNode *n, int paused); // 1 — пауза, 0 — играть
 void glb_anim_set_loop(SceneNode *n, int loop);     // 1 — зациклить, 0 — до конца и стоп
+void glb_anim_set_time(SceneNode *n, float t);      // поставить время клипа (сек) — «с кадра»
+float glb_anim_time(SceneNode *n);                  // текущее время активного клипа
+
+// --- Реестр всех загруженных анимик-узлов (для консольного инструмента anim) ----
+int glb_anim_count(void);                           // сколько анимик-узлов загружено
+SceneNode *glb_anim_by_index(int idx);              // узел по индексу реестра (0..count-1)
+const char *glb_anim_path(SceneNode *n);            // путь GLB (NULL у чужих узлов)
+float glb_anim_scale_get(SceneNode *n);
+int glb_anim_paused_get(SceneNode *n);
+int glb_anim_loop_get(SceneNode *n);
+float glb_anim_speed_get(SceneNode *n);
+void glb_anim_set_enabled(SceneNode *n, int on);    // 0 — скрыть и заморозить, 1 — показать
+int glb_anim_enabled(SceneNode *n);
+void glb_anim_set_pos(SceneNode *n, const float pos[3]); // телепорт (мгновенно)
+void glb_anim_move_to(SceneNode *n, const float pos[3], float speed); // плавное движение
+void glb_anim_stop_move(SceneNode *n);
+void glb_anim_set_scale(SceneNode *n, float s);     // масштаб модели
+void glb_anim_remove_node(SceneNode *n);            // отвязать и выгрузить узел
 
 void glb_anim_node_render(SceneNode *n, float dt);
 

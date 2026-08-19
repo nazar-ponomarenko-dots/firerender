@@ -63,6 +63,9 @@ void cmd_glbanim_pause(const char *args);   // пауза
 void cmd_glbanim_play(const char *args);    // продолжить
 void cmd_glbanim_speed(const char *args);   // glbanim_speed <x>
 void cmd_glbanim_loop(const char *args);    // glbanim_loop <0|1>
+void cmd_glbanim_seek(const char *args);    // glbanim_seek <сек> [имя-узла]
+void cmd_glbanim_frame(const char *args);   // glbanim_frame <кадр> [fps] [имя-узла]
+void cmd_anim(const char *args);            // инструмент anim (реестр по индексу)
 void cmd_matlist(const char *args);
 
 // Эффекты (fx) — частицы на точке попадения луча взгляда в рельеф

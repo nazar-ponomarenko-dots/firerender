@@ -168,30 +168,19 @@ static void b_free(Bucket *b)
 }
 
 // --- Чтение данных accessor ---------------------------------------------------
-static float read_comp(const unsigned char *bin, long base, const GlbAcc *a,
-                       int elem, int comp)
-{
-    int sz = comp_size(a->comp);
-    const unsigned char *p = bin + base + (long)elem * a->vec * sz + (long)comp * sz;
-    switch (a->comp) {
-        case C_FLOAT:  { float v; memcpy(&v, p, 4); return v; }
-        case C_UINT:   { unsigned int v; memcpy(&v, p, 4); return (float)v; }
-        case C_USHORT: { unsigned short v; memcpy(&v, p, 2); return (float)v; }
-        case C_SHORT:  { short v; memcpy(&v, p, 2); return (float)v; }
-        case C_UBYTE:  return (float)p[0];
-        case C_BYTE:   return (float)((signed char)p[0]);
-    }
-    return 0;
-}
 // Безопасное чтение индекса: только беззнаковые целые типа SCALAR.
 // Возвращает -1 на невалидный accessor/тип, иначе индекс в диапазоне [0,maxIdx].
 static long read_index(const unsigned char *bin, long base, const GlbAcc *a,
+                       const GlbBv *bvs, int bv_n,
                        int elem, long maxIdx)
 {
     if (a->vec != 1) return -1;
     long idx = -1;
     int sz = comp_size(a->comp);
-    const unsigned char *p = bin + base + (long)elem * sz;
+    int bv_i = a->bufferView;
+    long stride = (bv_i >= 0 && bv_i < bv_n && bvs[bv_i].byteStride > 0)
+        ? bvs[bv_i].byteStride : sz;
+    const unsigned char *p = bin + base + (long)elem * stride;
     switch (a->comp) {
         case C_UINT:   { unsigned int v; memcpy(&v, p, 4); idx = (long)v; break; }
         case C_USHORT: { unsigned short v; memcpy(&v, p, 2); idx = (long)v; break; }
@@ -203,9 +192,13 @@ static long read_index(const unsigned char *bin, long base, const GlbAcc *a,
     return idx;
 }
 static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
+                        const GlbBv *bvs, int bv_n,
                         int elem, float *out)
 {
-    long stride = (long)a->vec * comp_size(a->comp);
+    int sz = comp_size(a->comp);
+    int bv_i = a->bufferView;
+    long stride = (bv_i >= 0 && bv_i < bv_n && bvs[bv_i].byteStride > 0)
+        ? bvs[bv_i].byteStride : (long)a->vec * sz;
     const unsigned char *p = bin + base + (long)elem * stride;
     float f[4] = {0};
     for (int c = 0; c < a->vec; c++) {
@@ -213,7 +206,7 @@ static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
             case C_FLOAT:  { float v; memcpy(&v, p + (long)c * 4, 4); f[c] = v; break; }
             case C_USHORT: { unsigned short v; memcpy(&v, p + (long)c * 2, 2);
                              f[c] = a->normalized ? (float)v / 65535.0f : (float)v; break; }
-            case C_UBYTE:  { f[c] = a->normalized ? (float)p[c] / 255.0f : (float)p[c]; break; }
+            case C_UBYTE:  { f[c] = a->normalized ? (float)p[(long)c * sz] / 255.0f : (float)p[(long)c * sz]; break; }
             default: f[c] = 0; break;
         }
     }
@@ -237,7 +230,9 @@ static int acc_fits(const GlbAcc *a, const GlbBv *bvs, int bv_n, long bin_len)
     long sz = (long)comp_size(a->comp) * a->vec;
     if (sz <= 0) return 0;
     if (a->count > bin_len) return 0;
-    long need = a->count * sz;
+    // Интерливинг: реальный размер = (count-1)*stride + sz (stride > sz)
+    long stride = (bv->byteStride > 0) ? (long)bv->byteStride : sz;
+    long need = (a->count - 1) * stride + sz;
     long base = bv->byteOffset + a->byteOffset;
     return base >= 0 && bv->byteLength >= 0 && need <= bv->byteLength &&
            base + need <= bin_len;
@@ -275,14 +270,14 @@ static int load_albedo(GlbItem *o, int mi,
                                               (int)bvs[iv].byteLength, &w, &h, &ch, 4);
     if (!px) return 0;
     o->img = px; o->iw = w; o->ih = h;
-    o->wrap = MAT_WRAP_REPEAT; o->filter = MAT_FILTER_MIPMAP;
+    o->wrap = MAT_WRAP_CLAMP; o->filter = MAT_FILTER_MIPMAP;
     if (smp >= 0 && samplers && samplers->type == JSON_ARRAY && smp < json_array_len(samplers)) {
         const JsonNode *sa = json_array_get(samplers, smp);
         int wS = (int)json_num(json_find(sa, "wrapS"), 33071);
-        o->wrap = (wS == 33072) ? MAT_WRAP_CLAMP
-                 : (wS == 33648) ? MAT_WRAP_MIRROR : MAT_WRAP_REPEAT;
         int wT = (int)json_num(json_find(sa, "wrapT"), 33071);
-        if (wT == 33648) o->wrap = MAT_WRAP_MIRROR;
+        // UV этих Sketchfab-моделей местами выходят за [0,1]; REPEAT из семплера
+        // (10497) тянул 2-й тайл -> «рваная» текстура. Используем CLAMP (по краю).
+        o->wrap = (wS == 33648 || wT == 33648) ? MAT_WRAP_MIRROR : MAT_WRAP_CLAMP;
         int mag = (int)json_num(json_find(sa, "magFilter"), 9729);
         o->filter = (mag == 9728) ? MAT_FILTER_NEAREST : MAT_FILTER_MIPMAP;
     }
@@ -428,17 +423,17 @@ GlbModel *glb_parse_file(const char *path)
                     long uv_base = au && au->bufferView >= 0 ? bvs[au->bufferView].byteOffset + au->byteOffset : 0;
                     for (long v = 0; v < nv; v++) {
                         float p[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
-                        read_vertex(bin, pos_base, ap, (int)v, p);
+                        read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, p);
                         mat4_transform_point(world, p, p);
-                        if (an) { read_vertex(bin, nrm_base, an, (int)v, n); mat4_transform_nrm(world, n, n); }
-                        if (au) read_vertex(bin, uv_base, au, (int)v, u);
-                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1]);
+                        if (an) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
+                        if (au) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
+                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], 1.0f - u[1]);
                     }
                     if (ai) {
                         long idx_base = ai->bufferView >= 0 && ai->bufferView < bv_n
                                         ? bvs[ai->bufferView].byteOffset + ai->byteOffset : 0;
                         for (long i = 0; i < ai->count; i++) {
-                            long ii = read_index(bin, idx_base, ai, (int)i, nv);
+                            long ii = read_index(bin, idx_base, ai, bvs, bv_n, (int)i, nv);
                             if (ii >= 0) b_push_i(bk, base + (unsigned int)ii);
                         }
                     } else {
@@ -482,9 +477,9 @@ GlbModel *glb_parse_file(const char *path)
         o->verts = bk->verts; o->normals = bk->nrm; o->uvs = bk->uv;
         o->vcount = bk->vn; o->indices = bk->idx; o->index_count = bk->idxn;
         o->tint[0] = o->tint[1] = o->tint[2] = 1.0f;
-        o->alpha = 1.0f; o->blend = MAT_BLEND_OPAQUE; o->cull = MAT_CULL_BACK;
+        o->alpha = 1.0f; o->blend = MAT_BLEND_OPAQUE; o->cull = MAT_CULL_NONE;
         o->tile[0] = o->tile[1] = 1.0f;
-        o->specular = 0.2f; o->wrap = MAT_WRAP_REPEAT; o->filter = MAT_FILTER_MIPMAP;
+        o->specular = 0.2f; o->wrap = MAT_WRAP_CLAMP; o->filter = MAT_FILTER_MIPMAP;
 
         int mi = bk->mat;
         if (mi >= 0 && materials && mi < json_array_len(materials)) {
@@ -507,7 +502,9 @@ GlbModel *glb_parse_file(const char *path)
             if (strcmp(am, "BLEND") == 0) o->blend = MAT_BLEND_ALPHA;
             else if (strcmp(am, "MASK") == 0) o->blend = MAT_BLEND_ALPHATEST;
             else o->blend = MAT_BLEND_OPAQUE;
-            o->cull = json_bool(json_find(mt, "doubleSided"), 0) ? MAT_CULL_NONE : MAT_CULL_BACK;
+            // glTF-пропсы рендерим двусторонними (MAT_CULL_NONE): иначе тонкие
+            // односторонние панели и салон (видимый через стёкла извне) пропадают.
+            o->cull = MAT_CULL_NONE;
             const JsonNode *em = json_find(mt, "emissiveFactor");
             if (em && em->type == JSON_ARRAY && json_array_len(em) >= 3) {
                 o->tint[0] += (float)json_num(json_array_get(em, 0), 0);
@@ -518,6 +515,19 @@ GlbModel *glb_parse_file(const char *path)
                 SDL_Log("glb: %s — normalTexture игнор (псевдо-PBR 2004)", path);
             load_albedo(o, mi, materials, textures, images, samplers, bvs, bv_n,
                         bin, (long)bin_len);
+            // «Стекло» в gltf-моделях часто нарисовано НЕпрозрачной текстурой
+            // (alpha=255). У BLEND-материала нет реальной альфы, с чем смешивать —
+            // панель остаётся сплошной и закрывает салон/внутренности. Если в
+            // текстуре нет ни одного полупрозрачного пикселя, считаем материал
+            // стеклом и снижаем общую прозрачность.
+            if (o->blend == MAT_BLEND_ALPHA && o->img && o->alpha >= 0.95f) {
+                int has_trans = 0;
+                int npix = (int)((size_t)o->iw * o->ih);
+                const unsigned char *pa = o->img + 3;
+                for (int k = 0; k < npix; k++, pa += 4)
+                    if (*pa < 250) { has_trans = 1; break; }
+                if (!has_trans) o->alpha = 0.35f;
+            }
         }
         // Данные переданы GlbItem'у — не освобождать повторно в b_free
         bk->verts = bk->nrm = bk->uv = (float *)NULL;
@@ -653,19 +663,27 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     p->items = calloc((size_t)gm->count, sizeof *p->items);
     p->count = 0;
     p->radius = 0.0f;
+    static int s_dump_glb = 1;
     for (int i = 0; i < gm->count; i++) {
         DrawItem *bi = build_item(&gm->items[i], prog);
         if (!bi) continue;                 // OOM-пропуск, p->items[i] остаётся нулевой
         DrawItem *d = &p->items[p->count++];
         *d = *bi; free(bi);                // структура скопирована — обёртку освободить
         // огранич. сфера из геометрии бакета (вершины уже в мировых коорд. GLB)
+        float mn[3] = {1e30f,1e30f,1e30f}, mx[3] = {-1e30f,-1e30f,-1e30f};
         for (int v = 0; v < gm->items[i].vcount; v++) {
             float dx = gm->items[i].verts[3*v+0], dy = gm->items[i].verts[3*v+1],
                   dz = gm->items[i].verts[3*v+2];
             float r2 = dx*dx + dy*dy + dz*dz;
             if (r2 > p->radius) p->radius = r2;
+            if (dx<mn[0])mn[0]=dx; if(dy<mn[1])mn[1]=dy; if(dz<mn[2])mn[2]=dz;
+            if (dx>mx[0])mx[0]=dx; if(dy>mx[1])mx[1]=dy; if(dz>mx[2])mx[2]=dz;
         }
+        if (s_dump_glb)
+            SDL_Log("glb bkt %d: nv=%d x[%.2f..%.2f] y[%.2f..%.2f] z[%.2f..%.2f]",
+                i, gm->items[i].vcount, mn[0],mx[0], mn[1],mx[1], mn[2],mx[2]);
     }
+    if (s_dump_glb) s_dump_glb = 0;
     p->radius = sqrtf(p->radius) * p->scale;
     glb_model_free(gm);
 
