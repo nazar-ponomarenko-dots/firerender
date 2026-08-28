@@ -142,10 +142,15 @@ void main() {
     c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
 
     // Снежный покров (общий блок snow.glsl): крона у биллборда — верх
-    // картинки (v=0 после переворота UV, см. object.vs).
+    // картинки (v=0 после переворота UV, см. object.vs). Крона сама
+    // закрывает небо, поэтому маске даём лишь половину веса — снег
+    // ложится и под соседними нависающими кронами. Гладкая кривая,
+    // без шумных пятен: крона белеет равномерно по мере накопления.
     {
-        float atop = 1.0 - smoothstep(0.0, 0.7, vUV.y);    // вверх по дереву
-        float a = snow_amount(vWorldPos, atop);
+        float smask = texture(uSnowMask, vWorldPos.xz / uWorldSize).r;
+        float cover = smoothstep(0.10, 0.55, uSnowCover);
+        float atop  = 1.0 - smoothstep(0.15, 0.9, vUV.y);    // верх по дереву
+        float a = cover * atop * (0.5 + 0.5 * smask) * (0.85 + 0.15 * texture(uNoise, vWorldPos.xz / 1.6).r);
         if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
     }
 

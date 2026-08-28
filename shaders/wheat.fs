@@ -183,12 +183,17 @@ void main() {
     float wet = clamp(uWetness, 0.0, 1.0);
     c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.5);
 
-    // Снежный покров (общий блок snow.glsl): снег лежит на ВЕРХУшках
-    // растений (шапки травы/одуванчиков/колосьев), на открытых небу
-    // участках. Белые кончики растут с накоплением.
+    // Снежный покров (общий блок snow.glsl): снег ложится на всё растение,
+    // сильнее к верхушке (шапка). vUVBase.y = 1 у основания, 0 у верхушки.
+    // Растения — биллборды (нет объёма, а у краёв тонкие полупрозрачные
+    // травинки), поэтому НЕ гейтим их шумными пятнами, как землю: берём
+    // гладкую покрывающую кривую по uSnowCover и открытости неба. Белая
+    // шапка появляется сразу, как только идёт снег, а не точечно.
     {
-        float atop = 1.0 - smoothstep(0.0, 0.6, vUVBase.y);
-        float a = snow_amount(vWorldPos, atop);
+        float smask = texture(uSnowMask, vWorldPos.xz / uWorldSize).r;
+        float cover = smoothstep(0.10, 0.55, uSnowCover);
+        float atop  = 1.0 - smoothstep(0.05, 0.9, vUVBase.y);
+        float a = cover * atop * smask * (0.85 + 0.15 * texture(uNoise, vWorldPos.xz / 1.6).r);
         if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
     }
 

@@ -20,6 +20,7 @@
 #include "json.h"
 #include "resources.h"
 #include "shader.h"
+#include "snowmask.h"
 #include "frustum.h"
 #include "stb_image.h"
 
@@ -486,6 +487,7 @@ int glb_anim_has_anim(const char*path){
 static void anim_node_exit(const Event*,void*);   // forward (см. ниже)
 typedef struct{
     GLuint vao,vbo,ebo; int index_count; GLenum index_type;
+    GLuint snow_vbo;     // per-vertex "открыто небу сверху" (снег), 0 если нет
     GLuint tex; Material mat; MaterialLocs ml; float specular;
     int skin;            // индекс кожи (-1 — без скиннинга)
     int has_skin;        // рендерить с костями
@@ -728,7 +730,7 @@ static void anim_render(SceneNode*n,float dt){
     glBindVertexArray(0);
 }
 
-static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int skin,int node){
+static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int skin,int node,const float*snow){
     AnimDrawItem*d=calloc(1,sizeof* d);
     d->skin=skin; d->has_skin=has_skin; d->node=node;
     // per-primitive remap: какие кости кожи реально используются (≤ MAX_BONES).
@@ -778,6 +780,12 @@ static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int ski
     if(a_uv>=0){glVertexAttribPointer(a_uv,2,GL_FLOAT,GL_FALSE,(GLsizei)stride,(void*)(6*sizeof(float)));glEnableVertexAttribArray(a_uv);}
     if(has_skin&&a_bi>=0){glVertexAttribPointer(a_bi,4,GL_FLOAT,GL_FALSE,(GLsizei)stride,(void*)(8*sizeof(float)));glEnableVertexAttribArray(a_bi);}
     if(has_skin&&a_bw>=0){glVertexAttribPointer(a_bw,4,GL_FLOAT,GL_FALSE,(GLsizei)stride,(void*)(12*sizeof(float)));glEnableVertexAttribArray(a_bw);}
+    if(snow){
+        glGenBuffers(1,&d->snow_vbo); glBindBuffer(GL_ARRAY_BUFFER,d->snow_vbo);
+        glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)((size_t)P->vcount*sizeof(float)),snow,GL_STATIC_DRAW);
+        GLint a_snow=glGetAttribLocation(prog,"aSnow");
+        if(a_snow>=0){glVertexAttribPointer(a_snow,1,GL_FLOAT,GL_FALSE,0,NULL);glEnableVertexAttribArray(a_snow);}
+    }
     glGenBuffers(1,&d->ebo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,d->ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,(GLsizeiptr)((size_t)P->index_count*sizeof(unsigned int)),P->indices,GL_STATIC_DRAW);
     d->index_count=P->index_count; d->index_type=GL_UNSIGNED_INT;
@@ -816,16 +824,33 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     p->u_hasskin=glGetUniformLocation(prog,"uHasSkin"); p->u_uvtile=glGetUniformLocation(prog,"uUvTile");
     p->items=calloc((size_t)(a->ninst?a->ninst:1),sizeof* p->items); p->count=a->ninst;
     p->radius=0.0f;
+    // Per-vertex "открыто небу сверху" по всей модели (все примитивы файла):
+    // крыша/капот получат снег, пол/сиденья под крышей — нет.
+    const float**vp=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vp);
+    int*vc=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vc);
+    const unsigned**ip=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ip);
+    int*ic=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ic);
+    for(int pr=0;pr<a->nprim;pr++){
+        vp[pr]=a->prims[pr].verts; vc[pr]=a->prims[pr].vcount;
+        ip[pr]=a->prims[pr].indices; ic[pr]=a->prims[pr].index_count;
+    }
+    int snow_total=0;
+    float*snow_mask=snow_mask_compute(vp,vc,ip,ic,a->nprim,&snow_total);
+    free(vp); free(vc); free(ip); free(ic);
+    int*prim_off=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*prim_off);
+    { int acc=0; for(int pr=0;pr<a->nprim;pr++){ prim_off[pr]=acc; acc+=a->prims[pr].vcount; } }
     for(int i=0;i<a->ninst;i++){
         AnimInstance*it=&a->instances[i]; AnimPrim*P=&a->prims[it->prim];
         int hs=(P->bone_idx&&it->skin>=0&&it->skin<a->nskin)?1:0;
-        AnimDrawItem*bi=build_item(P,prog,hs,it->skin,it->node);
+        AnimDrawItem*bi=build_item(P,prog,hs,it->skin,it->node,
+                                   snow_mask? snow_mask+prim_off[it->prim] : NULL);
         p->items[i]=*bi; free(bi);   // структура скопирована — обёртку освободить
         for(int v=0;v<P->vcount;v++){
             float dx=P->verts[3*v+0], dy=P->verts[3*v+1], dz=P->verts[3*v+2];
             float r2=dx*dx+dy*dy+dz*dz; if(r2>p->radius)p->radius=r2;
         }
     }
+    free(prim_off); free(snow_mask);
     p->radius=sqrtf(p->radius)*p->scale;
     p->node_world=malloc((size_t)(a->nnode? a->nnode:1)*16*sizeof(float));
     p->wtrs=calloc((size_t)(a->nnode? a->nnode:1)*10,sizeof(float));
@@ -854,6 +879,7 @@ static void anim_free_resources(SceneNode*n){
             AnimDrawItem*d=&p->items[i];
             glDeleteVertexArrays(1,&d->vao);
             glDeleteBuffers(1,&d->vbo);
+            glDeleteBuffers(1,&d->snow_vbo);
             glDeleteBuffers(1,&d->ebo);
             if(d->tex_owned) glDeleteTextures(1,&d->tex);
             else resources_texture_release(d->tex);

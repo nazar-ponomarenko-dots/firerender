@@ -21,6 +21,7 @@
 #include "frustum.h"
 #include "resources.h"
 #include "shader.h"
+#include "snowmask.h"
 #include "stb_image.h"
 
 #include <math.h>
@@ -546,6 +547,7 @@ GlbModel *glb_parse_file(const char *path)
 // --- Узел-инстанс (GL) ---------------------------------------------------------
 typedef struct {
     GLuint vao, vbo, ebo;
+    GLuint snow_vbo;         // per-vertex "открыто небу сверху" (для снега), 0 если нет
     int index_count;
     GLenum index_type;
     GLuint tex;
@@ -565,7 +567,7 @@ typedef struct {
     float radius;                  // огранич. сфера модели (в мировом масштабе)
 } GlbParams;
 
-static DrawItem *build_item(const GlbItem *gi, GLuint prog)
+static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
 {
     DrawItem *d = calloc(1, sizeof *d);
     glGenVertexArrays(1, &d->vao);
@@ -596,6 +598,16 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog)
     glEnableVertexAttribArray(a_pos);
     if (a_nrm >= 0) { glVertexAttribPointer(a_nrm, 3, GL_FLOAT, GL_FALSE, (GLsizei)elem, (void *)(3 * sizeof(float))); glEnableVertexAttribArray(a_nrm); }
     if (a_uv >= 0) { glVertexAttribPointer(a_uv, 2, GL_FLOAT, GL_FALSE, (GLsizei)elem, (void *)(6 * sizeof(float))); glEnableVertexAttribArray(a_uv); }
+    if (snow) {
+        glGenBuffers(1, &d->snow_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, d->snow_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->vcount * sizeof(float)), snow, GL_STATIC_DRAW);
+        GLint a_snow = glGetAttribLocation(prog, "aSnow");
+        if (a_snow >= 0) {
+            glVertexAttribPointer(a_snow, 1, GL_FLOAT, GL_FALSE, 0, NULL);
+            glEnableVertexAttribArray(a_snow);
+        }
+    }
     glGenBuffers(1, &d->ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, d->ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->index_count * sizeof(unsigned int)),
@@ -663,9 +675,24 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     p->items = calloc((size_t)gm->count, sizeof *p->items);
     p->count = 0;
     p->radius = 0.0f;
-    static int s_dump_glb = 1;
+    // Per-vertex "открыто небу сверху": снег ляжет на крышу/капот/багажник,
+    // но не внутрь салона (под собственной крышей). Считается по всей модели.
+    const float **vp = malloc((size_t)gm->count * sizeof *vp);
+    int *vc = malloc((size_t)gm->count * sizeof *vc);
+    const unsigned **ip = malloc((size_t)gm->count * sizeof *ip);
+    int *ic = malloc((size_t)gm->count * sizeof *ic);
     for (int i = 0; i < gm->count; i++) {
-        DrawItem *bi = build_item(&gm->items[i], prog);
+        vp[i] = gm->items[i].verts; vc[i] = gm->items[i].vcount;
+        ip[i] = gm->items[i].indices; ic[i] = gm->items[i].index_count;
+    }
+    int snow_total = 0;
+    float *snow_mask = snow_mask_compute(vp, vc, ip, ic, gm->count, &snow_total);
+    free(vp); free(vc); free(ip); free(ic);
+    static int s_dump_glb = 1;
+    int snow_off = 0;
+    for (int i = 0; i < gm->count; i++) {
+        DrawItem *bi = build_item(&gm->items[i], prog, snow_mask ? snow_mask + snow_off : NULL);
+        snow_off += gm->items[i].vcount;
         if (!bi) continue;                 // OOM-пропуск, p->items[i] остаётся нулевой
         DrawItem *d = &p->items[p->count++];
         *d = *bi; free(bi);                // структура скопирована — обёртку освободить
@@ -684,6 +711,7 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
                 i, gm->items[i].vcount, mn[0],mx[0], mn[1],mx[1], mn[2],mx[2]);
     }
     if (s_dump_glb) s_dump_glb = 0;
+    free(snow_mask);
     p->radius = sqrtf(p->radius) * p->scale;
     glb_model_free(gm);
 
@@ -742,6 +770,7 @@ static void glb_free_resources(GlbParams *p)
             DrawItem *d = &p->items[i];
             if (d->vao) glDeleteVertexArrays(1, &d->vao);
             if (d->vbo) glDeleteBuffers(1, &d->vbo);
+            if (d->snow_vbo) glDeleteBuffers(1, &d->snow_vbo);
             if (d->ebo) glDeleteBuffers(1, &d->ebo);
             if (d->tex_owned) glDeleteTextures(1, &d->tex);
             else if (d->tex) resources_texture_release(d->tex);

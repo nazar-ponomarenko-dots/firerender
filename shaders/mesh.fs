@@ -8,6 +8,7 @@
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
+in float vSnow;               // per-vertex "открыто небу сверху" (из aSnow)
 
 uniform sampler2D uTex;
 uniform vec3 uCamPos;
@@ -22,8 +23,8 @@ uniform samplerCube uReflection;
 // Шум мокрости (img/noise.png, юнит 11): пятна "мокрее / почти сухо"
 uniform sampler2D uNoise;
 
-// Снежный покров: общий блок snow.glsl. Меши/GLB: снег на верхних гранях
-// (нормаль вверх) на открытых небу участках.
+// Снежный покров: общий блок snow.glsl. uSnowCover/uSnowMask/uWorldSize
+// шлёт scene_uniforms_bind (маска unit 8); uNoise уже объявлен выше.
 uniform float uSnowCover;
 uniform sampler2D uSnowMask;
 uniform vec2 uWorldSize;
@@ -126,10 +127,16 @@ void main() {
     // внутренние грани (и дубли вершин без нормалей) не выглаживались в тьму
     if (dot(N, V) < 0.0) N = -N;
 
-    // Снежный покров (общий блок snow.glsl): только верхние грани, открытое
-    // небо — снег на ящиках, камнях, домах (любой меш/GLB).
-    {
-        float a = snow_amount(vWorldPos, smoothstep(0.35, 0.70, N.y));
+    // Снег на мешах/GLB. Мировая маска "видимость неба" не знает glb-модели
+    // (над машиной показывает "открыто"), поэтому сам снег гейтим двумя
+    // факторами: (1) vSnow — per-vertex "открыто небу сверху", посчитанный
+    // на загрузке луком строго вверх по геометрии модели. Крыша/капот/
+    // багажник — vSnow=1 (сверху чисто), пол/сиденья под крышей — vSnow=0.
+    // (2) up — только верх-ориентированные грани (N.y). Салон так не белеет.
+    {   // используем нормаль ДО переворота, т.к. vSnow уже отвечает за внутренности
+        float n_up = normalize(vNormal).y;
+        float up = smoothstep(0.20, 0.52, n_up);
+        float a = snow_amount(vWorldPos, up) * vSnow;
         if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
     }
 
