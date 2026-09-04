@@ -150,6 +150,23 @@ static int fr_test_apply(Game *g)
         SDL_Log("FR_TEST: world load failed");
         return -1;
     }
+    // FR_POS="x,z[,yaw_deg]" — телепорт игрока после загрузки мира
+    // (скриншоты графики в разных точках карты: FR_POS="300,500" FR_TEST=S)
+    {
+        const char *pos = getenv("FR_POS");
+        if (pos && *pos) {
+            float fx, fz, fyaw = 0.0f, fpitch = 0.0f;
+            if (sscanf(pos, "%f,%f,%f,%f", &fx, &fz, &fyaw, &fpitch) >= 2) {
+                g->cam->cam.pos[0] = fx;
+                g->cam->cam.pos[2] = fz;
+                g->cam->cam.pos[1] = sample_height(&g->world, fx, fz) + 1.7f;
+                g->cam->cam.vy = 0;
+                if (fyaw != 0.0f) g->cam->cam.yaw = fyaw * 3.14159f / 180.0f;
+                g->cam->cam.pitch = fpitch * 3.14159f / 180.0f;
+                SDL_Log("FR_POS: телепорт %.0f,%.0f", fx, fz);
+            }
+        }
+    }
     // t/k — отключить рельеф/небо (нужны узлы, поэтому после load_world)
     if (strchr(fr_test, 't')) g->terr_node->render = NULL;
     if (strchr(fr_test, 'k')) g->sky_node->render = NULL;

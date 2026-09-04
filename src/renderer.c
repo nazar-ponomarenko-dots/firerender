@@ -25,6 +25,7 @@
 #include "resources.h"
 #include "sky.h"
 #include "ssr.h"
+#include "taa.h"
 #include "terrain.h"
 #include "voxfog.h"
 #include "water.h"
@@ -47,6 +48,7 @@ static BloomParams s_bloom;
 static SsrParams s_ssr;
 // GI — динамическое глобальное освещение (аналог Lumen): непрямой свет + AO.
 static GiParams s_gi;
+static TaaParams s_taa;
 // Кубомап отражений воды (6 граней, рендер от игрока — см. renderer_cubemap_pass)
 static GpuTex s_refl_cubemap = 0;
 static GpuFbo s_refl_cubemap_fbo[6] = {0};
@@ -331,9 +333,13 @@ static void renderer_ctx_fill(Game *g)
                    sizeof rc->shadow_matrix[c]);
             rc->shadow_box[c] = boxes[c];
             rc->shadow_depth[c] = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
-            // bias рельефа: shadow_bias латеральных текселей (из map.json),
-            // на дальнем каскаде — вдвое меньше (иначе тень отрывается от гор)
-            float bias_world = (c == 3 ? 0.5f : 1.0f) * bias * boxes[c] / g_shadow_size[c];
+            // bias рельефа: shadow_bias латеральных текселей (из map.json).
+            // РАНЬШЕ каскад 3 получал вдвое меньше — но у него тексель 50 см
+            // и квантование глубины максимум: при низком солнце на пологих
+            // склонах acne давал ровные полосы-контуры на земле (ширина
+            // полосы = шаг глубины на тексель). Bias в текселях теперь
+            // одинаков на всех каскадах — мировой масштаб растёт с текселем.
+            float bias_world = bias * boxes[c] / g_shadow_size[c];
             rc->shadow_bias[c] = bias_world / rc->shadow_depth[c];
             rc->shadow_grad[c] = 10.0f / rc->shadow_depth[c];
             // bias растительности: shadow_bias_veg текселей (в 2 раза меньше)
@@ -503,6 +509,8 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     ssr_init(&s_ssr, vw, vh);
     memset(&s_gi, 0, sizeof s_gi);
     gi_init(&s_gi, vw, vh);
+    memset(&s_taa, 0, sizeof s_taa);
+    taa_init(&s_taa, vw, vh);
     voxfog_init(w, vw, vh);
     make_cubemap_fbo(256); // кубомап фиксированного размера
     s_cubemap_valid = 0;
@@ -518,6 +526,7 @@ void renderer_resize(int vw, int vh)
     bloom_resize(&s_bloom, vw, vh);
     ssr_resize(&s_ssr, vw, vh);
     gi_resize(&s_gi, vw, vh);
+    taa_resize(&s_taa, vw, vh);
     voxfog_resize(vw, vh);
 }
 
@@ -527,6 +536,7 @@ void renderer_teardown(void)
     bloom_cleanup(&s_bloom);
     ssr_cleanup(&s_ssr);
     gi_cleanup(&s_gi);
+    taa_cleanup(&s_taa);
     voxfog_cleanup();
     if (s_refl_cubemap) {
         gpu_tex_delete(s_gpu, &s_refl_cubemap);
@@ -772,6 +782,10 @@ void renderer_frame(Game *g, float dt, int draw_3d)
                         (float)SDL_GetPerformanceFrequency());
         }
 gpu_wireframe(s_gpu, s_wire);
+        // TAA: субпиксельный джиттер проекции кадра (после кубомапа —
+        // грани отражений рендерятся без сдвига). Правит rc->viewproj —
+        // пост-проходы (репроекции GI/SSR/TAA) видят ту же матрицу.
+        taa_jitter(&s_taa, &s_rc);
         render_3d(world, dt);
         gpu_wireframe(s_gpu, 0);
         did_3d = 1;
@@ -783,6 +797,17 @@ gpu_wireframe(s_gpu, s_wire);
         gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();
         GLuint scene_for_post = bloom_scene_tex(&s_bloom);
+        // TAA: совмещение кадра с историей (гладкие края, гасит джиттер).
+        // До GI: непрямой свет считается по уже стабильной картинке.
+        if (taa_is_on()) {
+            Uint64 tt = SDL_GetPerformanceCounter();
+            prof_gpu_begin(PROF_TAA);
+            scene_for_post = taa_render(&s_taa, scene_for_post,
+                                        bloom_scene_depth(&s_bloom), &s_rc);
+            prof_gpu_end(PROF_TAA);
+            Uint64 te = SDL_GetPerformanceCounter();
+            prof_add_ms(PROF_TAA, (float)(te - tt) * 1000.0f / (float)pf);
+        }
         // GI (аналог Lumen): непрямой свет + ambient occlusion. Идёт ПЕРВЫМ
         // из пост-проходов — SSR и bloom должны видеть уже подсвеченную
         // сцену (иначе отражения и свечение считаются от «недосвеченной»).

@@ -147,26 +147,23 @@ static void msaa_free(BloomParams *b)
     b->msaa = 0;
 }
 
-// Желаемые сэмплы из cvar'а, ужатые до допустимых значений и лимита GPU.
+// Желаемые сэмплы из cvar'а: только 0/4/16 (промежуточные modes убраны —
+// разница 2x/4x и 8x/16x на экране слабая, а цена заметная).
 static int msaa_wanted(void)
 {
-    static const int allowed[] = { 0, 2, 4, 8, 16 };
+    static const int allowed[] = { 0, 4, 16 };
     float v = cvar_get("r_msaa");
     int s = (int)(v + 0.5f);
     if (s < 0) s = 0;
     if (s > 16) s = 16;
-    // ближайшее допустимое
+    // ближайшее допустимое снизу
     int best = 0;
     for (unsigned i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
         if (allowed[i] <= s) best = allowed[i];
     if (best > 0) {
         int maxs = 0;
         glGetIntegerv(GL_MAX_SAMPLES, &maxs);
-        if (best > maxs) {
-            // не тянет GPU — берём наибольший доступный шаг
-            for (int i = 4; i >= 0; i--)
-                if (allowed[i] <= maxs) { best = allowed[i]; break; }
-        }
+        if (best > maxs) best = (maxs >= 16) ? 16 : 0;   // 4x не влез — выкл
     }
     return best;
 }
