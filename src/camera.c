@@ -27,6 +27,11 @@ void camera_dirs(const Camera *cam, float *forward, float *right)
     }
 }
 
+// Цели интерполяции взгляда (m_smooth) — в области модуля, чтобы
+// camera_sync_look мог привязать их к текущему взгляду при телепорте.
+static float s_want_yaw = 0.0f, s_want_pitch = 0.0f;
+static int s_smooth_init = 0;
+
 void camera_update(Camera *cam, const WorldState *w,
                     float dx, float dy, float dt)
 {
@@ -40,9 +45,9 @@ void camera_update(Camera *cam, const WorldState *w,
     // Интерполяция взгляда (cvar m_smooth, 0..1): 0 — сырое движение как
     // раньше, 1 — сильное сглаживание. Целевые yaw/pitch копят ввод, а
     // текущий взгляд догоняет их экспоненциально (независимо от FPS).
+    // Цели в области модуля: camera_sync_look (телепорты) привязывает их
+    // к текущему взгляду напрямую.
     float inv = cvar_get("m_invert") > 0.5f ? -1.0f : 1.0f;
-    static float s_want_yaw = 0.0f, s_want_pitch = 0.0f;
-    static int s_smooth_init = 0;
     float lim = 3.14159f / 2.0f - 0.01f;
     if (!s_smooth_init) {
         s_want_yaw = cam->yaw;
@@ -80,6 +85,18 @@ void camera_update(Camera *cam, const WorldState *w,
     // Физика/движение (ходьба, полёт, noclip, вода, звуки игрока) — вынесена
     // в отдельный модуль movement.c, чтобы движение не было зашито в камеру.
     movement_update(cam, w, dt);
+}
+
+// Привязать цели сглаживания к ТЕКУЩЕМУ взгляду. Вызывать после прямой
+// записи yaw/pitch (телепорт, загрузка, спавн): иначе m_smooth потянет
+// взгляд обратно к старой цели — даже при малой дельте, не доходящей до
+// эвристики «>3 рад» в camera_update.
+void camera_sync_look(Camera *cam)
+{
+    if (!cam) return;
+    s_want_yaw = cam->yaw;
+    s_want_pitch = cam->pitch;
+    s_smooth_init = 1;
 }
 
 // --- Raycast: луч из камеры вниз до рельефа --------------------------------

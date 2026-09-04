@@ -4,6 +4,7 @@
 #include "sky.h"
 
 #include "assets.h"
+#include "cvars.h"
 #include "gl_loader.h"
 #include "linalg.h"
 #include "mapdata.h"
@@ -11,14 +12,17 @@
 #include "shader.h"
 
 #include "stb_image.h"
+#include <SDL3/SDL.h>
 #include <math.h>
 #include <stdlib.h>
 
 typedef struct {
     GLuint prog, vao, vbo;         // программа и треугольник на весь экран
     GLuint tex;                    // панорама неба (img/skybox.png)
+    GLuint noise_tex;              // img/noise.png (процедурные облака)
     GLint u_forward, u_right, u_up, u_tanfov, u_aspect;
     GLint u_sundir, u_suncolor, u_sunglow;
+    GLint u_noise, u_camxz, u_time, u_clouds;
     const RendererContext *rc;     // базис камеры и солнце (renderer.c)
 } SkyParams;
 static SkyParams *s_sky = NULL;   // для hot-reload (shader_on_reshade)
@@ -83,9 +87,21 @@ SceneNode *sky_make_node(const RendererContext *rc)
     p->u_sundir  = glGetUniformLocation(prog, "uSunDir");
     p->u_suncolor = glGetUniformLocation(prog, "uSunColor");
     p->u_sunglow  = glGetUniformLocation(prog, "uSunGlow");
+    p->u_noise    = glGetUniformLocation(prog, "uNoise");
+    p->u_camxz    = glGetUniformLocation(prog, "uCamXZ");
+    p->u_time     = glGetUniformLocation(prog, "uTime");
+    p->u_clouds   = glGetUniformLocation(prog, "uClouds");
+    // Шум для процедурных облаков (общий кеш ресурсов, REPEAT):
+    // img/cloud_noise.png — гладкий тайлящийся FBM (tools/make_cloud_noise.py),
+    // img/noise.png — белое зерно, облака из него получились бы в спеклу.
+    p->noise_tex  = resources_texture("img/cloud_noise.png", 3, GL_REPEAT, 1);
+    // Покрытие облаков — cvar (меню/консоль), применяется каждый кадр
+    cvar_register_ex("r_clouds", 0.45f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "процедурные облака: покрытие 0..1");
 
     glUseProgram(prog);
     glUniform1i(glGetUniformLocation(prog, "uSky"), 0);
+    glUniform1i(p->u_noise, 1);
     glUniform3f(glGetUniformLocation(prog, "uFogColor"),
                 g_fog_rgb[0], g_fog_rgb[1], g_fog_rgb[2]);
     glUniform3f(glGetUniformLocation(prog, "uTint"),
@@ -116,8 +132,13 @@ static void sky_reshade(void)
     p->u_sundir  = glGetUniformLocation(p->prog, "uSunDir");
     p->u_suncolor = glGetUniformLocation(p->prog, "uSunColor");
     p->u_sunglow  = glGetUniformLocation(p->prog, "uSunGlow");
+    p->u_noise    = glGetUniformLocation(p->prog, "uNoise");
+    p->u_camxz    = glGetUniformLocation(p->prog, "uCamXZ");
+    p->u_time     = glGetUniformLocation(p->prog, "uTime");
+    p->u_clouds   = glGetUniformLocation(p->prog, "uClouds");
     glUseProgram(p->prog);
     glUniform1i(glGetUniformLocation(p->prog, "uSky"), 0);
+    glUniform1i(p->u_noise, 1);
     glUniform3f(glGetUniformLocation(p->prog, "uFogColor"),
                 g_fog_rgb[0], g_fog_rgb[1], g_fog_rgb[2]);
     MapSky sc;
@@ -149,6 +170,13 @@ void sky_node_render(SceneNode *n, float dt)
     glUniform3f(p->u_sundir, rc->light_dir[0][0], rc->light_dir[0][1], rc->light_dir[0][2]);
     glUniform3f(p->u_suncolor, rc->light_color[0][0], rc->light_color[0][1], rc->light_color[0][2]);
     glUniform1f(p->u_sunglow, rc->sun_glow);
+    // Процедурные облака: шум на unit 1, дрейф по времени, привязка к миру
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, p->noise_tex);
+    glUniform1i(p->u_noise, 1);
+    glUniform2f(p->u_camxz, rc->view_pos[0], rc->view_pos[2]);
+    glUniform1f(p->u_time, (float)(SDL_GetTicks() % 600000) / 1000.0f);
+    glUniform1f(p->u_clouds, cvar_get("r_clouds"));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex);
     glBindVertexArray(p->vao);
@@ -179,6 +207,7 @@ void sky_cleanup(SceneNode *n)
     SkyParams *p = n->params;
     resources_program_release(p->prog);
     resources_texture_release(p->tex);
+    if (p->noise_tex) resources_texture_release(p->noise_tex);
     glDeleteBuffers(1, &p->vbo);
     glDeleteVertexArrays(1, &p->vao);
 }

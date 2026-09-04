@@ -108,17 +108,26 @@ float sample_cascade(vec3 wp, int c) {
 float object_shadow(vec3 wp) {
     if (uShadowOn < 0.5) return 1.0;
     float dist = distance(uCamPos, wp);
-    if (dist >= SHADOW_LIMIT) return 1.0;
+    // Дальние деревья: самозатенение биллборда на 100+ м нечитаемо, а цена
+    // — 1-2 тапа CSM на КАЖДЫЙ пиксель дерева (их на экране больше всего).
+    if (dist >= 100.0) return 1.0;
     if (dist < SHADOW_BOX0) {
         float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
+        // Ранний выход вне зоны бленда: большинство пикселей платят за 1 тап
+        if (t < 0.02) return sample_cascade(wp, 0);
+        if (t > 0.98) return sample_cascade(wp, 1);
         return mix(sample_cascade(wp, 0), sample_cascade(wp, 1), t);
     }
     if (dist < SHADOW_BOX1) {
         float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
+        if (t < 0.02) return sample_cascade(wp, 1);
+        if (t > 0.98) return sample_cascade(wp, 2);
         return mix(sample_cascade(wp, 1), sample_cascade(wp, 2), t);
     }
     if (dist < SHADOW_BOX2) {
         float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
+        if (t < 0.02) return sample_cascade(wp, 2);
+        if (t > 0.98) return sample_cascade(wp, 3);
         return mix(sample_cascade(wp, 2), sample_cascade(wp, 3), t);
     }
     return sample_cascade(wp, 3);

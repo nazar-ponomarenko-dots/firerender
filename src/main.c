@@ -162,9 +162,16 @@ static int fr_test_apply(Game *g)
                 // Глаз 2.4 м: чуть выше пшеницы — точки обзора для тестов
                 g->cam->cam.pos[1] = sample_height(&g->world, fx, fz) + 2.4f;
                 g->cam->cam.vy = 0;
+                // noclip: камера не падает и pitch не ограничен ходьбой
+                // (удобно смотреть на небо/вниз для скриншотов)
+                g->cam->cam.fly = 1;
                 if (fyaw != 0.0f) g->cam->cam.yaw = fyaw * 3.14159f / 180.0f;
                 g->cam->cam.pitch = fpitch * 3.14159f / 180.0f;
-                SDL_Log("FR_POS: телепорт %.0f,%.0f", fx, fz);
+                // Цели сглаживания мыши — к новому взгляду (иначе m_smooth
+                // потащит камеру обратно к спавну)
+                camera_sync_look(&g->cam->cam);
+                SDL_Log("FR_POS: телепорт %.0f,%.0f yaw=%.2f pitch=%.2f",
+                        fx, fz, g->cam->cam.yaw, g->cam->cam.pitch);
             }
         }
     }
