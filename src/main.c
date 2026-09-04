@@ -169,6 +169,8 @@ static int fr_test_apply(Game *g)
     }
     // w — мокрость=1 БЕЗ частиц дождя (чистый тест мокрого SSR, A/B-кадры)
     if (strchr(fr_test, 'w')) fx_force_wetness(1.0f);
+    // D — демо-полёт (headless-скриншоты красивой точки обзора, FR_TEST=SD)
+    if (strchr(fr_test, 'D')) game_demo_toggle(g);
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);
@@ -374,6 +376,14 @@ int main(int argc, char *argv[])
         renderer_frame(&game, dt, game.world_loaded &&
                                    (app_state() != APP_MENU || !app_bg_has()));
         renderer_end(&game, dt);
+
+        // FR_TEST 'S': автоскриншот на 90-м кадре и выход на 120-м —
+        // headless-проверка картинки (SDL_VIDEODRIVER=offscreen FR_TEST=S).
+        if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'S')) {
+            static int s_frames = 0;
+            if (++s_frames == 90) cmd_screenshot(NULL);
+            if (s_frames >= 120) running = false;
+        }
 
         // Меню (главное/пауза/настройки) — поверх замороженной сцены
         if (app_state() != APP_PLAY) {

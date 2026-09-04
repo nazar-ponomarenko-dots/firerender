@@ -162,6 +162,17 @@ void sky_fog_color(float out[3])
     out[2] = g_fog_rgb[2];
 }
 
+GLuint sky_panorama(float tint[3])
+{
+    if (!s_sky || !s_sky->tex) return 0;
+    MapSky sc;
+    mapdata_sky(&sc);
+    tint[0] = sc.tint[0];
+    tint[1] = sc.tint[1];
+    tint[2] = sc.tint[2];
+    return s_sky->tex;
+}
+
 void sky_cleanup(SceneNode *n)
 {
     if (!n) return;   // безопасно при частичном построении сцены (error-path)

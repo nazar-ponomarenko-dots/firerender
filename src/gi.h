@@ -15,15 +15,25 @@
 //                      a = затенение), уточнение контакта делением интервала,
 //                      косинус на принимающей стороне, LOD по дистанции,
 //                      темпоральное накопление с клампом истории;
+//                      ПРОМАХ ЛУЧА = свет РЕАЛЬНОГО неба (панорама sky.c, тот
+//                      же маппинг, что в sky.fs): тени подсвечиваются цветом
+//                      небосвода (синий зенит/тёплый закат/серое пасмурно) —
+//                      главный «люменовский» ингредиент. Ниже горизонта —
+//                      отскок от земли за кадром. Весь свет попаданий (включая
+//                      лампы/прожекторы сцены) переотражается с альбедо < 1;
 //    2) gi_blur.fs   — билатеральный денойз в 2 прохода (H, V) с весом по
 //                      касательной плоскости: складывает разные наборы лучей
 //                      соседних пикселей (IGN), не протекая через изломы;
+//                      радиус растёт с дистанцией (вдали шум крупнее);
 //    3) gi_apply.fs  — joint bilateral upsample на полное разрешение и
-//                      наложение на сцену.
+//                      наложение на сцену; потолок добавки — по ЛОКАЛЬНОЙ
+//                      яркости окрестности, а не одного пикселя: рефлекс
+//                      лампы в тени легален, глобальное свечение — нет.
 //
 //  Cvar'ы: r_gi, r_gi_strength, r_gi_ao, r_gi_rays, r_gi_steps, r_gi_radius,
-//  r_gi_ao_radius, r_gi_sky, r_gi_clamp, r_gi_temporal, r_gi_blur,
-//  r_gi_scale, r_gi_debug.
+//  r_gi_ao_radius, r_gi_sky, r_gi_skylight, r_gi_clamp, r_gi_bounce,
+//  r_gi_reflect, r_gi_spread, r_gi_temporal, r_gi_blur, r_gi_scale,
+//  r_gi_debug.
 // ============================================================================
 #ifndef GI_H
 #define GI_H
@@ -49,6 +59,7 @@ typedef struct {
     GLint t_scene, t_depth, t_prev, t_viewproj, t_invviewproj, t_prevviewproj;
     GLint t_campos, t_texel, t_params, t_params2, t_params3;
     GLint t_groundcolor, t_clamp, t_blend;
+    GLint t_sky, t_skytint, t_skyfog, t_skylight;   // небо на промахах лучей
     GLint b_gi, b_depth, b_invviewproj, b_campos, b_texel, b_dir, b_z, b_radius;
     GLint a_scene, a_gi, a_depth, a_gitexel, a_z, a_strength, a_ao, a_debug;
 } GiParams;

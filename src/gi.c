@@ -7,6 +7,7 @@
 #include "linalg.h"
 #include "resources.h"
 #include "shader.h"
+#include "sky.h"
 
 #include <SDL3/SDL.h>
 #include <stddef.h>
@@ -31,6 +32,10 @@ static void gi_prog_init(GiParams *g)
     g->t_groundcolor   = glGetUniformLocation(g->prog_trace, "uGroundColor");
     g->t_clamp         = glGetUniformLocation(g->prog_trace, "uClamp");
     g->t_blend         = glGetUniformLocation(g->prog_trace, "uBlend");
+    g->t_sky           = glGetUniformLocation(g->prog_trace, "uSky");
+    g->t_skytint       = glGetUniformLocation(g->prog_trace, "uSkyTint");
+    g->t_skyfog        = glGetUniformLocation(g->prog_trace, "uSkyFog");
+    g->t_skylight      = glGetUniformLocation(g->prog_trace, "uSkyLight");
 
     g->b_gi          = glGetUniformLocation(g->prog_blur, "uGI");
     g->b_depth       = glGetUniformLocation(g->prog_blur, "uDepth");
@@ -92,23 +97,30 @@ void gi_init(GiParams *g, int vw, int vh)
     s_gi_p = g;
     cvar_register_ex("r_gi", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "динамическое глобальное освещение (GI, аналог Lumen)");
-    // Силы уменьшены втрое против предыдущей ревизии (0.85 / 0.85 / 1.05 /
-    // 0.55): GI подсвечивал сам себя и половина сцены светилась. Плюс в
-    // gi_apply.fs добавка теперь физически ограничена яркостью пикселя.
-    cvar_register_ex("r_gi_strength", 0.28f, 0.0f, 3.0f, CVAR_ARCHIVE,
+    // v7: небо на промахах лучей даёт физичную подсветку теней, поэтому сила
+    // непрямого снова поднята (0.28 -> 0.38): добавка по-прежнему ограничена
+    // локальной яркостью окрестности (gi_apply.fs), свечение невозможно.
+    cvar_register_ex("r_gi_strength", 0.38f, 0.0f, 3.0f, CVAR_ARCHIVE,
                      "сила непрямого света GI");
-    cvar_register_ex("r_gi_ao", 0.3f, 0.0f, 1.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_gi_ao", 0.42f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "сила затенения GI (контактные тени + закрытость неба)");
-    cvar_register_ex("r_gi_rays", 8.0f, 2.0f, 32.0f, CVAR_ARCHIVE,
+    // Оптимизация: 6 лучей x 10 шагов (было 8x12) — минус ~40% трассировки.
+    // Разные наборы лучей по пикселям (IGN) + темпоральное накопление 0.92
+    // + денойз собирают полусферу заново — шум не виден.
+    cvar_register_ex("r_gi_rays", 6.0f, 2.0f, 32.0f, CVAR_ARCHIVE,
                      "лучей на пиксель (дороже = чище)");
-    cvar_register_ex("r_gi_steps", 12.0f, 4.0f, 32.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_gi_steps", 10.0f, 4.0f, 32.0f, CVAR_ARCHIVE,
                      "шагов марша луча GI");
     cvar_register_ex("r_gi_radius", 12.0f, 1.0f, 64.0f, CVAR_ARCHIVE,
                      "радиус сбора непрямого света, м");
     cvar_register_ex("r_gi_ao_radius", 2.5f, 0.2f, 16.0f, CVAR_ARCHIVE,
                      "радиус ambient occlusion, м");
-    cvar_register_ex("r_gi_sky", 0.25f, 0.0f, 1.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_gi_sky", 0.45f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "крупное затенение по закрытости небосвода (игра света)");
+    // Небесный свет на промахах лучей: тени получают цвет небосвода (UE5
+    // Skylight). 1.0 =radiance панорамы без приумножения.
+    cvar_register_ex("r_gi_skylight", 1.0f, 0.0f, 3.0f, CVAR_ARCHIVE,
+                     "свет неба в тенях (цвет берётся с панорамы неба)");
     cvar_register_ex("r_gi_clamp", 1.0f, 0.1f, 8.0f, CVAR_ARCHIVE,
                      "потолок энергии непрямого света на пиксель");
     cvar_register_ex("r_gi_bounce", 1.15f, 1.0f, 2.5f, CVAR_ARCHIVE,
@@ -119,10 +131,10 @@ void gi_init(GiParams *g, int vw, int vh)
     // цепочка переотражений перераспределяет энергию, а не добавляет её.
     cvar_register_ex("r_gi_spread", 0.18f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "распространение света: переотражения по цепочке");
-    cvar_register_ex("r_gi_temporal", 0.88f, 0.0f, 0.96f, CVAR_ARCHIVE,
+    cvar_register_ex("r_gi_temporal", 0.92f, 0.0f, 0.96f, CVAR_ARCHIVE,
                      "темпоральное накопление GI (0 = выкл, шумно)");
-    cvar_register_ex("r_gi_blur", 1.6f, 0.0f, 4.0f, CVAR_ARCHIVE,
-                     "радиус денойза GI (тексели)");
+    cvar_register_ex("r_gi_blur", 1.35f, 0.0f, 4.0f, CVAR_ARCHIVE,
+                     "радиус денойза GI (тексели), растёт с дистанцией");
     cvar_register_ex("r_gi_scale", 0.5f, 0.25f, 1.0f, CVAR_ARCHIVE,
                      "разрешение GI от экрана (0.5 = половина, дешевле)");
     cvar_register_ex("r_gi_debug", 0.0f, 0.0f, 2.0f, CVAR_ARCHIVE,
@@ -229,6 +241,20 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, g->tex_gi[g->cur]);    // прошлый кадр
     glUniform1i(g->t_prev, 2);
+    // Панорама неба (unit 3): цвет промахнувшихся лучей. Нет неба (меню) —
+    // uSkyOn = 0, шейдер красит промахи градиентом из цвета тумана.
+    {
+        float skytint[3];
+        GLuint skytex = sky_panorama(skytint);
+        glActiveTexture(GL_TEXTURE3);
+        if (skytex) glBindTexture(GL_TEXTURE_2D, skytex);
+        glUniform1i(g->t_sky, 3);
+        glUniform3f(g->t_skytint, skytint[0], skytint[1], skytint[2]);
+        glUniform3f(g->t_skyfog, rc->fog_color[0], rc->fog_color[1],
+                    rc->fog_color[2]);
+        glUniform2f(g->t_skylight, cvar_get("r_gi_skylight"),
+                    skytex ? 1.0f : 0.0f);
+    }
     glUniformMatrix4fv(g->t_viewproj, 1, GL_FALSE, rc->viewproj);
     glUniformMatrix4fv(g->t_invviewproj, 1, GL_FALSE, invvp);
     glUniformMatrix4fv(g->t_prevviewproj, 1, GL_FALSE,

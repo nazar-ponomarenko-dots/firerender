@@ -19,6 +19,10 @@ void sky_node_render(SceneNode *n, float dt);
 // Цвет тумана (среднее по полосе горизонта панорамы неба). out[3].
 void sky_fog_color(float out[3]);
 
+// Текстура панорамы неба + её тон (для GI: свет неба на промахах лучей).
+// 0, если небо ещё не создано (меню) — GI красит промахи градиентом из тумана.
+GLuint sky_panorama(float tint[3]);
+
 // Освобождает GL-ресурсы узла (программа, текстура, VAO/VBO).
 void sky_cleanup(SceneNode *n);
 
