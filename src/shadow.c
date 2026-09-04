@@ -40,8 +40,29 @@ int g_shadow_terrain = 1;           // рельеф в картах теней
 int g_shadow_cull = 1;              // culling чанков по боксу каскада
 int g_shadow_veg = 1;               // растительность в картах теней
 int g_shadow_obj = 1;               // объекты (деревья) в картах теней
+int g_shadow_cache = 1;             // кэш статических каскадов (FR_TEST 'C' выкл)
 // Матрицы каскадов последнего кадра (для renderer.c/совместимости)
 static float g_last_mvp[SHADOW_CASCADES][16];
+
+// --- Кэш статических каскадов -------------------------------------------------
+// Каскады 2/3 не содержат динамики (vegetation.c рисует динамику только при
+// shadow_dyn, модели в карты теней не пишутся вовсе) — их содержимое зависит
+// ТОЛЬКО от снапнутой матрицы. Пока она не сменилась, перерисовывать карту
+// не нужно: FBO хранит глубину с прошлого кадра. Стоя на месте — 100% попаданий,
+// на ходу матрица меняется лишь через шаг сетки снапа (шаг крупнее текселя:
+// 4 текселя у каскада 2, 8 — у каскада 3; подёргивание теней на ходу
+// незаметно — тени там мягкие и блендятся с соседним каскадом).
+static float g_cache_vp[SHADOW_CASCADES][16];
+static int g_cache_valid[SHADOW_CASCADES];
+static int s_shadow_frame = 0;      // для шахматного обновления динамики
+// Матрицы каскадов ПРОШЛОГО кадра (все 4): «сменилась ли проекция каскада» —
+// сигнал для шахматки растительности (при смене — полная перерисовка).
+static float s_last_vp[SHADOW_CASCADES][16];
+
+static void shadow_cache_invalidate(void)
+{
+    memset(g_cache_valid, 0, sizeof g_cache_valid);
+}
 
 void shadow_init(void)
 {
@@ -51,6 +72,7 @@ void shadow_init(void)
         float m = cvar_get("r_shadows_mode");
         g_shadow_on = (m == 1.0f || m == 2.0f);
     }
+    shadow_cache_invalidate();
     // Размер карт теней из map/map.json (shadows.size, по умолчанию 2048)
     {
         MapShadows sh;
@@ -97,11 +119,13 @@ int shadow_is_on(void)
 void shadow_toggle(void)
 {
     g_shadow_on = !g_shadow_on;
+    shadow_cache_invalidate();
 }
 
 void shadow_set(int on)
 {
     g_shadow_on = on ? 1 : 0;
+    shadow_cache_invalidate();
 }
 
 GLuint shadow_texture(int c)
@@ -146,7 +170,6 @@ static void shadow_matrix_for(const float *center, const float *sun_dir,
     float bias[16] = { 0.5f,0,0,0,  0,0.5f,0,0,  0,0,0.5f,0,  0.5f,0.5f,0.5f,1 };
     mat4_mul(mvp, bias, vp);
 }
-
 // Рисует все каскады из камеры солнца. Узлы сцены сами рисуют глубину
 // (pass == RP_SHADOW в контексте); здесь — только матрицы и FBO каскадов.
 void shadow_render(SceneNode *root, RendererContext *rc)
@@ -176,17 +199,35 @@ void shadow_render(SceneNode *root, RendererContext *rc)
     GLint prev_fbo = 0, prev_vp[4] = { 0, 0, 0, 0 };
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_vp);
+    s_shadow_frame++;
 
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         float box = boxes[c];
         float depth = box * SHADOW_DEPTH_MUL + 400.0f;
         float vp[16], mvp[16];
+        // Статическим каскадам (2/3) — крупный шаг снапа: 4/8 текселей.
+        // Матрица (и кэш карты) меняется в 4/8 раз реже на ходу; подёргивание
+        // дальних теней при шаге 19 см / 2 м незаметно — они мягкие и на
+        // границах блендятся с соседним каскадом.
+        float snap_mul = (c == 2) ? 4.0f : (c == 3) ? 8.0f : 1.0f;
         shadow_matrix_for(rc->cam_pos, sd, box, depth,
-                          2.0f / sizes[c], mvp, vp);
+                          2.0f * snap_mul / sizes[c], mvp, vp);
+        // Сменилась ли матрица каскада с прошлого кадра (камера перешагнула
+        // шаг сетки снапа): при смене растительность обязана перерисоваться
+        // в НОВУЮ проекцию, иначе её тень разъедется с рельефом.
+        int mat_same = memcmp(s_last_vp[c], vp, sizeof vp) == 0;
         // Свежие матрицы каскада — в контекст (их читают vegetation/objects/
         // voxfog в этом же кадре) и в g_last_mvp (для renderer_ctx_fill)
         memcpy(rc->shadow_matrix[c], mvp, sizeof mvp);
         memcpy(g_last_mvp[c], mvp, sizeof mvp);
+        memcpy(s_last_vp[c], vp, sizeof vp);
+
+        // Кэш статических каскадов: матрица не сменилась — карта глубины в
+        // FBO уже содержит ровно этот кадр (рельеф/деревья статичны, качание
+        // статичной травы вдаль нечитаемо) — пропускаем проход целиком.
+        if (c >= 2 && g_shadow_cache && g_cache_valid[c] &&
+            memcmp(g_cache_vp[c], vp, sizeof vp) == 0)
+            continue;
 
         // Теневой проход: узлы рисуют глубину в этот каскад
         rc->pass = RP_SHADOW;
@@ -197,8 +238,18 @@ void shadow_render(SceneNode *root, RendererContext *rc)
         // Каскад 2 (96 м): только статика — динамика там (~200 тыс.
         // инстансов) даёт неразличимую на текселе 4.7 см тень.
         // Каскад 3 (512 м): статика пшеницы — тени поля до ~256 м.
-        rc->shadow_dyn = (c < 2) ? 1 : 0;
-        rc->shadow_static = (c < 3) ? 1 : 0;
+        //
+        // ШАХМАТКА РАСТИТЕЛЬНОСТИ (perf, замер FR_TEST 'q': veg-тени =
+        // ~3.4 мс из ~7.7 мс кадра — 44%). Качание травы медленное (~1 Гц),
+        // поэтому ОБА слоя растительности (статика+динамика) каждого
+        // каскада 0/1 обновляются через кадр (каскады в противофазе).
+        // Пока матрица каскада НЕ меняется (стоим/дышим камерой) — это
+        // честно: тень качания запаздывает на 8-16 мс, глазу неотличимо.
+        // Матрица сменилась (ходьба) — рисуем оба слоя в новую проекцию,
+        // иначе тень травы разъедется с рельефом.
+        int veg_frame = !mat_same || (((s_shadow_frame + c) & 1) == 0);
+        rc->shadow_dyn = (c < 2) ? veg_frame : 0;
+        rc->shadow_static = (c < 3) ? veg_frame : 0;
         rc->shadow_cull = (c < 2 && g_shadow_cull) ? 1 : 0;
 
         glBindFramebuffer(GL_FRAMEBUFFER, g_shadow_fbo[c]);
@@ -214,6 +265,9 @@ void shadow_render(SceneNode *root, RendererContext *rc)
         // Единый проход: узлы сами выбирают, что рисовать в RP_SHADOW
         for (SceneNode *n = root->first_child; n; n = n->next)
             if (n->render) n->render(n, 0.0f);
+
+        memcpy(g_cache_vp[c], vp, sizeof vp);
+        g_cache_valid[c] = 1;
     }
     rc->pass = RP_COLOR;
     // Вернуть FBO и вьюпорт цветного прохода (первый узел — небо — не

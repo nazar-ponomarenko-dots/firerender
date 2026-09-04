@@ -102,7 +102,7 @@ void gi_init(GiParams *g, int vw, int vh)
     // локальной яркостью окрестности (gi_apply.fs), свечение невозможно.
     cvar_register_ex("r_gi_strength", 0.38f, 0.0f, 3.0f, CVAR_ARCHIVE,
                      "сила непрямого света GI");
-    cvar_register_ex("r_gi_ao", 0.42f, 0.0f, 1.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_gi_ao", 0.5f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "сила затенения GI (контактные тени + закрытость неба)");
     // Оптимизация: 6 лучей x 10 шагов (было 8x12) — минус ~40% трассировки.
     // Разные наборы лучей по пикселям (IGN) + темпоральное накопление 0.92
@@ -113,13 +113,13 @@ void gi_init(GiParams *g, int vw, int vh)
                      "шагов марша луча GI");
     cvar_register_ex("r_gi_radius", 12.0f, 1.0f, 64.0f, CVAR_ARCHIVE,
                      "радиус сбора непрямого света, м");
-    cvar_register_ex("r_gi_ao_radius", 2.5f, 0.2f, 16.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_gi_ao_radius", 3.0f, 0.2f, 16.0f, CVAR_ARCHIVE,
                      "радиус ambient occlusion, м");
     cvar_register_ex("r_gi_sky", 0.45f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "крупное затенение по закрытости небосвода (игра света)");
     // Небесный свет на промахах лучей: тени получают цвет небосвода (UE5
-    // Skylight). 1.0 =radiance панорамы без приумножения.
-    cvar_register_ex("r_gi_skylight", 1.0f, 0.0f, 3.0f, CVAR_ARCHIVE,
+    // Skylight). 1.3 — подсветка заметна, но тень остаётся тенью.
+    cvar_register_ex("r_gi_skylight", 1.3f, 0.0f, 3.0f, CVAR_ARCHIVE,
                      "свет неба в тенях (цвет берётся с панорамы неба)");
     cvar_register_ex("r_gi_clamp", 1.0f, 0.1f, 8.0f, CVAR_ARCHIVE,
                      "потолок энергии непрямого света на пиксель");

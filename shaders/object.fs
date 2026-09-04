@@ -133,20 +133,26 @@ void main() {
     }
     vec3 N = normalize(uCamPos - vWorldPos);   // биллборд смотрит на камеру
     vec3 V = N;
-    float wet = clamp(uWetness, 0.0, 1.0);
-    // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
-    // ≈ 6 м / 1.25 м): каждое дерево в своём пятне мокроты.
-    float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
-                + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
-    wet *= mix(0.05, 1.8, noise * noise);
-    c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
+    // Мокрость/снег — редкие режимы погоды: в ясную погоду (99% времени)
+    // блоки пропускаются ЦЕЛИКОМ (uniform-ветвление бесплатно): экономия
+    // ~4 текстурных выборки на каждый пиксель дерева.
+    float wet = 0.0;
+    if (uWetness > 0.004) {
+        wet = clamp(uWetness, 0.0, 1.0);
+        // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
+        // ≈ 6 м / 1.25 м): каждое дерево в своём пятне мокроты.
+        float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
+                    + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
+        wet *= mix(0.05, 1.8, noise * noise);
+        c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
+    }
 
     // Снежный покров (общий блок snow.glsl): крона у биллборда — верх
     // картинки (v=0 после переворота UV, см. object.vs). Крона сама
     // закрывает небо, поэтому маске даём лишь половину веса — снег
     // ложится и под соседними нависающими кронами. Гладкая кривая,
     // без шумных пятен: крона белеет равномерно по мере накопления.
-    {
+    if (uSnowCover > 0.02) {
         float smask = texture(uSnowMask, vWorldPos.xz / uWorldSize).r;
         float cover = smoothstep(0.10, 0.55, uSnowCover);
         float atop  = 1.0 - smoothstep(0.15, 0.9, vUV.y);    // верх по дереву

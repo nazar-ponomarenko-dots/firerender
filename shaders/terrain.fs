@@ -136,8 +136,9 @@ float hash12(vec2 p) {
 // Тень одного каскада: чистый АППАРАТНЫЙ PCF (GL_COMPARE + GL_LINEAR) —
 // один texture() даёт гладкую полутень без полос. Градиент глубины убран:
 // на картах 1024² он квантовался в видимые ступени ("полосы" в тенях).
+// soft — радиус полутени в текселях карты: 0 = жёсткая тень одного тапа.
 float shadow_cascade(sampler2DShadow map, mat4 m, float biasu,
-                     vec3 wp, vec3 n) {
+                     vec3 wp, vec3 n, float soft) {
     vec4 sc = m * vec4(wp, 1.0);
     vec3 suv = sc.xyz / sc.w;
     // за пределами бокса каскада (в т.ч. suv.z <= 0 — геометрия ближе света,
@@ -149,7 +150,27 @@ float shadow_cascade(sampler2DShadow map, mat4 m, float biasu,
     // растёт с уклоном рельефа (наклонная земля сама себя затеняет —
     // смещение по нормали должно быть заметно больше глубины квантования).
     float bias = biasu * (1.5 - n.y) + biasu * 0.25;
-    return texture(map, vec3(suv.xy, suv.z - bias));
+    float s = texture(map, vec3(suv.xy, suv.z - bias));
+    if (soft < 0.05) return s;
+    // МЯГКАЯ ПОЛУТЕНЬ: 4 досэмпла вдоль развёрнутого по пикселю луча
+    // (хеш прячет решётку), каждый тап сам даёт 4 выборки (билинейный
+    // PCF) — до 20 сэмплов, гладко и без шума.
+    float ang = hash12(gl_FragCoord.xy) * 6.2831853;
+    vec2 dir = vec2(cos(ang), sin(ang));
+    vec2 texel = 1.0 / vec2(textureSize(map, 0));
+    float acc = s;
+    for (int i = 1; i <= 4; i++)
+        acc += texture(map, vec3(suv.xy + dir * texel * (soft * 0.25 * float(i)),
+                                 suv.z - bias));
+    return acc * 0.2;
+}
+
+// Радиус полутени: 0.8 текселя у ног (резкая тень), растёт с дистанцией
+// до 6 текселей у горизонта. Тексель каскада 3 = 25 см -> полутень до
+// ~1.5 м: край дальней тени размывается естественно, как от источника
+// света конечного размера.
+float shadow_soft(float dist) {
+    return min(0.8 + dist * 0.028, 6.0);
 }
 
 // Тень по дистанции: выбор каскада с ПЛАВНЫМ смешиванием на границах
@@ -158,22 +179,23 @@ float shadow_cascade(sampler2DShadow map, mat4 m, float biasu,
 float shadow_at(vec3 wp, vec3 n) {
     float dist = distance(uCamPos, wp);
     if (dist >= SHADOW_LIMIT) return 1.0;
+    float soft = shadow_soft(dist);
     if (dist < SHADOW_BOX0) {
         float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
-        return mix(shadow_cascade(uShadowMap0, uShadowMatrix0, uShadowBias0, wp, n),
-                   shadow_cascade(uShadowMap1, uShadowMatrix1, uShadowBias1, wp, n), t);
+        return mix(shadow_cascade(uShadowMap0, uShadowMatrix0, uShadowBias0, wp, n, soft),
+                   shadow_cascade(uShadowMap1, uShadowMatrix1, uShadowBias1, wp, n, soft), t);
     }
     if (dist < SHADOW_BOX1) {
         float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
-        return mix(shadow_cascade(uShadowMap1, uShadowMatrix1, uShadowBias1, wp, n),
-                   shadow_cascade(uShadowMap2, uShadowMatrix2, uShadowBias2, wp, n), t);
+        return mix(shadow_cascade(uShadowMap1, uShadowMatrix1, uShadowBias1, wp, n, soft),
+                   shadow_cascade(uShadowMap2, uShadowMatrix2, uShadowBias2, wp, n, soft), t);
     }
     if (dist < SHADOW_BOX2) {
         float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
-        return mix(shadow_cascade(uShadowMap2, uShadowMatrix2, uShadowBias2, wp, n),
-                   shadow_cascade(uShadowMap3, uShadowMatrix3, uShadowBias3, wp, n), t);
+        return mix(shadow_cascade(uShadowMap2, uShadowMatrix2, uShadowBias2, wp, n, soft),
+                   shadow_cascade(uShadowMap3, uShadowMatrix3, uShadowBias3, wp, n, soft), t);
     }
-    return shadow_cascade(uShadowMap3, uShadowMatrix3, uShadowBias3, wp, n);
+    return shadow_cascade(uShadowMap3, uShadowMatrix3, uShadowBias3, wp, n, soft);
 }
 
 void main() {
@@ -219,21 +241,27 @@ void main() {
             N = normalize(mix(N, vec3(0.0, 1.0, 0.0), smooth_layer * 0.55));
         }
     }
-    // мокрость: затемнение альбедо и более сильный блик
+    // мокрость: затемнение альбедо и более сильный блик. В ясную погоду
+    // (uWetness ~ 0, 99% времени) блок пропускается ЦЕЛИКОМ — 3 текстурных
+    // выборки (маска + двухчастотный шум) на каждый пиксель рельефа
+    // тратить незачем (uniform-ветвление бесплатно).
     float wet = clamp(uWetness, 0.0, 1.0);
-    // Маска мокрости: 0 = под крышей (сухо), 1 = открытое небо
-    float wet_mask = texture(uWetnessMask, vWorldPos.xz / uWorldSize).r;
-    // Вода скатывается: на вертикальных поверхностях эффект слабее
-    float slope_factor = clamp(N.y, 0.0, 1.0);
-    // Неоднородность мокрости: img/noise.png (REPEAT). Тексель шума
-    // ≈ 6 м / 1.25 м — мелкие пятна "мокрее / почти сухо".
-    float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
-                + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
-    noise = noise * noise;                 // контраст: резче мокрее/суше
-    float wet_eff = wet * wet_mask * slope_factor * mix(0.05, 1.8, noise);
-    // Гладкие покрытия держат воду лужами: мокрость на асфальте ровнее и сильнее
-    wet_eff = mix(wet_eff, wet * wet_mask * slope_factor, smooth_layer);
-    base = mix(base, base * 0.6, wet_eff * 0.7);
+    float wet_eff = 0.0;
+    if (wet > 0.004) {
+        // Маска мокрости: 0 = под крышей (сухо), 1 = открытое небо
+        float wet_mask = texture(uWetnessMask, vWorldPos.xz / uWorldSize).r;
+        // Вода скатывается: на вертикальных поверхностях эффект слабее
+        float slope_factor = clamp(N.y, 0.0, 1.0);
+        // Неоднородность мокрости: img/noise.png (REPEAT). Тексель шума
+        // ≈ 6 м / 1.25 м — мелкие пятна "мокрее / почти сухо".
+        float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
+                    + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
+        noise = noise * noise;                 // контраст: резче мокрее/суше
+        wet_eff = wet * wet_mask * slope_factor * mix(0.05, 1.8, noise);
+        // Гладкие покрытия держат воду лужами: мокрость на асфальте ровнее и сильнее
+        wet_eff = mix(wet_eff, wet * wet_mask * slope_factor, smooth_layer);
+        base = mix(base, base * 0.6, wet_eff * 0.7);
+    }
     // на месте поля пшеницы земля — золотистая почва (не плоская трава).
     // Под дорогой/покрытием тон поля не проступает (layer_sum гасит).
     vec2 wp = vWorldPos.xz;

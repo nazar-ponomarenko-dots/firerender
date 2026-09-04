@@ -138,6 +138,7 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'x')) console_selftest();
     if (strchr(fr_test, 's')) shadow_toggle();
     if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
+    if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // кэш статических каскадов off
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
     if (strchr(fr_test, 'p')) g_shadow_terrain = 0;
     if (strchr(fr_test, 'q')) g_shadow_veg = 0;
@@ -377,12 +378,13 @@ int main(int argc, char *argv[])
                                    (app_state() != APP_MENU || !app_bg_has()));
         renderer_end(&game, dt);
 
-        // FR_TEST 'S': автоскриншот на 90-м кадре и выход на 120-м —
-        // headless-проверка картинки (SDL_VIDEODRIVER=offscreen FR_TEST=S).
+        // FR_TEST 'S': автоскриншот на 450-м кадре и выход на 480-м —
+        // headless-проверка картинки + стабильный прогрев для профайлера
+        // (SDL_VIDEODRIVER=offscreen FR_TEST=S).
         if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'S')) {
             static int s_frames = 0;
-            if (++s_frames == 90) cmd_screenshot(NULL);
-            if (s_frames >= 120) running = false;
+            if (++s_frames == 450) cmd_screenshot(NULL);
+            if (s_frames >= 480) running = false;
         }
 
         // Меню (главное/пауза/настройки) — поверх замороженной сцены
