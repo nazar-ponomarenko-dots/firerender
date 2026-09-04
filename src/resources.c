@@ -263,17 +263,22 @@ static long file_mtime(const char *path)
 // Загружает пиксели БЕЗ кеша (пак карты -> диск через резолвер).
 // Возвращает malloc-буфер (stbi), который обязан освободить вызывающий
 // через stbi_image_free(). NULL — не загрузилась.
+// from_pak (может быть NULL) получает 1, если данные ВЗЯЛИСЬ ИЗ ПАКА карты:
+// только такие записи кеша обязаны умереть вместе с паком (cache_purge_pak).
+// Движковые img/*.png читаются с диска и живут между картами.
 static unsigned char *image_load_raw(const char *path, int *w, int *h,
-                                     int channels)
+                                     int channels, int *from_pak)
 {
     int iw = 0, ih = 0, c = 0;
     unsigned char *p = NULL;
+    if (from_pak) *from_pak = 0;
     {   // пак карты
         unsigned int sz = 0;
         unsigned char *pb = pak_read(path, &sz);
         if (pb) {
             p = stbi_load_from_memory(pb, (int)sz, &iw, &ih, &c, channels);
             free(pb);
+            if (p && from_pak) *from_pak = 1;
         }
         if (!p) {
             char resolved[512];
@@ -301,16 +306,18 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
         return e->data;
     }
 
-    unsigned char *p = image_load_raw(path, w, h, channels);
+    int from_pak = 0;
+    unsigned char *p = image_load_raw(path, w, h, channels, &from_pak);
     if (!p) {
         // Source Engine style: отсутствующая картинка заменяется notfound.png.
         // Если и он пропал — честный NULL (не рекурсия: ниже защита).
         if (strcmp(path, "img/notfound.png") == 0) return NULL;
         SDL_Log("Texture %s not found -> using img/notfound.png", path);
-        p = image_load_raw("img/notfound.png", w, h, channels);
+        p = image_load_raw("img/notfound.png", w, h, channels, &from_pak);
     }
     if (!p) return NULL;
     ResEntry *ne = cache_add(key, p, 1);
+    ne->from_pak = from_pak;      // из пака — только если реально из архива
     ne->iw = *w;
     ne->ih = *h;
     return p;
@@ -321,7 +328,7 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
 unsigned char *resources_image_strict(const char *path, int *w, int *h,
                                       int channels)
 {
-    return image_load_raw(path, w, h, channels);
+    return image_load_raw(path, w, h, channels, NULL);
 }
 
 // --- Текстуры ----------------------------------------------------------------
@@ -345,6 +352,16 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     GLuint tex = make_texture(w, h, img, channels == 4 ? GL_RGBA : GL_RGB,
                               wrap, linear);
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)tex, 1);
+    // «Из пака» наследуем от записи ПИКСЕЛЕЙ: движковые img/*.png читаются с
+    // диска даже при открытом паке и обязаны выживать смену карты (иначе на
+    // повторной загрузке они грузятся заново — с чужими глобальными флагами
+    // stb_image и лишней работой).
+    {
+        char ikey[256];
+        snprintf(ikey, sizeof ikey, "img#%s#%d", path, channels);
+        ResEntry *im = cache_find(ikey);
+        ne->from_pak = im ? im->from_pak : 0;
+    }
     ne->iw = w;
     ne->ih = h;
     // Для hot-reload текстур: путь и параметры + mtime (если не из пака)
@@ -367,7 +384,7 @@ int resources_texture_reload(void)
         if (mt == e->tex_mt) continue;
         int w = 0, h = 0;
         unsigned char *img = image_load_raw(e->tex_path, &w, &h,
-                                            e->tex_channels);
+                                            e->tex_channels, NULL);
         if (!img) continue;
         GLuint tex = (GLuint)(uintptr_t)e->data;
         GLenum fmt = e->tex_channels == 4 ? GL_RGBA : GL_RGB;

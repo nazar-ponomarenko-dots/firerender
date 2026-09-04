@@ -176,6 +176,7 @@ AnimGlb *glb_anim_parse(const char *path)
     // родители и дети
     for(int i=0;i<node_n;i++){const JsonNode*nd=json_array_get(nd_a,i); AnimNode*N=&out->nodes[i];
         const JsonNode*ch=json_find(nd,"children");
+        snprintf(N->name,sizeof N->name,"%s",json_str(json_find(nd,"name"),""));
         if(ch&&ch->type==JSON_ARRAY){for(int k=0;k<json_array_len(ch);k++){int ci=(int)json_num(json_array_get(ch,k),-1);
             if(ci>=0&&ci<node_n&&N->nchildren<64){N->children[N->nchildren++]=ci; out->nodes[ci].parent=i;}}}
         N->mesh=(int)json_num(json_find(nd,"mesh"),-1);
@@ -681,17 +682,17 @@ static void anim_render(SceneNode*n,float dt){
     (void)dt;
     AnimParams*p=n?n->params:NULL; if(!p||p->rc->pass==RP_SHADOW)return;
     if(!p->enabled) return;
-    if(!frustum_test_sphere(&p->rc->frustum, n->pos[0], n->pos[1], n->pos[2], p->radius))
+    if(!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13], n->world[14], p->radius))
         return;
     // build_bones уже выполнен в anim_update для этого кадра — не дублируем.
-    // Базовая матрица экземпляра: перенос + масштаб объекта. СКИНЕННЫЕ примитивы
-    // рисуются в ней: jointMatrix = world[joint]*inverseBind уже в пространстве
-    // скелета (проверено: bind-pose inverseBind у FBX-экспорта единичная, и
-    // jointMatrix(bind) = node_world[joint] = вся цепочка масштабов файла).
-    // НЕ-СКИНЕННЫЕ меши (земля, пропсы в иерархии) дополнительно умножаются на
-    // node_world своего узла — без этого они лежат в "сыром" масштабе файла
-    // (у girl_01 это 0.01*0.93) и раздуты/смещены относительно скелета.
-    float inst[16]={p->scale,0,0,0, 0,p->scale,0,0, 0,0,p->scale,0, n->pos[0],n->pos[1],n->pos[2],1};
+    // Базовая матрица экземпляра = МИРОВАЯ матрица узла (scene.c): в ней
+    // позиция, поворот, масштаб и — если узел прицеплен — матрица кости
+    // родителя. Модель можно вращать и вешать на другие модели.
+    // СКИНЕННЫЕ примитивы рисуются в ней: jointMatrix = world[joint]*inverseBind
+    // уже в пространстве скелета. НЕ-СКИНЕННЫЕ меши (пропсы в иерархии)
+    // дополнительно умножаются на node_world своего узла — иначе они лежат в
+    // «сыром» масштабе файла.
+    const float *inst = n->world;
     glEnable(GL_DEPTH_TEST); glUseProgram(p->prog);
     scene_uniforms_bind(&p->su,p->rc);
     if(p->u_tex>=0)glUniform1i(p->u_tex,0);
@@ -702,21 +703,6 @@ static void anim_render(SceneNode*n,float dt){
             m4mul(model,&p->node_world[d->node*16],inst);
         else
             memcpy(model,inst,sizeof model);
-        if(i<60){
-            static int s_dbg_once=1;
-            if(s_dbg_once){
-                s_dbg_once=0;
-                SDL_Log("glb_anim dbg: item %d/%d node=%d skin=%d has_skin=%d nw_scale=(%.4f,%.4f,%.4f) nw_t=(%.2f,%.2f,%.2f) model_scale=(%.4f,%.4f,%.4f)",
-                    i,p->count,d->node,d->skin,d->has_skin,
-                    d->node>=0&&p->data&&d->node<p->data->nnode?p->node_world[d->node*16+0]:0,
-                    d->node>=0&&p->data&&d->node<p->data->nnode?p->node_world[d->node*16+5]:0,
-                    d->node>=0&&p->data&&d->node<p->data->nnode?p->node_world[d->node*16+10]:0,
-                    d->node>=0&&p->data&&d->node<p->data->nnode?p->node_world[d->node*16+12]:0,
-                    d->node>=0&&p->data&&d->node<p->data->nnode?p->node_world[d->node*16+13]:0,
-                    d->node>=0&&p->data&&d->node<p->data->nnode?p->node_world[d->node*16+14]:0,
-                    model[0],model[5],model[10]);
-            }
-        }
         glUniformMatrix4fv(p->u_model,1,GL_FALSE,model);
         if(p->u_specular>=0)glUniform1f(p->u_specular,d->specular);
         if(p->u_hasskin>=0)glUniform1i(p->u_hasskin,d->has_skin?1:0);
@@ -728,6 +714,50 @@ static void anim_render(SceneNode*n,float dt){
         glDrawElements(GL_TRIANGLES,d->index_count,d->index_type,NULL);
     }
     glBindVertexArray(0);
+}
+
+// --- Точки крепления: матрица кости (хук scene.h) --------------------------------
+// Слот = индекс УЗЛА glTF. Отдаём node_world[slot] — матрицу кости в
+// пространстве МОДЕЛИ (без её мировой матрицы: её scene.c умножит сам).
+// Масштаб модели (p->scale) уже входит в мировую матрицу узла, а node_world
+// несёт только внутреннюю иерархию файла — поэтому цепочка получается
+// world(модель) * bone(модель) * local(ребёнок), как и ожидается.
+static void anim_attach_matrix(SceneNode *parent, int slot, float out[16])
+{
+    AnimParams *p = parent ? parent->params : NULL;
+    if (!p || !p->data || !p->node_world) return;
+    if (slot < 0 || slot >= p->data->nnode) return;
+    memcpy(out, &p->node_world[slot * 16], 16 * sizeof(float));
+}
+
+int glb_anim_bone_count(SceneNode *n)
+{
+    AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
+                  ? n->params : NULL;
+    return (p && p->data) ? p->data->nnode : 0;
+}
+
+const char *glb_anim_bone_name(SceneNode *n, int idx)
+{
+    AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
+                  ? n->params : NULL;
+    if (!p || !p->data || idx < 0 || idx >= p->data->nnode) return NULL;
+    return p->data->nodes[idx].name;
+}
+
+int glb_anim_bone_find(SceneNode *n, const char *name)
+{
+    AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
+                  ? n->params : NULL;
+    if (!p || !p->data || !name || !name[0]) return -1;
+    // Точное совпадение имени
+    for (int i = 0; i < p->data->nnode; i++)
+        if (strcmp(p->data->nodes[i].name, name) == 0) return i;
+    // Иначе — по подстроке (в GLB кости часто зовутся "mixamorig:Hand_R")
+    for (int i = 0; i < p->data->nnode; i++)
+        if (p->data->nodes[i].name[0] && strstr(p->data->nodes[i].name, name))
+            return i;
+    return -1;
 }
 
 static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int skin,int node,const float*snow){
@@ -863,7 +893,11 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     glUseProgram(0);
     float size[3]={scale,scale,scale};
     SceneNode*n=node_new(path,"AnimInstance3D",pos,size,p,anim_update,anim_render);
+    // Масштаб — в трансформ узла (scene.c соберёт мировую матрицу).
+    n->scl[0]=n->scl[1]=n->scl[2]=p->scale;
+    n->attach_fn=anim_attach_matrix;      // к костям можно цеплять узлы
     build_bones(p);
+    node_update_transforms(n);            // мировая матрица до первого рендера
     anim_reg_add(n);
     return n;
 }
@@ -1007,6 +1041,10 @@ void glb_anim_set_scale(SceneNode*n,float s){
     AnimParams*p=anim_params_of(n); if(!p)return;
     if(s<=0)s=1;
     p->scale=s;
+    // Масштаб теперь живёт в ТРАНСФОРМЕ узла (scene.c строит из него мировую
+    // матрицу) — p->scale остаётся для радиуса отсечения и запросов API.
+    n->scl[0]=n->scl[1]=n->scl[2]=s;
+    n->size[0]=n->size[1]=n->size[2]=s;
     if(p->data){float r=0;
         for(int i=0;i<p->data->ninst;i++){AnimPrim*P=&p->data->prims[p->data->instances[i].prim];
             for(int v=0;v<P->vcount;v++){

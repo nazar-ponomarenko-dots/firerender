@@ -15,6 +15,7 @@
 #include "console.h"
 #include "cvars.h"
 #include "game.h"
+#include "gi.h"
 #include "gl_loader.h"
 #include "gpu.h"
 #include "hud.h"
@@ -44,6 +45,8 @@
 static BloomParams s_bloom;
 // SSR — отражения экранного пространства (рельеф в дождь): сцена+отражение.
 static SsrParams s_ssr;
+// GI — динамическое глобальное освещение (аналог Lumen): непрямой свет + AO.
+static GiParams s_gi;
 // Кубомап отражений воды (6 граней, рендер от игрока — см. renderer_cubemap_pass)
 static GpuTex s_refl_cubemap = 0;
 static GpuFbo s_refl_cubemap_fbo[6] = {0};
@@ -88,6 +91,14 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
     // PNG хранит строки сверху вниз (в capture флип по Y), а glTexImage2D
     // считает строку 0 низом — без обратного флипа отражения были бы
     // перевёрнуты и ложились "криво". Флипаем при загрузке.
+    //
+    // ВАЖНО: флаг stb_image ГЛОБАЛЬНЫЙ и «липкий». Раньше его тут включали и
+    // не сбрасывали — а make_cubemap_fbo зовётся из renderer_setup в САМОМ
+    // КОНЦЕ сборки сцены. При выходе в меню cache_purge_pak выбрасывает из
+    // кеша все ресурсы, загруженные при открытом паке карты (в т.ч. движковые
+    // img/grass.png, img/tree.png), и на ПОВТОРНОЙ загрузке карты они читались
+    // уже с включённым флипом — вся трава/пшеница/деревья вверх ногами.
+    // Теперь флаг возвращается в 0 сразу после чтения граней (см. ниже).
     stbi_set_flip_vertically_on_load(1);
     for (int face = 0; face < 6; face++) {
         char pattern[256];
@@ -121,6 +132,7 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
         gpu_cubemap_face_rgb8(s_gpu, id, face, w, h, px);
         stbi_image_free(px);
     }
+    stbi_set_flip_vertically_on_load(0);   // глобальный флаг — вернуть как было
 
     if (id) {
         gpu_tex_params_cubemap(s_gpu, id, 1);
@@ -489,6 +501,8 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     memset(&s_bloom, 0, sizeof s_bloom);
     bloom_init(&s_bloom, vw, vh);
     ssr_init(&s_ssr, vw, vh);
+    memset(&s_gi, 0, sizeof s_gi);
+    gi_init(&s_gi, vw, vh);
     voxfog_init(w, vw, vh);
     make_cubemap_fbo(256); // кубомап фиксированного размера
     s_cubemap_valid = 0;
@@ -503,6 +517,7 @@ void renderer_resize(int vw, int vh)
     if (!s_active) return;
     bloom_resize(&s_bloom, vw, vh);
     ssr_resize(&s_ssr, vw, vh);
+    gi_resize(&s_gi, vw, vh);
     voxfog_resize(vw, vh);
 }
 
@@ -511,6 +526,7 @@ void renderer_teardown(void)
     if (!s_active) return;
     bloom_cleanup(&s_bloom);
     ssr_cleanup(&s_ssr);
+    gi_cleanup(&s_gi);
     voxfog_cleanup();
     if (s_refl_cubemap) {
         gpu_tex_delete(s_gpu, &s_refl_cubemap);
@@ -762,15 +778,27 @@ gpu_wireframe(s_gpu, s_wire);
         gpu_bind_framebuffer(s_gpu, 0);
         gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();
+        GLuint scene_for_post = bloom_scene_tex(&s_bloom);
+        // GI (аналог Lumen): непрямой свет + ambient occlusion. Идёт ПЕРВЫМ
+        // из пост-проходов — SSR и bloom должны видеть уже подсвеченную
+        // сцену (иначе отражения и свечение считаются от «недосвеченной»).
+        if (gi_is_on()) {
+            Uint64 tg = SDL_GetPerformanceCounter();
+            prof_gpu_begin(PROF_GI);
+            scene_for_post = gi_render(&s_gi, scene_for_post,
+                                       bloom_scene_depth(&s_bloom), &s_rc);
+            prof_gpu_end(PROF_GI);
+            Uint64 te = SDL_GetPerformanceCounter();
+            prof_add_ms(PROF_GI, (float)(te - tg) * 1000.0f / (float)pf);
+        }
         // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
         // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
-        GLuint scene_for_post = bloom_scene_tex(&s_bloom);
         if (cvar_get("r_ssr") >= 0.5f &&
             (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
             cvar_get("r_ssr_strength") > 0.0f) {
             Uint64 ts = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_SSR);
-            ssr_render(&s_ssr, bloom_scene_tex(&s_bloom),
+            ssr_render(&s_ssr, scene_for_post,
                        bloom_scene_depth(&s_bloom), &s_rc);
             prof_gpu_end(PROF_SSR);
             Uint64 te = SDL_GetPerformanceCounter();

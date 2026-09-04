@@ -33,6 +33,7 @@
 #include "shader.h"
 #include "shadow.h"
 #include "sky.h"
+#include "splat.h"
 #include "water.h"
 #include "world.h"
 #include "fx.h"
@@ -74,27 +75,30 @@ static float s_vis_r = 220.0f;          // радиус статики, м (у �
 #define VEG_WHEAT_MARK  3.5f
 
 // --- Гибкая таблица видов растительности ---------------------------------------
-// Каждый вид — строка: масштаб, тон, наклон, утапливание, вес появления и
-// индекс слоя 2D-массива спрайтов. Трава (3 вида) и одуванчик рисуются
+// Каждый вид — строка: масштаб, тон, наклон, вес появления и индекс слоя
+// 2D-массива спрайтов. Трава (3 вида) и одуванчик рисуются
 // одним потоком экземпляров; вид выбирается по весу. Новый вид = одна строка
 // текстуры в массиве + одна строка здесь. Плотность всей «травяной» группы
 // одна (s_grass_density) — веса распределяют её между видами.
+//
+// Поле sink УБРАНО: растения ставятся ОСНОВАНИЕМ РОВНО НА ЗЕМЛЮ. Прозрачные
+// поля спрайтов компенсирует шейдер (veg_base_v в wheat.vs), а утапливание
+// на 36..46% высоты прятало низ травы под рельефом.
 typedef struct {
     float s0, s1;      // мин/макс масштаб (м)
     float t0, t1;      // мин/макс тон
     float lean;        // максимальный наклон вбок (амплитуда, рад)
-    float sink;        // доля высоты, утапливаемая в почву
     float weight;      // доля вида среди всей травяной группы (0..~1)
     float layer;       // слой 2D-массива спрайтов (см. VEG_LAY_*)
 } VegKind;
 #define VEG_KINDS 4
 #define VEG_KIND_DANDELION 3   // индекс одуванчика в таблице s_kinds
 static const VegKind s_kinds[VEG_KINDS] = {
-    //             s0    s1    t0    t1   lean  sink  weight layer
-    { 0.32f, 0.62f, 0.78f, 1.06f, 0.26f, 0.46f, 0.30f, VEG_LAY_GRASS0 },  // высокая густая
-    { 0.22f, 0.46f, 0.85f, 1.12f, 0.25f, 0.40f, 0.28f, VEG_LAY_GRASS1 },  // средняя
-    { 0.18f, 0.38f, 0.72f, 0.98f, 0.25f, 0.36f, 0.26f, VEG_LAY_GRASS2 },  // низкая рыхлая
-    { 0.30f, 0.55f, 0.95f, 1.15f, 0.15f, 0.40f, 0.0f,  VEG_LAY_DANDE  },  // одуванчик (вне весов, редкий по плотности)
+    //             s0    s1    t0    t1   lean  weight layer
+    { 0.32f, 0.62f, 0.78f, 1.06f, 0.26f, 0.30f, VEG_LAY_GRASS0 },  // высокая густая
+    { 0.22f, 0.46f, 0.85f, 1.12f, 0.25f, 0.28f, VEG_LAY_GRASS1 },  // средняя
+    { 0.18f, 0.38f, 0.72f, 0.98f, 0.25f, 0.26f, VEG_LAY_GRASS2 },  // низкая рыхлая
+    { 0.30f, 0.55f, 0.95f, 1.15f, 0.15f, 0.0f,  VEG_LAY_DANDE  },  // одуванчик (вне весов, редкий по плотности)
 };
 // Сумма весов ТРАВЫ (одуванчик выбирается отдельно по p_dande, его вес
 // в таблицу не входит при нормировке выбора вида).
@@ -161,6 +165,28 @@ static GLuint g_veg_mesh_vbo, g_veg_mesh_ibo, g_veg_vb[4];
 // шейдере, но вершинный этап обрабатывал вдвое меньше экземпляров.
 static GLuint g_veg_shadow_vao[4], g_veg_shadow_vbo[4];
 static int g_veg_shadow_cnt[4];
+
+// --- GPU-driven (compute-cull + indirect draw, GL 4.3+) ---------------------
+//  Контекст-независимые буферы: все инстансы лежат в Src-SSBO, compute-проход
+//  отсекает по фрустуму + экранному следу и КОМПАКТНО пишет выжившие в
+//  Cull-SSBO, а их число копит в instanceCount команды Indirect. Отрисовка —
+//  glDrawElementsIndirect: число вершин ограничено видимыми пикселями, а не
+//  плотностью («миллиард» ≈ 1 травинка по затратам). Фолбэк — инстансный
+//  путь ниже (если g_veg_gpudriven == 0 или cvar r_veg_gpudriven == 0).
+static int g_veg_gpudriven = 0;       // путь активен (capability && cvar)
+static int g_veg_src_cnt[4];          // число инстансов в Src по слоям
+static GLuint g_veg_src_ssbo[4];      // все инстансы (читаются в compute)
+static GLuint g_veg_cull_ssbo[4];     // компактные выжившие (-> VAO инстансов)
+static GLuint g_veg_indirect[4];      // DrawElementsIndirectCommand
+static GLuint g_veg_vao_cull[4];      // VAO с инстансами из Cull-SSBO
+static GLuint s_cull_prog = 0;        // compute-программа отсечения
+static GLint u_cull_vp, u_cull_viewh, u_cull_tan, u_cull_minpix, u_cull_src, u_cull_off;
+static GLint u_cull_planes, u_cull_campos;
+
+// Прототипы GPU-driven (определены ниже, используются выше по файлу).
+static void veg_gpu_init(VegParams *p);
+static void veg_gpu_src_upload(int q, const float *src, int count);
+static void veg_gpu_draw(VegParams *p, const RendererContext *rc);
 
 // Теневой шейдер растительности (глубина с прореживанием на CPU) —
 // раньше жил в shadow.c, теперь принадлежит растительности.
@@ -344,6 +370,11 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
         if (gy < w->min_height + 4.0f) continue;    // крайние низины — тоже
         // Под водой растительности нет: дно моря/реки/лужи остаётся чистым
         if (water_surface_at(w, x, z) > gy) continue;
+        // ЗАНЯТОСТЬ И ПОКРЫТИЕ (splat.c): трава не растёт внутри статических
+        // 3D-объектов/моделей и на дорогах; на песке/щебне/асфальте её нет,
+        // на грунте она редкая (surfaces.grass). Один множитель на кандидата.
+        float cover = splat_grass_factor(x, z);
+        if (cover <= 0.001f) continue;
         // уклон и нормаль земли (знаковые разности — как в normal map)
         float sdx = sample_height(w, x + e, z)
                   - sample_height(w, x - e, z);
@@ -354,7 +385,7 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
         // на наклоне горизонтальный квадрат метра меньше, и без поправки
         // трава/пшеница редеют — остаются "дырки". Поправка = 1/cos = sqrt(1+s²).
         float surf = sqrtf(1.0f + slope * slope);
-        float want = (wheat ? dw : dg) * surf;
+        float want = (wheat ? dw : dg) * surf * cover;
         if (frnd(&rng) >= want / wmax) continue; // прореживание под плотность
         float nx = -sdx, nz = -sdz;              // нормаль: (-dh/dx, 2e, -dh/dz)
         float nl = sqrtf(nx*nx + nz*nz + 4.0f * e * e);
@@ -362,7 +393,10 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
 
         float *dst = wheat ? wdst : gdst;
         dst[0] = x;
-        dst[1] = gy + 0.05f * frnd(&rng);        // лёгкий подскок по высоте
+        // ОСНОВАНИЕ РОВНО НА ЗЕМЛЕ: ни подскока, ни утапливания. Низ спрайта
+        // совпадает с поверхностью рельефа (прозрачные поля картинки убирает
+        // шейдер, см. veg_base_v в wheat.vs).
+        dst[1] = gy;
         dst[2] = z;
         dst[3] = nx;
         dst[4] = nz;
@@ -382,7 +416,6 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
             dst[7] = k->t0 + (k->t1 - k->t0) * frnd(&rng);   // тон
             dst[8] = k->layer;                    // слой спрайта (вид)
             dst[9] = (frnd(&rng) - 0.5f) * k->lean;  // наклон вбок, как в жизни
-            dst[1] -= k->sink * dst[6];           // утапливание в почву
         }
         dst[10] = sdx / (2.0f * e);              // уклон: dh/dx, dh/dz
         dst[11] = sdz / (2.0f * e);
@@ -550,7 +583,14 @@ static void veg_update(const float cam_pos[3], VegParams *p)
 {
     int cx = (int)floorf(cam_pos[0] / VEG_CHUNK);
     int cy = (int)floorf(cam_pos[2] / VEG_CHUNK);
-    if (cx == g_chunk_cam[0] && cy == g_chunk_cam[1]) return;
+    // Карта занятости могла измениться (поставили модель командой glb/mesh —
+    // splat_occupy_* повышает версию): динамические чанки надо пересобрать,
+    // чтобы трава ушла из-под новой модели. Сравниваем версию со своей.
+    static unsigned int s_occ_seen = 0;
+    unsigned int occ_now = splat_occupancy_version();
+    int occ_dirty = (occ_now != s_occ_seen);
+    if (occ_dirty) s_occ_seen = occ_now;
+    if (!occ_dirty && cx == g_chunk_cam[0] && cy == g_chunk_cam[1]) return;
     g_chunk_cam[0] = cx;
     g_chunk_cam[1] = cy;
 
@@ -593,7 +633,7 @@ static void veg_update(const float cam_pos[3], VegParams *p)
         // cvar'ов — из-за рассогласования КАЖДЫЙ чанк не проходил допуск, и
         // вся растительность пересоздавалась на каждом переходе чанка
         // (regen storm).
-        bool need_gen = (!c->g && !c->w) ||
+        bool need_gen = (!c->g && !c->w) || occ_dirty ||
                         fabsf(c->dg_d - tgd) > VEG_REGEN_TOL ||
                         fabsf(c->dw_d - twd) > VEG_REGEN_TOL;
         if (need_gen) {
@@ -632,6 +672,9 @@ static void veg_update(const float cam_pos[3], VegParams *p)
     glBufferData(GL_ARRAY_BUFFER, (size_t)gc * 12 * sizeof(float), g_dyn_g, GL_STREAM_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo_dw);
     glBufferData(GL_ARRAY_BUFFER, (size_t)wc * 12 * sizeof(float), g_dyn_w, GL_STREAM_DRAW);
+    // GPU-driven: те же динамические слои — в Src-SSBO для compute-cull.
+    veg_gpu_src_upload(2, g_dyn_g, g_dyn_gc);
+    veg_gpu_src_upload(3, g_dyn_w, g_dyn_wc);
     // Прореженные копии для теней: ровно правило uThin из shadowveg.vs
     // ((flat_index*2654435761)%100<50) — карты теней байт-в-байт те же, но
     // вершинный этап теневого прохода обрабатывает вдвое меньше экземпляров.
@@ -853,6 +896,16 @@ void veg_node_render(SceneNode *n, float dt)
     // Gribb-Hartmann, матрицы column-major — строки m[c*4+r]).
     frustum_extract(rc->viewproj);
     glBindTexture(GL_TEXTURE_2D_ARRAY, p->tex);
+
+    // GPU-driven (compute-cull + indirect): вершины ограничены видимыми
+    // пикселями, а не плотностью. Затраты «миллиард» ≈ «1».
+    if (g_veg_gpudriven && (int)cvar_get("r_veg_gpudriven") > 0.5f) {
+        veg_gpu_draw(p, rc);
+        glEnable(GL_CULL_FACE);
+        return;
+    }
+
+    // Иначе — инстансный фолбэк (старый путь).
     // Статика: только супер-чанки в радиусе видимости (вместо всей карты).
     // Дальше спрайты меньше пикселя — их вид несёт текстура земли. При
     // подъёме камеры радиус растёт, чтобы обзор с горы не пустел.
@@ -941,6 +994,157 @@ static void veg_setup_vao(GLuint vao, GLuint inst_vbo)
     glVertexAttribDivisor(4, 1);
     glVertexAttribDivisor(5, 1);
     glVertexAttribDivisor(6, 1);
+    glBindVertexArray(0);
+}
+
+// --- GPU-driven: compute-cull + indirect draw -------------------------------
+// Создаёт SSBO/indirect/VAO и компилирует compute-шейдер отсечения. При
+// любой ошибке выключает путь (g_veg_gpudriven = 0) — останется инстансный
+// фолбэк. Вызывается из veg_make_node, только если контекст >= GL 4.3.
+static void veg_gpu_init(VegParams *p)
+{
+    (void)p;
+    s_cull_prog = make_compute_program("shaders/veg_cull.cs");
+    if (!s_cull_prog) { g_veg_gpudriven = 0; return; }
+    u_cull_vp     = glGetUniformLocation(s_cull_prog, "uViewProj");
+    u_cull_viewh  = glGetUniformLocation(s_cull_prog, "uViewH");
+    u_cull_tan    = glGetUniformLocation(s_cull_prog, "uTanHalfFov");
+    u_cull_minpix = glGetUniformLocation(s_cull_prog, "uMinPix");
+    u_cull_src    = glGetUniformLocation(s_cull_prog, "uSrcCount");
+    u_cull_off    = glGetUniformLocation(s_cull_prog, "uOffset");
+    u_cull_planes = glGetUniformLocation(s_cull_prog, "uPlanes");
+    u_cull_campos = glGetUniformLocation(s_cull_prog, "uCamPos");
+    // Привязка SSBO-блоков compute-программы к binding points 0/1/2.
+    GLuint bsrc = (p_glGetProgramResourceIndex)
+                  ? p_glGetProgramResourceIndex(s_cull_prog, GL_SHADER_STORAGE_BLOCK, "Src")
+                  : GL_INVALID_INDEX;
+    GLuint bdst = (p_glGetProgramResourceIndex)
+                  ? p_glGetProgramResourceIndex(s_cull_prog, GL_SHADER_STORAGE_BLOCK, "Dst")
+                  : GL_INVALID_INDEX;
+    GLuint bind = (p_glGetProgramResourceIndex)
+                  ? p_glGetProgramResourceIndex(s_cull_prog, GL_SHADER_STORAGE_BLOCK, "Indirect")
+                  : GL_INVALID_INDEX;
+    if (bsrc == GL_INVALID_INDEX || bdst == GL_INVALID_INDEX || bind == GL_INVALID_INDEX) {
+        SDL_Log("veg: SSBO block binding failed, GPU-driven off");
+        glDeleteProgram(s_cull_prog);
+        s_cull_prog = 0; g_veg_gpudriven = 0; return;
+    }
+    glShaderStorageBlockBinding(s_cull_prog, bsrc, 0);
+    glShaderStorageBlockBinding(s_cull_prog, bdst, 1);
+    glShaderStorageBlockBinding(s_cull_prog, bind, 2);
+    for (int q = 0; q < 4; q++) {
+        g_veg_src_cnt[q] = 0;
+        glGenBuffers(1, &g_veg_src_ssbo[q]);
+        glGenBuffers(1, &g_veg_cull_ssbo[q]);
+        // Cull-SSBO должен существовать ДО VAO (инстансный буфер): 1 float.
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, g_veg_cull_ssbo[q]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), NULL, GL_DYNAMIC_COPY);
+        glGenBuffers(1, &g_veg_indirect[q]);
+        GLuint cmd[5] = { 6, 0, 0, 0, 0 };   // count=6 (квад), instanceCount=0
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, g_veg_indirect[q]);
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(cmd), cmd, GL_DYNAMIC_DRAW);
+        glGenVertexArrays(1, &g_veg_vao_cull[q]);
+        veg_setup_vao(g_veg_vao_cull[q], g_veg_cull_ssbo[q]);
+        glBindVertexArray(0);
+    }
+    SDL_Log("Veg GPU-driven: compute-cull ENABLED (4 layers)");
+}
+
+// Заливает слой q (0=стат трава,1=стат пшен,2=дин трава,3=дин пшен) в Src-SSBO
+// и подгоняет под него Cull-SSBO (худший случай — все выжили). Вызывается
+// после генерации статического слоя и после каждой пересборки динамики.
+static void veg_gpu_src_upload(int q, const float *src, int count)
+{
+    if (!g_veg_gpudriven || count <= 0) return;
+    g_veg_src_cnt[q] = count;
+    size_t bytes = (size_t)count * 12 * sizeof(float);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, g_veg_src_ssbo[q]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, src, GL_DYNAMIC_COPY);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, g_veg_cull_ssbo[q]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, NULL, GL_DYNAMIC_COPY);
+}
+
+// GPU-driven проход: cull + indirect-отрисовка 4 слоёв. Затраты на вершины
+// ограничены видимыми пикселями (дальние субпиксельные травинки отсекаются
+// в compute ещё до вершинного шейдера). СТАТИКА пред-отсекается по супер-
+// чанкам ТОЧНО так же, как инстансный фолбэк (frustum + радиус видимости) —
+// compute гоняется только по видимым супер-чанкам, визуально набор тот же,
+// но перебирается в разы меньше инстансов. ОДИН барьер на все слои.
+static void veg_gpu_draw(VegParams *p, const RendererContext *rc)
+{
+    float fov = rc->cam_fov_deg * 0.0174532925f;
+    float tanhf = tanf(0.5f * fov);
+    glUseProgram(s_cull_prog);
+    glUniformMatrix4fv(u_cull_vp, 1, GL_FALSE, rc->viewproj);
+    glUniform1f(u_cull_viewh, (float)rc->vh);
+    glUniform1f(u_cull_tan, tanhf);
+    // Порог видимости — cvar: 1 px по умолчанию. Отсечение идёт СФЕРОЙ вокруг
+    // всего спрайта (см. veg_cull.cs), поэтому растения на кромке экрана
+    // остаются видны — раньше тест точкой обрезал их целиком.
+    glUniform1f(u_cull_minpix, cvar_get("r_veg_minpix"));
+    // Плоскости фрустума в МИРЕ (Gribb-Hartmann, frustum.c): нормали внутрь.
+    // rc->frustum уже посчитан renderer_ctx_fill для этого кадра.
+    glUniform4fv(u_cull_planes, 6, &rc->frustum.p[0][0]);
+    glUniform3f(u_cull_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, p->tex);
+
+    // --- PASS 1: compute-cull всех слоёв (накопить в indirect) ------------
+    for (int q = 0; q < 4; q++) {
+        if (g_veg_src_cnt[q] <= 0) continue;
+        if ((q < 2 && !g_draw_static_main) || (q >= 2 && !g_draw_dyn_main)) continue;
+        // обнулить instanceCount перед накоплением слоя
+        GLuint zero = 0;
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, g_veg_indirect[q]);
+        glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 4, 4, &zero);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, g_veg_src_ssbo[q]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, g_veg_cull_ssbo[q]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, g_veg_indirect[q]);
+
+        if (q < 2) {
+            // СТАТИКА: только видимые супер-чанки (как фолбэк). Это и есть
+            // главная экономия: не гонять compute по ВСЕЙ карте каждый кадр.
+            float vis = s_vis_r;
+            if (rc->cam_pos[1] > VEG_VIS_H)
+                vis += (rc->cam_pos[1] - VEG_VIS_H) * VEG_VIS_F;
+            float vr2 = vis * vis;
+            float half = VEG_SUPER * VEG_CHUNK * 0.5f;
+            const int *off = q == 0 ? g_sc_off_g : g_sc_off_w;
+            const int *cnt = q == 0 ? g_sc_cnt_g : g_sc_cnt_w;
+            for (int s = 0; s < g_sc_n; s++) {
+                if (cnt[s] <= 0) continue;
+                if (!frustum_box(p->world, g_sc_cx[s] - half, g_sc_cz[s] - half,
+                                 g_sc_cx[s] + half, g_sc_cz[s] + half)) continue;
+                float dx = g_sc_cx[s] - rc->cam_pos[0];
+                float dz = g_sc_cz[s] - rc->cam_pos[2];
+                if (dx*dx + dz*dz > vr2) continue;
+                glUniform1i(u_cull_off, off[s]);
+                glUniform1i(u_cull_src, cnt[s]);
+                glDispatchCompute((GLuint)((cnt[s] + 63) / 64), 1, 1);
+            }
+        } else {
+            // ДИНАМИКА: весь слой (уже ограничен радиусом вокруг камеры)
+            glUniform1i(u_cull_off, 0);
+            glUniform1i(u_cull_src, g_veg_src_cnt[q]);
+            glDispatchCompute((GLuint)((g_veg_src_cnt[q] + 63) / 64), 1, 1);
+        }
+    }
+    // ОДИН барьер: каждый слой пишет свой буфер, читать будем после всех.
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, 0);
+
+    // --- PASS 2: indirect-отрисовка выживших ------------------------------
+    glUseProgram(p->prog);
+    for (int q = 0; q < 4; q++) {
+        if (g_veg_src_cnt[q] <= 0) continue;
+        if ((q < 2 && !g_draw_static_main) || (q >= 2 && !g_draw_dyn_main)) continue;
+        glUniform1f(p->u_dyn, q >= 2 ? 1.0f : 0.0f);
+        glBindVertexArray(g_veg_vao_cull[q]);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, g_veg_indirect[q]);
+        glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, (const void *)0);
+    }
     glBindVertexArray(0);
 }
 
@@ -1091,6 +1295,19 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     // Предпрореженный слой для теней (каждый 2-й экземпляр)
     veg_shadow_build();
 
+    // GPU-driven (compute-cull + indirect): контекст >= GL 4.3. Статические
+    // слои уже сгенерированы — заливаем их в Src-SSBO. Динамика дольётся в
+    // veg_update при первом же движении камеры.
+    g_veg_gpudriven = g_gl_gpu_driven;
+    cvar_register("r_veg_gpudriven", 1.0f, "GPU-driven compute-cull травы (0=фолбэк)");
+    cvar_register_ex("r_veg_minpix", 1.0f, 0.0f, 8.0f, CVAR_ARCHIVE,
+                     "мин. экранный след травинки, px (0 = не отсекать)");
+    if (g_veg_gpudriven) {
+        veg_gpu_init(p);
+        veg_gpu_src_upload(0, g_static_g, g_static_gc);
+        veg_gpu_src_upload(1, g_static_w, g_static_wc);
+    }
+
     const float size[3] = { w->world_w, w->max_height - w->min_height,
                             w->world_d };
     return node_new("Vegetation", "MeshInstance3D", NULL, size, p,
@@ -1131,6 +1348,17 @@ void veg_cleanup(SceneNode *n)
     for (int q = 0; q < 4; q++) {
         glDeleteBuffers(1, &g_veg_vb[q]);
         glDeleteVertexArrays(1, &g_veg_vao[q]);
+    }
+    if (g_veg_gpudriven) {
+        for (int q = 0; q < 4; q++) {
+            glDeleteBuffers(1, &g_veg_src_ssbo[q]);
+            glDeleteBuffers(1, &g_veg_cull_ssbo[q]);
+            glDeleteBuffers(1, &g_veg_indirect[q]);
+            glDeleteVertexArrays(1, &g_veg_vao_cull[q]);
+        }
+        if (s_cull_prog) glDeleteProgram(s_cull_prog);
+        s_cull_prog = 0;
+        g_veg_gpudriven = 0;
     }
     for (int q = 0; q < 4; q++) {
         glDeleteBuffers(1, &g_veg_shadow_vbo[q]);

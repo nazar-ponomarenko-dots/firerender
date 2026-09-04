@@ -200,12 +200,9 @@ void mesh_node_render(SceneNode *n, float dt)
     if (!p->mesh) return;
     mesh_gpu_upload(p->mesh);
 
-    float model[16] = {
-        p->scale, 0, 0, 0,
-        0, p->scale, 0, 0,
-        0, 0, p->scale, 0,
-        n->pos[0], n->pos[1], n->pos[2], 1
-    };
+    // Модельная матрица = мировая матрица узла (позиция + поворот + масштаб +
+    // цепочка родителей/костей). См. scene.c: node_update_transforms.
+    const float *model = n->world;
 
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
@@ -276,6 +273,10 @@ SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
     glUseProgram(0);
 
     float size[3] = {scale, scale, scale};
-    return node_new("MeshInstance", "MeshInstance3D", pos, size, p,
-                    NULL, mesh_node_render);
+    SceneNode *n = node_new("MeshInstance", "MeshInstance3D", pos, size, p,
+                            NULL, mesh_node_render);
+    // Масштаб — в трансформ узла (scene.c): меш можно вращать и прицеплять.
+    n->scl[0] = n->scl[1] = n->scl[2] = p->scale;
+    node_update_transforms(n);
+    return n;
 }

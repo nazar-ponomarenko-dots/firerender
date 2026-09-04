@@ -724,7 +724,12 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     glUseProgram(0);
 
     float size[3] = {scale, scale, scale};
-    return node_new("GlbInstance", "GlbInstance3D", pos, size, p, NULL, glb_node_render);
+    SceneNode *n = node_new("GlbInstance", "GlbInstance3D", pos, size, p, NULL, glb_node_render);
+    // Масштаб — в трансформ узла: мировую матрицу собирает scene.c, поэтому
+    // модель можно вращать (n->rot) и цеплять к костям других моделей.
+    n->scl[0] = n->scl[1] = n->scl[2] = p->scale;
+    node_update_transforms(n);
+    return n;
 }
 
 void glb_node_render(SceneNode *n, float dt)
@@ -732,15 +737,15 @@ void glb_node_render(SceneNode *n, float dt)
     (void)dt;
     GlbParams *p = n->params;
     if (!p || p->rc->pass == RP_SHADOW) return;
-    if (!frustum_test_sphere(&p->rc->frustum, n->pos[0], n->pos[1], n->pos[2], p->radius))
+    if (!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13],
+                             n->world[14], p->radius))
         return;
 
-    float model[16] = {
-        p->scale, 0, 0, 0,
-        0, p->scale, 0, 0,
-        0, 0, p->scale, 0,
-        n->pos[0], n->pos[1], n->pos[2], 1
-    };
+    // Модельная матрица = МИРОВАЯ матрица узла (scene.c): позиция, поворот,
+    // масштаб и — если узел прицеплен к костям/другому узлу — вся цепочка
+    // родителей. Раньше собиралась вручную из pos и скаляра scale, поэтому
+    // модель нельзя было ни повернуть, ни прицепить.
+    const float *model = n->world;
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, p->rc);

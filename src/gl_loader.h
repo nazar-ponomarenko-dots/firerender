@@ -84,6 +84,21 @@
     F(void,             glDrawElementsInstanced, (GLenum, GLsizei, GLenum, const void *, GLsizei)) \
     F(void,             glDrawElementsInstancedBaseInstance, (GLenum, GLsizei, GLenum, const void *, GLsizei, GLuint)) \
     F(void,             glDrawArraysInstanced,  (GLenum, GLint, GLsizei, GLsizei)) \
+
+// --- OPTIONAL: GPU-driven рендер (compute + indirect) ------------------------
+//  Нужны для варианта Б (compute-cull + indirect draw). Доступны с GL 4.3
+//  (desktop) / GLES 3.1. Загружаются НЕ фатально: указатель == NULL, если
+//  контекст старый — тогда g_gl_gpu_driven = 0 и используется инстансный
+//  фолбэк. Не включены в GL_FUNCS, чтобы не ломать загрузку на GL 3.3.
+#define GL_FUNCS_OPT(F)                                                          \
+    F(void,             glDispatchCompute,           (GLuint, GLuint, GLuint))   \
+    F(void,             glMemoryBarrier,             (GLbitfield))               \
+    F(void,             glBindBufferBase,            (GLenum, GLuint, GLuint))   \
+    F(void,             glBindBufferRange,           (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)) \
+    F(void,             glShaderStorageBlockBinding, (GLuint, GLuint, GLuint))   \
+    F(void,             glDrawElementsIndirect,      (GLenum, GLenum, const void *)) \
+    F(void,             glMultiDrawElementsIndirect, (GLenum, GLenum, const void *, GLsizei, GLsizei)) \
+    F(GLuint,           glGetProgramResourceIndex,    (GLuint, GLenum, const char *)) \
     F(void,             glEnableVertexAttribArray,(GLuint))                       \
     F(void,             glUseProgram,            (GLuint))                        \
     F(void,             glDrawArrays,            (GLenum, GLint, GLsizei))        \
@@ -109,6 +124,7 @@
     F(void,             glUniform4f,             (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) \
     F(void,             glUniformMatrix4fv,      (GLint, GLsizei, GLboolean, const GLfloat *)) \
     F(void,             glUniform3fv,           (GLint, GLsizei, const GLfloat *)) \
+    F(void,             glUniform4fv,           (GLint, GLsizei, const GLfloat *)) \
     F(void,             glUniform1fv,           (GLint, GLsizei, const GLfloat *)) \
     F(void,             glViewport,              (GLint, GLint, GLsizei, GLsizei)) \
     F(void,             glEnable,                (GLenum))                        \
@@ -126,6 +142,15 @@
 #define F(ret, name, args) extern ret (APIENTRY *p_##name) args;
 GL_FUNCS(F)
 #undef F
+
+// OPTIONAL GPU-driven указатели (NULL, если контекст < GL 4.3).
+#define F(ret, name, args) extern ret (APIENTRY *p_##name) args;
+GL_FUNCS_OPT(F)
+#undef F
+
+// 1, если контекст поддерживает compute + indirect (GPU-driven рендер).
+// Устанавливается в load_gl_funcs().
+extern int g_gl_gpu_driven;
 
 #define glGetString               p_glGetString
 #define glClearColor              p_glClearColor
@@ -175,6 +200,15 @@ GL_FUNCS(F)
 #define glDrawElements            fr_glDrawElements
 #define glDrawElementsInstanced   fr_glDrawElementsInstanced
 #define glDrawElementsInstancedBaseInstance fr_glDrawElementsInstancedBaseInstance
+// OPTIONAL GPU-driven функции: макросы на указатели (NULL, если контекст
+// старый — вызов только под защитой g_gl_gpu_driven).
+#define glDispatchCompute            p_glDispatchCompute
+#define glMemoryBarrier              p_glMemoryBarrier
+#define glBindBufferBase             p_glBindBufferBase
+#define glBindBufferRange            p_glBindBufferRange
+#define glShaderStorageBlockBinding  p_glShaderStorageBlockBinding
+#define glDrawElementsIndirect       p_glDrawElementsIndirect
+#define glMultiDrawElementsIndirect  p_glMultiDrawElementsIndirect
 #define glEnableVertexAttribArray p_glEnableVertexAttribArray
 #define glUseProgram              p_glUseProgram
 #define glDrawArrays              fr_glDrawArrays
@@ -201,6 +235,7 @@ GL_FUNCS(F)
 #define glUniform4f               p_glUniform4f
 #define glUniformMatrix4fv        p_glUniformMatrix4fv
 #define glUniform3fv              p_glUniform3fv
+#define glUniform4fv              p_glUniform4fv
 #define glUniform1fv              p_glUniform1fv
 #define glViewport                p_glViewport
 #define glEnable                  p_glEnable

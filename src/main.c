@@ -248,8 +248,12 @@ int main(int argc, char *argv[])
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
+    // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
+    // раньше. Если драйвер не даст 4.5, SDL вернёт ближайший доступный, и
+    // vegetation.c сам откатится на инстансный путь (g_gl_gpu_driven == 0).
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -277,6 +281,8 @@ int main(int argc, char *argv[])
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
     SDL_Log("OpenGL: %s", glGetString(GL_VERSION));
+    SDL_Log("GPU-driven veg (compute+indirect): %s",
+            g_gl_gpu_driven ? "ENABLED" : "disabled (instanced fallback)");
     SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
     // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------

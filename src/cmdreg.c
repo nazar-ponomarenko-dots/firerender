@@ -12,6 +12,7 @@
 #include "cmdreg.h"
 
 #include "actions.h"     // g_act + ActionId
+#include "attach.h"      // cmd_attach / cmd_sprite
 #include "commands.h"    // команды-действия
 #include "material.h"    // (cmd_matlist в commands.c)
 #include "fx.h"          // команды эффектов
@@ -106,7 +107,9 @@ static const ConCmdDesc s_cmds[] = {
     { "glbanim_loop",  "glbanim_loop <0|1> [имя-узла] — зациклить анимацию", cmd_glbanim_loop },
     { "glbanim_seek",  "glbanim_seek <сек> [имя-узла] — поставить время клипа (с кадра)", cmd_glbanim_seek },
     { "glbanim_frame", "glbanim_frame <кадр> [fps] [имя-узла] — поставить кадр (fps=24)", cmd_glbanim_frame },
-    { "anim", "anim [list|help] | anim <N> pos|move x y z [spd] | clip|play|pause|loop|speed|seek|frame|on|off|scale|clips|stop|remove", cmd_anim },
+    { "anim", "anim [list|help] | anim <N> pos|move x y z [spd] | rot yaw pitch roll | clip|play|pause|loop|speed|seek|frame|on|off|scale|clips|bones|stop|remove", cmd_anim },
+    { "attach", "attach sprite|glb|mesh <N> <кость|-> <файл> [...] | attach list|bones <N>", cmd_attach },
+    { "sprite", "sprite <png> [x y z] [w h] [flat] — спрайт в мире", cmd_sprite },
     { "cubemap_capture", "cubemap_capture [x y z] [size] — захват кубомапа отражений (6 PNG в cubemaps/)", cmd_cubemap_capture },
 };
 

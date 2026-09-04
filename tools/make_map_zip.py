@@ -44,12 +44,18 @@ files = [("map.json", os.path.join(MAP_DIR, "map.json")),
 # Ресурсы карты — с их относительными путями (img/...). Сначала ищем в
 # корне движка (общие текстуры/шейдеры), потом в папке карты map/ —
 # карта может нести свои ресурсы (shaders/, img/, audio/).
+# map.json/map.png уже добавлены выше: пропускаем, иначе zip получал
+# дубликат имени (map.png лежит и в манифесте как terrain.image).
+added = {name for name, _ in files}
 for rel in sorted(set(refs)):
+    if rel in added:
+        continue
     src = os.path.join(ROOT, rel)
     if not os.path.isfile(src):
         src = os.path.join(MAP_DIR, rel)
     if os.path.isfile(src):
         files.append((rel, src))
+        added.add(rel)
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:

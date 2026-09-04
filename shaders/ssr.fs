@@ -35,6 +35,18 @@ uniform float uBlend;           // темпоральный вес прошло�
 
 out vec4 FragColor;
 
+// Санитайзер: NaN/Inf/отрицательные значения в RGBA16F-таргете. Их источник —
+// деление на ~0 в реконструкции нормали/позиции у самого near-плана (под
+// ногами игрока) и в марше. Без этой защиты мусор попадал в ИСТОРИЮ
+// темпорального сглаживания и с каждым кадром расползался по экрану чёрными
+// пятнами (поворот камеры «лечил», потому что история сбрасывалась).
+vec3 sane(vec3 c) {
+    c = mix(c, vec3(0.0), vec3(isnan(c.x) || isinf(c.x),
+                               isnan(c.y) || isinf(c.y),
+                               isnan(c.z) || isinf(c.z)));
+    return clamp(c, vec3(0.0), vec3(64.0));
+}
+
 // Мировая позиция по uv и глубинному пикселю (приём volumetric.fs)
 vec3 wpos(vec2 uv, float depth) {
     vec4 ndc = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
@@ -95,11 +107,18 @@ vec3 blurCol(vec2 uv, float rough) {
 }
 
 void main() {
-    vec3 scene = texture(uScene, vUV).rgb;
+    vec3 scene = sane(texture(uScene, vUV).rgb);
     float d0 = texture(uDepth, vUV).r;
     // Небо (depth ~ 1: скайбокс не пишет глубину) — отражать нечего
     if (d0 > 0.9999) {
         FragColor = vec4(mix(scene, vec3(0.0), step(0.5, uDebug)), 1.0);
+        return;
+    }
+    // Пиксели у самого near-плана (под ногами, «в упор»): реконструкция
+    // мировой точки и нормали из глубины там вырождается — nan/inf и чёрные
+    // точки. Отражения на такой поверхности всё равно не видно.
+    if (d0 < 1e-5) {
+        FragColor = vec4(scene, 1.0);
         return;
     }
 
@@ -240,23 +259,29 @@ void main() {
         return;
     }
 
-    vec3 outc = mix(scene, refl, mixw_clamped);
+    vec3 outc = mix(scene, sane(refl), mixw_clamped);
 
     // Темпоральное сглаживание (антимерцание): пересобираем мировую точку
     // пикселя и репроектируем её в прошлый кадр (uPrevViewProj). Там берём
     // прошлый кадр (сцена+отражение) и подмешиваем с весом uBlend. Репроджект
     // в мировой точке устойчив к мелкому дрожанию камеры/луча; если uv ушёл за
     // экран или история ещё не готова (uBlend=0) — просто текущий кадр.
+    // История ТОЖЕ санитайзится: один мусорный пиксель без этого расползался
+    // по экрану (каждый кадр подмешивал сам себя).
     if (uBlend > 0.001) {
         vec4 pc = uPrevViewProj * vec4(P, 1.0);
         if (pc.w > 0.02) {
             vec2 puv = pc.xy / pc.w * 0.5 + 0.5;
             if (puv.x > 0.003 && puv.x < 0.997 && puv.y > 0.003 && puv.y < 0.997) {
-                vec3 prev = texture(uPrev, puv).rgb;
-                outc = mix(outc, prev, uBlend);
+                vec3 prev = sane(texture(uPrev, puv).rgb);
+                // Гейт по глубине: история должна быть той же поверхностью,
+                // иначе за движущимися объектами тянулся шлейф.
+                float pd = texture(uDepth, puv).r;
+                float ok = (pd < 0.9999 && pd > 1e-5) ? 1.0 : 0.0;
+                outc = mix(outc, prev, uBlend * ok);
             }
         }
     }
 
-    FragColor = vec4(outc, 1.0);
+    FragColor = vec4(sane(outc), 1.0);
 }

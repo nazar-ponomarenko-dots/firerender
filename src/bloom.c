@@ -285,7 +285,7 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
         glUniform1f(b->u_sat, cvar_get("r_saturation"));
     if (b->u_contrast >= 0)
         glUniform1f(b->u_contrast, cvar_get("r_contrast"));
-    // Мокрость (дождь): в композите снижает цветастость
+    // Мокрота (дождь): в композите снижает цветастость
     if (b->u_wetness >= 0)
         glUniform1f(b->u_wetness, fx_wetness());
     // Подводные эффекты (renderer обновляет состояние в bloom_set_underwater)

@@ -27,6 +27,7 @@ typedef struct {
     int parent;                 // индекс родителя (-1 = корень)
     int children[64];
     int nchildren;
+    char name[64];              // имя узла/кости из GLB (для attach по имени)
     float trs[16];              // статичный локальный трансформ (если задан матрицей)
     int mesh;                   // индекс меша (-1 — нет геометрии)
     // БАЗОВЫЕ (из файла) TRS-компоненты — анимация накладывается поверх них
@@ -139,6 +140,14 @@ void glb_anim_move_to(SceneNode *n, const float pos[3], float speed); // пла�
 void glb_anim_stop_move(SceneNode *n);
 void glb_anim_set_scale(SceneNode *n, float s);     // масштаб модели
 void glb_anim_remove_node(SceneNode *n);            // отвязать и выгрузить узел
+
+// --- Точки крепления: кости скелета (см. attach.h) ------------------------------
+//  Узел AnimInstance3D отдаёт мировые-относительно-себя матрицы костей через
+//  хук scene.h (attach_fn). Индекс слота = индекс УЗЛА glTF (кости), поэтому
+//  прицепить можно к любому узлу иерархии модели, не только к суставу кожи.
+int glb_anim_bone_count(SceneNode *n);                 // 0 — не скелетная модель
+const char *glb_anim_bone_name(SceneNode *n, int idx); // имя кости (или NULL)
+int glb_anim_bone_find(SceneNode *n, const char *name);// индекс по имени, -1
 
 void glb_anim_node_render(SceneNode *n, float dt);
 

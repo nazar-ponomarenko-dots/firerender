@@ -16,6 +16,12 @@ GLuint compile_shader_file(GLenum type, const char *path);
 // Связывает вершинный + фрагментный шейдер в программу (кеш в resources.c).
 GLuint make_program(const char *vs_path, const char *fs_path);
 
+// Компилирует и линкует ВЫЧИСЛИТЕЛЬНЫЙ шейдер (.cs) в программу.
+// Используется GPU-driven cull-проходом растительности (GL 4.3+). Без кеша.
+// Возвращает ID или 0. Привязку SSBO-блоков к binding point делает вызывающий
+// через glShaderStorageBlockBinding(prog, ...).
+GLuint make_compute_program(const char *cs_path);
+
 // --- Hot-reload шейдеров --------------------------------------------------------
 // Регистрация хука пересборки: после перекомпиляции изменённых программ
 // модуль повторно ищет uniform'ы и статичные uniform'ы (см. resources.c).

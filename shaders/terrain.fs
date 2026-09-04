@@ -21,6 +21,19 @@ uniform vec4 uField;             // прямоугольник поля: x0, x1,
 uniform vec3 uFieldColor;        // золотистый тон поля пшеницы
 uniform float uFieldBlend;       // сила смешивания (из map.json)
 
+// --- Поверхности (splat): грунт / песок / щебень / асфальт --------------------
+//  uSplat (юнит 12) — RGBA-маска на весь мир (splat.c): R грунт, G песок,
+//  B щебень/тропинка, A асфальт. Базовая земля видна там, где все каналы 0.
+//  Слои — обычные тайлящиеся текстуры (юниты 13..16), у каждой свой масштаб
+//  (метров на тайл) и своя «шероховатость» для мокрого блика.
+uniform sampler2D uSplat;
+uniform sampler2D uLayer0;       // грунт
+uniform sampler2D uLayer1;       // песок
+uniform sampler2D uLayer2;       // щебень / тропинка
+uniform sampler2D uLayer3;       // асфальт
+uniform vec4 uLayerScale;        // метров на тайл для слоёв 0..3
+uniform float uSplatOn;          // 1 = маска запечена (иначе только база)
+
 uniform vec3 uCamPos;            // позиция узла Camera
 
 uniform vec3 uAmbient;           // базовое освещение (полусфера считается ниже)
@@ -177,6 +190,35 @@ void main() {
         vec2 perturb = vec2(w1 * 2.0 - 1.0, w2 * 2.0 - 1.0);
         N = normalize(N + vec3(perturb * 0.25, 0.0));
     }
+    // --- Слои поверхности (splat): грунт/песок/щебень/асфальт ----------------
+    // Маска запечена splat.c: дороги, пятна покраски, авто-щебень на обрывах.
+    // smooth_layer — насколько поверхность «гладкая»: асфальт блестит после
+    // дождя сильнее травы, песок почти не блестит. rough_detail гасит
+    // шумовое возмущение нормали на асфальте (он ровный).
+    float smooth_layer = 0.0;
+    float layer_sum = 0.0;
+    if (uSplatOn > 0.5) {
+        vec4 sp = texture(uSplat, vWorldPos.xz / uWorldSize);
+        layer_sum = min(sp.r + sp.g + sp.b + sp.a, 1.0);
+        if (layer_sum > 0.002) {
+            vec3 c0 = texture(uLayer0, vWorldPos.xz / max(uLayerScale.x, 0.01)).rgb;
+            vec3 c1 = texture(uLayer1, vWorldPos.xz / max(uLayerScale.y, 0.01)).rgb;
+            vec3 c2 = texture(uLayer2, vWorldPos.xz / max(uLayerScale.z, 0.01)).rgb;
+            vec3 c3 = texture(uLayer3, vWorldPos.xz / max(uLayerScale.w, 0.01)).rgb;
+            // Взвешенная сумма слоёв, нормированная своим весом: базовая
+            // земля остаётся в остатке (1 - layer_sum).
+            vec3 mixed = c0 * sp.r + c1 * sp.g + c2 * sp.b + c3 * sp.a;
+            mixed /= max(sp.r + sp.g + sp.b + sp.a, 1e-4);
+            base = mix(base, mixed, layer_sum);
+            // Асфальт гладкий (0.9), щебень средний, грунт/песок матовые.
+            smooth_layer = (sp.r * 0.15 + sp.g * 0.05 + sp.b * 0.35
+                          + sp.a * 0.95) / max(sp.r + sp.g + sp.b + sp.a, 1e-4);
+            smooth_layer *= layer_sum;
+            // На ровном покрытии шумовую детализацию нормали убираем:
+            // асфальт не должен «бугриться».
+            N = normalize(mix(N, vec3(0.0, 1.0, 0.0), smooth_layer * 0.55));
+        }
+    }
     // мокрость: затемнение альбедо и более сильный блик
     float wet = clamp(uWetness, 0.0, 1.0);
     // Маска мокрости: 0 = под крышей (сухо), 1 = открытое небо
@@ -189,14 +231,17 @@ void main() {
                 + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
     noise = noise * noise;                 // контраст: резче мокрее/суше
     float wet_eff = wet * wet_mask * slope_factor * mix(0.05, 1.8, noise);
+    // Гладкие покрытия держат воду лужами: мокрость на асфальте ровнее и сильнее
+    wet_eff = mix(wet_eff, wet * wet_mask * slope_factor, smooth_layer);
     base = mix(base, base * 0.6, wet_eff * 0.7);
-    // на месте поля пшеницы земля — золотистая почва (не плоская трава)
+    // на месте поля пшеницы земля — золотистая почва (не плоская трава).
+    // Под дорогой/покрытием тон поля не проступает (layer_sum гасит).
     vec2 wp = vWorldPos.xz;
     float fx = smoothstep(uField.x - 8.0, uField.x, wp.x)
              * (1.0 - smoothstep(uField.y, uField.y + 8.0, wp.x));
     float fz = smoothstep(uField.z - 8.0, uField.z, wp.y)
              * (1.0 - smoothstep(uField.w, uField.w + 8.0, wp.y));
-    base = mix(base, uFieldColor, fx * fz * uFieldBlend);
+    base = mix(base, uFieldColor, fx * fz * uFieldBlend * (1.0 - layer_sum));
     base *= 0.94 + 0.12 * hash12(vWorldPos.xz * 0.5);
     // Снежный покров (общий блок snow.glsl): открытые небу пологие участки.
     {

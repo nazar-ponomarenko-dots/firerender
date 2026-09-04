@@ -66,6 +66,10 @@ void cmd_glbanim_loop(const char *args);    // glbanim_loop <0|1>
 void cmd_glbanim_seek(const char *args);    // glbanim_seek <сек> [имя-узла]
 void cmd_glbanim_frame(const char *args);   // glbanim_frame <кадр> [fps] [имя-узла]
 void cmd_anim(const char *args);            // инструмент anim (реестр по индексу)
+// Крепление узлов к моделям/костям: attach sprite|glb|mesh <N> <кость> <файл>
+void cmd_attach(const char *args);
+// Свободный спрайт в мире: sprite <png> [x y z] [w h] [flat]
+void cmd_sprite(const char *args);
 void cmd_matlist(const char *args);
 
 // Эффекты (fx) — частицы на точке попадения луча взгляда в рельеф

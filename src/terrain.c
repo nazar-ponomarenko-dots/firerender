@@ -12,6 +12,7 @@
 #include "resources.h"
 #include "shader.h"
 #include "sky.h"
+#include "splat.h"
 
 #include "stb_image.h"
 #include <math.h>
@@ -49,17 +50,18 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
     p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
     p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
-
-    scene_uniforms_init(&p->su, prog);    // общий набор сцены
-    p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
-    p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
-    p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
-    p->u_heightmax = glGetUniformLocation(prog, "uHeightMax");
-    p->u_texscale  = glGetUniformLocation(prog, "uTexScale");
-    p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
-    p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
-    p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
     p->u_wetness_mask = glGetUniformLocation(prog, "uWetnessMask");
+    // Поверхности (splat): маска + 4 слоя. Юниты: 10 — маска, 12..15 — слои
+    // (0..9 и 11 заняты базой/нормалями/высотами/каскадами/статикой/
+    // мокростью/кубомапом/шумом — см. ниже).
+    p->u_splat = glGetUniformLocation(prog, "uSplat");
+    p->u_splat_on = glGetUniformLocation(prog, "uSplatOn");
+    p->u_layer_scale = glGetUniformLocation(prog, "uLayerScale");
+    for (int i = 0; i < SPLAT_LAYERS; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "uLayer%d", i);
+        p->u_layer[i] = glGetUniformLocation(prog, name);
+    }
 
     // Материал рельефа: статичные параметры шейдера
     MapTerrain tc;
@@ -81,6 +83,18 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
     glUniform1i(p->u_static_on, 0);
     glUniform2f(p->u_worldsize, w->world_w, w->world_d);
+    // Слои поверхностей: сэмплеры и масштабы тайлов (метров на тайл).
+    if (p->u_splat >= 0) glUniform1i(p->u_splat, 10);
+    for (int i = 0; i < SPLAT_LAYERS; i++)
+        if (p->u_layer[i] >= 0) glUniform1i(p->u_layer[i], 12 + i);
+    {
+        const MapSurfaces *sf = splat_surfaces();
+        if (p->u_layer_scale >= 0)
+            glUniform4f(p->u_layer_scale, sf->scale[0], sf->scale[1],
+                        sf->scale[2], sf->scale[3]);
+        if (p->u_splat_on >= 0)
+            glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
+    }
     // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
     glUniform1f(p->u_specpow, 40.0f);
     glUniform1f(p->u_specint, 0.0f);   // земля матовая — без отражения солнца
@@ -565,6 +579,15 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     p->tiles = tiles;
     p->tiles_n = tiles_n;
     p->vert_count = vert_count;
+    // Слои поверхностей (splat): текстуры тайлятся (REPEAT) с мип-фильтром —
+    // асфальт/песок на дистанции не рябят. Пути и масштабы — из map.json
+    // (surfaces = { ... }), дефолты — img/dirt|sand|gravel|asphalt.png.
+    {
+        const MapSurfaces *sf = splat_surfaces();
+        for (int i = 0; i < SPLAT_LAYERS; i++)
+            p->tex_splat_layer[i] = resources_texture(sf->tex[i], 3,
+                                                      GL_REPEAT, 1);
+    }
     terrain_prog_init(p, w);              // uniform'ы (+ статичные)
     s_terr = p;                           // для hot-reload
     shader_on_reshade(terrain_reshade);
@@ -629,6 +652,18 @@ void terrain_node_render(SceneNode *n, float dt)
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, terrain_wetness_mask_tex());
     }
+    // Поверхности (splat): маска на юните 10, слои на 12..15
+    if (p->u_splat_on >= 0)
+        glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
+    if (splat_have()) {
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_2D, splat_texture());
+        for (int i = 0; i < SPLAT_LAYERS; i++) {
+            if (!p->tex_splat_layer[i]) continue;
+            glActiveTexture(GL_TEXTURE12 + i);
+            glBindTexture(GL_TEXTURE_2D, p->tex_splat_layer[i]);
+        }
+    }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex_base);     // земля (unit 0)
     glActiveTexture(GL_TEXTURE1);
@@ -651,6 +686,11 @@ void terrain_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->ibo);
     glDeleteVertexArrays(1, &p->vao);
     glDeleteTextures(1, &p->tex_base);   // вычисленная текстура — не из кеша
+    for (int i = 0; i < SPLAT_LAYERS; i++)
+        if (p->tex_splat_layer[i]) {
+            resources_texture_release(p->tex_splat_layer[i]);
+            p->tex_splat_layer[i] = 0;
+        }
     free(p->tiles);
     if (s_static_tex) {
         glDeleteTextures(1, &s_static_tex);
