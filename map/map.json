@@ -64,7 +64,7 @@
     "slope_rock": 42.0
   },
   "veg": {
-    "grass_density": 1.2,
+    "grass_density": 10.0,
     "wheat_density": 140,
     "grass_floor": 0.012,
     "wheat_floor": 1.0,

@@ -129,6 +129,102 @@ static void bloom_reshade(void)
     bloom_prog_init(b);
 }
 
+// --- MSAA сцены -------------------------------------------------------------
+// Сцена рисуется в мультисэмпл-FBO (RBO цвет+глубина, cvar r_msaa: 0/2/4/8/16),
+// затем bloom_resolve разворачивает его в обычные текстуры (цвет + глубина),
+// которые читают GI/SSR/туман/композит. Кромки геометрии сглаживаются
+// аппаратно, глубина для пост-эффектов остаётся резкой.
+// Смена r_msaa применяется в начале кадра (bloom_msaa_sync) — без перезапуска.
+
+static void msaa_free(BloomParams *b)
+{
+    if (b->fbo_ms) {
+        glDeleteFramebuffers(1, &b->fbo_ms);
+        glDeleteRenderbuffers(1, &b->rbo_color);
+        glDeleteRenderbuffers(1, &b->rbo_depth);
+        b->fbo_ms = b->rbo_color = b->rbo_depth = 0;
+    }
+    b->msaa = 0;
+}
+
+// Желаемые сэмплы из cvar'а, ужатые до допустимых значений и лимита GPU.
+static int msaa_wanted(void)
+{
+    static const int allowed[] = { 0, 2, 4, 8, 16 };
+    float v = cvar_get("r_msaa");
+    int s = (int)(v + 0.5f);
+    if (s < 0) s = 0;
+    if (s > 16) s = 16;
+    // ближайшее допустимое
+    int best = 0;
+    for (unsigned i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
+        if (allowed[i] <= s) best = allowed[i];
+    if (best > 0) {
+        int maxs = 0;
+        glGetIntegerv(GL_MAX_SAMPLES, &maxs);
+        if (best > maxs) {
+            // не тянет GPU — берём наибольший доступный шаг
+            for (int i = 4; i >= 0; i--)
+                if (allowed[i] <= maxs) { best = allowed[i]; break; }
+        }
+    }
+    return best;
+}
+
+static void msaa_create(BloomParams *b, int samples)
+{
+    msaa_free(b);
+    if (samples <= 0) return;
+    glGenFramebuffers(1, &b->fbo_ms);
+    glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_ms);
+    glGenRenderbuffers(1, &b->rbo_color);
+    glBindRenderbuffer(GL_RENDERBUFFER, b->rbo_color);
+    // RGBA16F — как у обычной сцены: HDR сохраняется до тонмаппинга
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA16F,
+                                     b->vw, b->vh);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, b->rbo_color);
+    glGenRenderbuffers(1, &b->rbo_depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, b->rbo_depth);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples,
+                                     GL_DEPTH_COMPONENT24, b->vw, b->vh);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, b->rbo_depth);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        // Драйвер не даёт мультисэмпл-RGBA16F — честный фолбэк без MSAA
+        SDL_Log("MSAA %dx: FBO incomplete, выключаю (без сглаживания)", samples);
+        msaa_free(b);
+    } else {
+        b->msaa = samples;
+        SDL_Log("MSAA: %dx", samples);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void bloom_msaa_sync(BloomParams *b)
+{
+    int want = msaa_wanted();
+    if (want != b->msaa) msaa_create(b, want);
+}
+
+void bloom_resolve(BloomParams *b)
+{
+    if (!b->msaa) return;      // без MSAA сцена уже в обычных текстурах
+    GLint readf = 0, drawf = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readf);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawf);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);            // blit уважает ножницы — гасим
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo_ms);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo);
+    // Цвет + глубина: пост-эффекты (GI/SSR/туман) читают развёрнутую глубину
+    glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, b->vw, b->vh,
+                      GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)readf);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)drawf);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
 void bloom_init(BloomParams *b, int vw, int vh)
 {
     s_bloom_p = b;
@@ -145,6 +241,8 @@ void bloom_init(BloomParams *b, int vw, int vh)
     cvar_register("r_gamma", 1.0f, "гамма-коррекция (1 = без изменений)");
     cvar_register("r_saturation", 1.4f, "насыщенность (1 = без изменений)");
     cvar_register("r_contrast", 1.0f, "контраст (1 = без изменений)");
+    cvar_register_ex("r_msaa", 0.0f, 0.0f, 16.0f, CVAR_ARCHIVE,
+                     "сглаживание MSAA: 0/2/4/8/16 (применяется сразу)");
     b->threshold = bc.threshold;
     b->intensity = bc.intensity;
     b->strength  = bc.strength;
@@ -204,11 +302,13 @@ void bloom_resize(BloomParams *b, int vw, int vh)
     make_fbo(&b->fbo, &b->tex, &b->depth, vw, vh, 1);
     make_fbo(&b->fbo_glow[0], &b->tex_glow[0], NULL, gw, gh, 0);
     make_fbo(&b->fbo_glow[1], &b->tex_glow[1], NULL, gw, gh, 0);
+    // MSAA-таргет под новый размер (или под сменившийся r_msaa)
+    msaa_create(b, msaa_wanted());
 }
 
 GLuint bloom_scene_fbo(const BloomParams *b)
 {
-    return b->fbo;
+    return b->msaa ? b->fbo_ms : b->fbo;
 }
 
 GLuint bloom_scene_tex(const BloomParams *b)
@@ -314,4 +414,5 @@ void bloom_cleanup(BloomParams *b)
         glDeleteTextures(2, b->tex_glow);
         b->fbo = 0;
     }
+    msaa_free(b);
 }

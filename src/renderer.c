@@ -605,6 +605,8 @@ void renderer_begin(void)
     prof_reset();
     float clear_rgb[3] = { 0.6f, 0.65f, 0.7f };
     if (s_active) sky_fog_color(clear_rgb);
+    // Смена r_msaa вживую: пересоздать MSAA-таргет ДО привязки FBO сцены
+    bloom_msaa_sync(&s_bloom);
     gpu_bind_framebuffer(s_gpu, s_active ? bloom_scene_fbo(&s_bloom) : 0);
     gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
     gpu_clear(s_gpu, clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
@@ -775,6 +777,8 @@ gpu_wireframe(s_gpu, s_wire);
         did_3d = 1;
     }
     if (did_3d) {
+        // Развернуть MSAA-сцену в текстуры (цвет+глубина) для пост-проходов
+        bloom_resolve(&s_bloom);
         gpu_bind_framebuffer(s_gpu, 0);
         gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
         Uint64 pf = SDL_GetPerformanceFrequency();

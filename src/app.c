@@ -308,7 +308,7 @@ static int menu_audio(void)
 
 static int menu_graphics(void)
 {
-    menu_start("ГРАФИКА", 17, 460.0f);
+    menu_start("ГРАФИКА", 16, 460.0f);
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
@@ -338,13 +338,27 @@ static int menu_graphics(void)
     }
     cvar_checkbox(&s_ui, "r_bloom", "Свечение (bloom)");
     cvar_slider(&s_ui, "r_bloom_strength", "Сила свечения", 0.0f, 1.5f, "%.2f");
+    cvar_slider(&s_ui, "r_gamma", "Гамма", 0.5f, 2.5f, "%.2f");
     // SSR-отражения на мокром рельефе (сила — не в меню, cvar r_ssr_strength).
     cvar_checkbox(&s_ui, "r_ssr", "Отражения луж (SSR)");
-    // Глобальное освещение (GI, аналог Lumen): непрямой свет + затенение.
-    // r_gi — вкл/выкл, сила непрямого и свет неба в тенях (r_gi_skylight).
+    // Глобальное освещение (GI, аналог Lumen): вкл/выкл. Тонкие настройки —
+    // в консоли: r_gi_strength, r_gi_ao, r_gi_skylight и пр.
     cvar_checkbox(&s_ui, "r_gi", "Глобальное освещение (GI)");
-    cvar_slider(&s_ui, "r_gi_strength", "GI: сила непрямого света", 0.0f, 1.5f, "%.2f");
-    cvar_slider(&s_ui, "r_gi_skylight", "GI: свет неба в тенях", 0.0f, 2.5f, "%.2f");
+    // MSAA-сглаживание: клик циклит 0/2/4/8/16 (применяется сразу)
+    {
+        static const int vals[] = { 0, 2, 4, 8, 16 };
+        static const char *names[] = {
+            "Выкл", "2x MSAA", "4x MSAA", "8x MSAA", "16x MSAA"
+        };
+        int m = (int)(cvar_get("r_msaa") + 0.5f);
+        int idx = 0;
+        for (int i = 0; i < 5; i++)
+            if (vals[i] <= m) idx = i;
+        char lbl[96];
+        snprintf(lbl, sizeof lbl, "Сглаживание: %s", names[idx]);
+        if (ui_button(&s_ui, lbl))
+            cvar_set("r_msaa", (float)vals[(idx + 1) % 5]);
+    }
     cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
     cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
     ui_sep(&s_ui);

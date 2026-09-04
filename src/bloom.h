@@ -14,6 +14,9 @@
 typedef struct {
     GLuint fbo, tex;           // сцена: FBO + цвет (полный экран)
     GLuint depth;              // буфер глубины сцены
+    GLuint fbo_ms;             // MSAA-сцена: мультисэмпл-FBO (r_msaa > 0)
+    GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
+    int msaa;                  // активные сэмплы (0 = MSAA выключен)
     GLuint fbo_glow[2];        // ping-pong буферы glow (половинный размер)
     GLuint tex_glow[2];
     GLuint vao, vbo;           // полноэкранный треугольник
@@ -36,8 +39,19 @@ void bloom_init(BloomParams *b, int vw, int vh);
 // Пересоздаёт текстуры при изменении размера окна.
 void bloom_resize(BloomParams *b, int vw, int vh);
 
-// FBO, в который main.c рисует 3D-сцену (с глубиной).
+// FBO, в который main.c рисует 3D-сцену (с глубиной). При включённом MSAA
+// (cvar r_msaa) — мультисэмпл-FBO: сцена рисуется в него, затем
+// bloom_resolve разворачивает (resolve) цвет и глубину в обычные текстуры.
 GLuint bloom_scene_fbo(const BloomParams *b);
+
+// Пересоздаёт MSAA-таргет, если cvar r_msaa изменился (вызывать ДО привязки
+// FBO сцены в начале кадра). Живое применение настройки без перезапуска.
+void bloom_msaa_sync(BloomParams *b);
+
+// Разворачивает мультисэмпл-сцену в обычные текстуры (цвет + глубина) для
+// постобработки (GI/SSR/туман читают их). Без MSAA — ничего не делает.
+// Вызывать ПОСЛЕ отрисовки 3D-сцены, ДО всех пост-проходов.
+void bloom_resolve(BloomParams *b);
 
 // Текстура и глубина сцены (для объёмного тумана — voxfog.c).
 GLuint bloom_scene_tex(const BloomParams *b);

@@ -64,6 +64,8 @@
     F(void,             glGenRenderbuffers,      (GLsizei, GLuint *))             \
     F(void,             glBindRenderbuffer,      (GLenum, GLuint))                \
     F(void,             glRenderbufferStorage,   (GLenum, GLenum, GLsizei, GLsizei)) \
+    F(void,             glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei)) \
+    F(void,             glBlitFramebuffer,       (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     F(void,             glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint)) \
     F(GLenum,           glGetFramebufferAttachmentParameteriv, (GLenum, GLenum, GLenum, GLint *)) \
     F(void,             glGetTexLevelParameteriv, (GLenum, GLint, GLenum, GLint *)) \
@@ -73,6 +75,7 @@
     F(void,             glDeleteRenderbuffers,   (GLsizei, const GLuint *))       \
     F(GLenum,           glCheckFramebufferStatus,(GLenum))                        \
     F(void,             glGetIntegerv,           (GLenum, GLint *))               \
+    F(GLboolean,        glIsEnabled,             (GLenum))                        \
     F(GLenum,           glGetError,              (void))                          \
     F(void,             glDrawBuffer,            (GLenum))                        \
     F(void,             glReadBuffer,            (GLenum))                        \
@@ -181,6 +184,8 @@ extern int g_gl_gpu_driven;
 #define glGenRenderbuffers        p_glGenRenderbuffers
 #define glBindRenderbuffer        p_glBindRenderbuffer
 #define glRenderbufferStorage     p_glRenderbufferStorage
+#define glRenderbufferStorageMultisample p_glRenderbufferStorageMultisample
+#define glBlitFramebuffer         p_glBlitFramebuffer
 #define glFramebufferRenderbuffer p_glFramebufferRenderbuffer
 #define glGetFramebufferAttachmentParameteriv p_glGetFramebufferAttachmentParameteriv
 #define glGetTexLevelParameteriv      p_glGetTexLevelParameteriv
@@ -190,6 +195,7 @@ extern int g_gl_gpu_driven;
 #define glDeleteRenderbuffers     p_glDeleteRenderbuffers
 #define glCheckFramebufferStatus  p_glCheckFramebufferStatus
 #define glGetIntegerv             p_glGetIntegerv
+#define glIsEnabled               p_glIsEnabled
 #define glGetError                p_glGetError
 #define glDrawBuffer              p_glDrawBuffer
 #define glReadBuffer              p_glReadBuffer

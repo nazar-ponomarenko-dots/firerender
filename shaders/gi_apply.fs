@@ -99,7 +99,9 @@ void main() {
     vec4 gi = upsample(vUV, linz(d * 2.0 - 1.0));
     vec3 ind = sane3(gi.rgb);
     float ao = (isnan(gi.a) || isinf(gi.a)) ? 1.0 : clamp(gi.a, 0.0, 1.0);
-    ao = mix(1.0, ao, clamp(uAoStrength, 0.0, 1.0));
+    // Сила затенения до 1.5: значения выше 1 пережимают тень глубже нуля
+    // (в нишах — до чистого чёрного), итог зажат в 0..1.
+    ao = clamp(mix(1.0, ao, clamp(uAoStrength, 0.0, 1.5)), 0.0, 1.0);
 
     if (uDebug > 1.5) { FragColor = vec4(vec3(ao), 1.0); return; }
     if (uDebug > 0.5) { FragColor = vec4(ind * uStrength, 1.0); return; }
