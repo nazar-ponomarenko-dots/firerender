@@ -192,12 +192,43 @@ void mesh_gpu_upload(Mesh *m)
     m->ready = 1;
 }
 
+// Теневая программа .obj-мешей: одна на модуль (mesh_shadow.vs/fs),
+// hot-reload через reshade-хук.
+static GLuint s_mesh_shadow_prog = 0;
+static GLint s_mesh_sh_model = -1, s_mesh_sh_vp = -1;
+static void mesh_shadow_reshade(void)
+{
+    GLuint p = resources_program_replace(s_mesh_shadow_prog,
+                                         "shaders/mesh_shadow.vs",
+                                         "shaders/mesh_shadow.fs");
+    if (p) s_mesh_shadow_prog = p;
+    s_mesh_sh_model = glGetUniformLocation(s_mesh_shadow_prog, "uModel");
+    s_mesh_sh_vp    = glGetUniformLocation(s_mesh_shadow_prog, "uViewProj");
+}
+
 void mesh_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     MeshLocs *p = n->params;
-    if (p->rc->pass == RP_SHADOW) return;   // меши в карты теней пока не пишут
     if (!p->mesh) return;
+    if (p->rc->pass == RP_SHADOW) {
+        // Тень .obj-меша: позиция (атрибут 0 VAO) x модель x VP от солнца.
+        // Alpha-test не нужен: obj-материалы непрозрачные (uAlphaTest = 0).
+        if (!s_mesh_shadow_prog) {
+            s_mesh_shadow_prog = resources_program_replace(
+                0, "shaders/mesh_shadow.vs", "shaders/mesh_shadow.fs");
+            mesh_shadow_reshade();
+            shader_on_reshade(mesh_shadow_reshade);
+        }
+        glEnable(GL_DEPTH_TEST);
+        glUseProgram(s_mesh_shadow_prog);
+        glUniformMatrix4fv(s_mesh_sh_model, 1, GL_FALSE, n->world);
+        glUniformMatrix4fv(s_mesh_sh_vp, 1, GL_FALSE, p->rc->shadow_vp);
+        glBindVertexArray(p->mesh->vao);
+        glDrawArrays(GL_TRIANGLES, 0, p->mesh->vcount);
+        glBindVertexArray(0);
+        return;
+    }
     mesh_gpu_upload(p->mesh);
 
     // Модельная матрица = мировая матрица узла (позиция + поворот + масштаб +

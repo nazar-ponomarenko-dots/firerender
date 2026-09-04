@@ -159,7 +159,8 @@ static int fr_test_apply(Game *g)
             if (sscanf(pos, "%f,%f,%f,%f", &fx, &fz, &fyaw, &fpitch) >= 2) {
                 g->cam->cam.pos[0] = fx;
                 g->cam->cam.pos[2] = fz;
-                g->cam->cam.pos[1] = sample_height(&g->world, fx, fz) + 1.7f;
+                // Глаз 2.4 м: чуть выше пшеницы — точки обзора для тестов
+                g->cam->cam.pos[1] = sample_height(&g->world, fx, fz) + 2.4f;
                 g->cam->cam.vy = 0;
                 if (fyaw != 0.0f) g->cam->cam.yaw = fyaw * 3.14159f / 180.0f;
                 g->cam->cam.pitch = fpitch * 3.14159f / 180.0f;
@@ -189,6 +190,19 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'w')) fx_force_wetness(1.0f);
     // D — демо-полёт (headless-скриншоты красивой точки обзора, FR_TEST=SD)
     if (strchr(fr_test, 'D')) game_demo_toggle(g);
+    // g — glb-модель (машина) рядом с игроком: тест теней моделей (FR_TEST=Sg)
+    if (strchr(fr_test, 'g')) {
+        const float *cp = g->cam->cam.pos;
+        float fwd[3], right[3];
+        camera_dirs(&g->cam->cam, fwd, right);
+        float gx = cp[0] + fwd[0] * 7.0f + right[0] * 1.5f;
+        float gz = cp[2] + fwd[2] * 7.0f + right[2] * 1.5f;
+        float gy = sample_height(&g->world, gx, gz) + 0.4f;
+        char args[256];
+        snprintf(args, sizeof args, "models/vaz-2105.glb %.2f %.2f %.2f 1",
+                 gx, gy, gz);
+        cmd_glb(args);
+    }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);

@@ -732,11 +732,62 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     return n;
 }
 
+// --- Тени: GLB-модели отбрасывают тень ----------------------------------------
+// Глубинный проход (mesh_shadow.vs/fs): позиция × мировая матрица узла ×
+// VP от солнца, alpha-test по текстуре багета (листья/травяные квады glTF
+// не затеняют всем квадом). Программа одна на все glb-узлы (модульный
+// статик, hot-reload через reshade-хук).
+static GLuint s_glb_shadow_prog = 0;
+static GLint s_glb_sh_model = -1, s_glb_sh_vp = -1, s_glb_sh_tex = -1,
+             s_glb_sh_at = -1;
+
+static void glb_shadow_prog_init(void)
+{
+    s_glb_sh_model = glGetUniformLocation(s_glb_shadow_prog, "uModel");
+    s_glb_sh_vp    = glGetUniformLocation(s_glb_shadow_prog, "uViewProj");
+    s_glb_sh_tex   = glGetUniformLocation(s_glb_shadow_prog, "uTex");
+    s_glb_sh_at    = glGetUniformLocation(s_glb_shadow_prog, "uAlphaTest");
+}
+
+static void glb_shadow_reshade(void)
+{
+    GLuint p = resources_program_replace(s_glb_shadow_prog,
+                                         "shaders/mesh_shadow.vs",
+                                         "shaders/mesh_shadow.fs");
+    if (p) s_glb_shadow_prog = p;
+    glb_shadow_prog_init();
+}
+
 void glb_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     GlbParams *p = n->params;
-    if (!p || p->rc->pass == RP_SHADOW) return;
+    if (!p) return;
+    if (p->rc->pass == RP_SHADOW) {
+        // Теневой проход: глубина модели с точки зрения солнца. Frustum не
+        // проверяем — отсечение по боксу каскада делает вызывающий код.
+        if (!s_glb_shadow_prog) {
+            s_glb_shadow_prog = resources_program_replace(
+                0, "shaders/mesh_shadow.vs", "shaders/mesh_shadow.fs");
+            glb_shadow_prog_init();
+            shader_on_reshade(glb_shadow_reshade);
+        }
+        glEnable(GL_DEPTH_TEST);
+        glUseProgram(s_glb_shadow_prog);
+        glUniformMatrix4fv(s_glb_sh_model, 1, GL_FALSE, n->world);
+        glUniformMatrix4fv(s_glb_sh_vp, 1, GL_FALSE, p->rc->shadow_vp);
+        glUniform1i(s_glb_sh_at, 1);
+        glActiveTexture(GL_TEXTURE0);
+        if (s_glb_sh_tex >= 0) glUniform1i(s_glb_sh_tex, 0);
+        for (int i = 0; i < p->count; i++) {
+            DrawItem *d = &p->items[i];
+            glBindTexture(GL_TEXTURE_2D, d->tex);
+            glBindVertexArray(d->vao);
+            glDrawElements(GL_TRIANGLES, d->index_count, d->index_type, NULL);
+        }
+        glBindVertexArray(0);
+        return;
+    }
     if (!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13],
                              n->world[14], p->radius))
         return;

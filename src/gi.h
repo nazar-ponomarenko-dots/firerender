@@ -58,7 +58,7 @@ typedef struct {
     // uniform-хендлы
     GLint t_scene, t_depth, t_prev, t_viewproj, t_invviewproj, t_prevviewproj;
     GLint t_campos, t_texel, t_params, t_params2, t_params3;
-    GLint t_groundcolor, t_clamp, t_blend;
+    GLint t_groundcolor, t_snowcover, t_clamp, t_blend;
     GLint t_sky, t_skytint, t_skyfog, t_skylight;   // небо на промахах лучей
     GLint b_gi, b_depth, b_invviewproj, b_campos, b_texel, b_dir, b_z, b_radius;
     GLint a_scene, a_gi, a_depth, a_gitexel, a_z, a_strength, a_ao, a_debug;

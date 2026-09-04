@@ -52,6 +52,28 @@ typedef struct { int bufferView; long byteOffset; int comp, vec, norm; int strid
 typedef struct { long byteOffset, byteLength; int byteStride; } GB;
 
 static void m4id(float m[16]){ memset(m,0,16*sizeof(float)); m[0]=m[5]=m[10]=m[15]=1; }
+
+// --- Тени скиннед-моделей -----------------------------------------------------
+// Глубинный проход (skinned_shadow.vs + mesh_shadow.fs): та же кожа, что в
+// цветном проходе — модель отбрасывает тень В ПОЗЕ ТЕКУЩЕГО КАДРА. Программа
+// одна на все anim-узлы (модульный статик, hot-reload через reshade-хук).
+static GLuint s_anim_shadow_prog=0;
+static GLint s_as_model=-1,s_as_vp=-1,s_as_bones=-1,s_as_hasskin=-1,s_as_tex=-1,s_as_at=-1;
+static void anim_shadow_init(void){
+    s_as_model=glGetUniformLocation(s_anim_shadow_prog,"uModel");
+    s_as_vp=glGetUniformLocation(s_anim_shadow_prog,"uViewProj");
+    s_as_bones=glGetUniformLocation(s_anim_shadow_prog,"uBones");
+    s_as_hasskin=glGetUniformLocation(s_anim_shadow_prog,"uHasSkin");
+    s_as_tex=glGetUniformLocation(s_anim_shadow_prog,"uTex");
+    s_as_at=glGetUniformLocation(s_anim_shadow_prog,"uAlphaTest");
+}
+static void anim_shadow_reshade(void){
+    GLuint p=resources_program_replace(s_anim_shadow_prog,
+                                       "shaders/skinned_shadow.vs",
+                                       "shaders/mesh_shadow.fs");
+    if(p)s_anim_shadow_prog=p;
+    anim_shadow_init();
+}
 static void m4mul(float o[16],const float a[16],const float b[16]){
     float r[16];
     for(int c=0;c<4;c++)for(int rr=0;rr<4;rr++){
@@ -680,8 +702,37 @@ static void anim_update(SceneNode*n,float dt){
 }
 static void anim_render(SceneNode*n,float dt){
     (void)dt;
-    AnimParams*p=n?n->params:NULL; if(!p||p->rc->pass==RP_SHADOW)return;
-    if(!p->enabled) return;
+    AnimParams*p=n?n->params:NULL; if(!p||!p->enabled)return;
+    if(p->rc->pass==RP_SHADOW){
+        // Тень анимированной модели в позе текущего кадра (skinning в VS)
+        if(!s_anim_shadow_prog){
+            s_anim_shadow_prog=resources_program_replace(
+                0,"shaders/skinned_shadow.vs","shaders/mesh_shadow.fs");
+            anim_shadow_init();
+            shader_on_reshade(anim_shadow_reshade);
+        }
+        glEnable(GL_DEPTH_TEST); glUseProgram(s_anim_shadow_prog);
+        glUniformMatrix4fv(s_as_vp,1,GL_FALSE,p->rc->shadow_vp);
+        glUniform1i(s_as_at,1);
+        if(s_as_tex>=0)glUniform1i(s_as_tex,0);
+        glActiveTexture(GL_TEXTURE0);
+        for(int i=0;i<p->count;i++){
+            AnimDrawItem*d=&p->items[i];
+            float model[16];
+            if(!d->has_skin&&p->data&&d->node>=0&&d->node<p->data->nnode)
+                m4mul(model,&p->node_world[d->node*16],n->world);
+            else
+                memcpy(model,n->world,sizeof model);
+            glUniformMatrix4fv(s_as_model,1,GL_FALSE,model);
+            if(s_as_hasskin>=0)glUniform1i(s_as_hasskin,d->has_skin?1:0);
+            if(d->has_skin&&s_as_bones>=0)glUniformMatrix4fv(s_as_bones,d->joint_n,GL_FALSE,d->bone);
+            glBindTexture(GL_TEXTURE_2D,d->tex);
+            glBindVertexArray(d->vao);
+            glDrawElements(GL_TRIANGLES,d->index_count,d->index_type,NULL);
+        }
+        glBindVertexArray(0);
+        return;
+    }
     if(!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13], n->world[14], p->radius))
         return;
     // build_bones уже выполнен в anim_update для этого кадра — не дублируем.

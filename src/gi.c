@@ -30,6 +30,7 @@ static void gi_prog_init(GiParams *g)
     g->t_params2       = glGetUniformLocation(g->prog_trace, "uParams2");
     g->t_params3       = glGetUniformLocation(g->prog_trace, "uParams3");
     g->t_groundcolor   = glGetUniformLocation(g->prog_trace, "uGroundColor");
+    g->t_snowcover     = glGetUniformLocation(g->prog_trace, "uSnowCover");
     g->t_clamp         = glGetUniformLocation(g->prog_trace, "uClamp");
     g->t_blend         = glGetUniformLocation(g->prog_trace, "uBlend");
     g->t_sky           = glGetUniformLocation(g->prog_trace, "uSky");
@@ -272,6 +273,8 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
                 cvar_get("r_gi_reflect"), cvar_get("r_gi_spread"), 0.0f);
     glUniform3f(g->t_groundcolor, rc->ground_color[0], rc->ground_color[1],
                 rc->ground_color[2]);
+    // Снежный покров: GI зимой светлее — отскок от земли белый, тени холоднее
+    glUniform1f(g->t_snowcover, rc->snowcover);
     glUniform1f(g->t_clamp, cvar_get("r_gi_clamp"));
     glUniform1f(g->t_blend, blend);
     glDrawArrays(GL_TRIANGLES, 0, 3);

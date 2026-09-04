@@ -48,6 +48,7 @@ uniform vec4 uParams;            // x лучи, y шаги, z радиус GI (�
 uniform vec4 uParams2;           // x zfar, y вес неба, z фаза, w радиус AO (м)
 uniform vec4 uParams3;           // x насыщение, y отблеск, z распространение
 uniform vec3 uGroundColor;       // цвет «низа» (луч ушёл вниз мимо геометрии)
+uniform float uSnowCover;        // снежный покров 0..1 — отскок земли белеет
 uniform float uClamp;            // потолок энергии GI на пиксель
 uniform float uBlend;            // вес истории 0..0.96
 uniform sampler2D uSky;          // панорама неба (unit 3), как в sky.fs
@@ -350,9 +351,11 @@ void main() {
             // подсвечена цветом неба в СТОРОНУ, куда смотрит луч: это даёт
             // направленность, которую не даёт никакой ambient. Ниже
             // горизонта луч «увидел» бы землю за краем экрана — отскок
-            // от неё (альбедо земли ~0.3 x солнце ~1.2).
+            // от неё (альбедо земли ~0.3 x солнце ~1.2; под снегом земля
+            // светлая и холодная — отскок белеет со snowcover).
             vec3 sky = sky_radiance(dir);
-            vec3 bounce = uGroundColor * 1.35;
+            vec3 bounce = mix(uGroundColor * 1.35, vec3(0.75, 0.80, 0.92),
+                              clamp(uSnowCover, 0.0, 1.0));
             vec3 miss = mix(bounce, sky, smoothstep(-0.12, 0.06, dir.y));
             gi += miss * (ndl * uSkyLight.x);
             // occ_far (закрытость) не трогаем: промах = направление открыто.
