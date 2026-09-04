@@ -24,7 +24,6 @@ typedef enum {
     PROF_BLOOM,        // bloom
     PROF_SSR,          // отражения экранного пространства
     PROF_GI,           // глобальное освещение (непрямой свет + AO)
-    PROF_TAA,          // временное сглаживание
     PROF_N
 } ProfSlot;
 

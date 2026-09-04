@@ -308,7 +308,7 @@ static int menu_audio(void)
 
 static int menu_graphics(void)
 {
-    menu_start("ГРАФИКА", 16, 460.0f);
+    menu_start("ГРАФИКА", 15, 460.0f);
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
@@ -357,8 +357,6 @@ static int menu_graphics(void)
         if (ui_button(&s_ui, lbl))
             cvar_set("r_msaa", (float)vals[(idx + 1) % 3]);
     }
-    // Временное сглаживание (TAA): субпиксельный джиттер кадра + накопление
-    cvar_checkbox(&s_ui, "r_taa", "Временное сглаживание (TAA)");
     cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
     cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
     ui_sep(&s_ui);
