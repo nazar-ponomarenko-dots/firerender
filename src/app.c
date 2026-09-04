@@ -308,7 +308,7 @@ static int menu_audio(void)
 
 static int menu_graphics(void)
 {
-    menu_start("ГРАФИКА", 14, 460.0f);
+    menu_start("ГРАФИКА", 17, 460.0f);
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
@@ -340,6 +340,11 @@ static int menu_graphics(void)
     cvar_slider(&s_ui, "r_bloom_strength", "Сила свечения", 0.0f, 1.5f, "%.2f");
     // SSR-отражения на мокром рельефе (сила — не в меню, cvar r_ssr_strength).
     cvar_checkbox(&s_ui, "r_ssr", "Отражения луж (SSR)");
+    // Глобальное освещение (GI, аналог Lumen): непрямой свет + затенение.
+    // r_gi — вкл/выкл, сила непрямого и свет неба в тенях (r_gi_skylight).
+    cvar_checkbox(&s_ui, "r_gi", "Глобальное освещение (GI)");
+    cvar_slider(&s_ui, "r_gi_strength", "GI: сила непрямого света", 0.0f, 1.5f, "%.2f");
+    cvar_slider(&s_ui, "r_gi_skylight", "GI: свет неба в тенях", 0.0f, 2.5f, "%.2f");
     cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
     cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
     ui_sep(&s_ui);
