@@ -3,6 +3,7 @@
 // ============================================================================
 #include "profiler.h"
 
+#include "cvars.h"
 #include "gl_loader.h"   // g_prof_draws / g_prof_verts / g_prof_tris
 
 static float s_ms[PROF_N];
@@ -17,6 +18,9 @@ static int s_parity = 0;
 // результат (GL не сбрасывает query-объекты) и панель показывала бы время
 // выключенного прохода (напр. туман при r_fog_mode 0).
 static int s_issued[PROF_N][2];
+// Панель видима? Проверяется раз в кадр (prof_reset): при скрытой панели
+// queries НЕ выпускаются вовсе — time-queries на слабом GPU не бесплатны.
+static int s_panel = 0;
 
 static void gpu_init(void)
 {
@@ -27,6 +31,21 @@ static void gpu_init(void)
 
 void prof_reset(void)
 {
+    s_panel = cvar_get("profiler") > 0.5f;
+    if (!s_panel) {
+        // Панель скрыта: тайминги не собираем, queries чистим — после
+        // включения панели первый кадр честно покажет нули, без призраков
+        for (int i = 0; i < PROF_N; i++) {
+            s_ms[i] = 0.0f;
+            s_gpu_ms[i] = 0.0f;
+            s_issued[i][0] = s_issued[i][1] = 0;
+        }
+        g_prof_draws = 0;
+        g_prof_verts = 0;
+        g_prof_tris = 0;
+        s_parity ^= 1;
+        return;
+    }
     for (int i = 0; i < PROF_N; i++) s_ms[i] = 0.0f;
     g_prof_draws = 0;
     g_prof_verts = 0;
@@ -39,6 +58,7 @@ void prof_reset(void)
             s_gpu_ms[i] = 0.0f;
             continue;
         }
+        s_issued[i][prev] = 0;             // иначе старый результат читался бы вечно
         GLuint64 v = 0;
         if (s_gpu_q[i][prev])
             glGetQueryObjectui64v(s_gpu_q[i][prev], 0x8866 /*GL_QUERY_RESULT*/,
@@ -50,6 +70,7 @@ void prof_reset(void)
 
 void prof_gpu_begin(ProfSlot s)
 {
+    if (!s_panel) return;          // панель скрыта — queries не выпускаем
     if (s_gpu_ok < 0) gpu_init();
     if (s < 0 || s >= PROF_N) return;
     s_issued[s][s_parity] = 1;
@@ -58,6 +79,7 @@ void prof_gpu_begin(ProfSlot s)
 
 void prof_gpu_end(ProfSlot s)
 {
+    if (!s_panel || s_gpu_ok < 0) return;
     if (s < 0 || s >= PROF_N) return;
     glEndQuery(GL_TIME_ELAPSED);
 }

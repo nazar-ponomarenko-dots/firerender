@@ -390,8 +390,23 @@ int main(int argc, char *argv[])
         float inst_fps = 1.0f / (dt > 0.0001f ? dt : 0.0001f);
         if (game.hud) game.hud->fps = game.hud->fps * 0.95f + inst_fps * 0.05f;
 
+        // FR_STAGES — временная инструметация кадра: средние по стадиям
+        // печатаются в лог при выходе (поиск CPU-хотспотов движка).
+        static int s_stages = -1;
+        static double s_st_in = 0, s_st_logic = 0, s_st_sync = 0,
+                      s_st_render = 0, s_st_end = 0, s_st_swap = 0,
+                      s_st_gu = 0, s_st_phys = 0, s_st_aux = 0,
+                      s_st_reload = 0, s_st_demo = 0;
+        static double s_st_frame_max = 0, s_st_gu_max = 0, s_st_render_max = 0;
+        static int s_st_n = 0;
+        Uint64 st_t = SDL_GetPerformanceCounter(), st_p;
+        double st_f = (double)SDL_GetPerformanceFrequency();
+        if (s_stages < 0) s_stages = getenv("FR_STAGES") ? 1 : 0;
+#define ST_ACC(v) do { st_p = SDL_GetPerformanceCounter(); v += (st_p - st_t) / st_f; st_t = st_p; } while (0)
+
         input_process();                    // события: консоль, бинды, ресайз
         if (input_quit()) running = false;
+        ST_ACC(s_st_in);
 
         // Фаза APP_BOOT: поднять системы один раз (в конце — APP_MENU/PLAY)
         if (app_state() == APP_BOOT) {
@@ -415,8 +430,10 @@ int main(int argc, char *argv[])
                 resources_texture_reload();
             }
         }
+        ST_ACC(s_st_reload);
 
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
+        ST_ACC(s_st_demo);
 
         // Фиксированный тик логики/физики: 100 Гц. Мир обновляется постоянным
         // шагом 1/100 с независимо от FPS — стабильная физика, триггеры и Lua.
@@ -428,13 +445,23 @@ int main(int argc, char *argv[])
             if (s_sim_acc >= 0.25f) s_sim_acc = 0.25f;   // лаг >250 мс — не крутим вперёд
             for (int ticks = 0; s_sim_acc >= step && ticks < 8; ticks++) {
                 game_update(&game, step);   // мир: узлы, триггеры/use, туман
+                ST_ACC(s_st_gu);
                 physics_set_ground(phys_ground);
                 physics_step(physics_world(), step);   // мини-физика (Verlet)
                 glb_anim_ragdoll_step_all(step);       // рэгдоллы аним-моделей
+                ST_ACC(s_st_phys);
                 audio_update();             // фоновые петли и 3D-источники
                 lua_engine_update(step);    // per-frame колбэк скрипта
+                ST_ACC(s_st_aux);
                 s_sim_acc -= step;
             }
+        }
+        ST_ACC(s_st_logic);
+        {
+            static double s_gu_prev = 0;
+            double gu_frame = s_st_gu - s_gu_prev;
+            s_gu_prev = s_st_gu;
+            if (gu_frame > s_st_gu_max) s_st_gu_max = gu_frame;
         }
 
         sync_cvars(&game);
@@ -445,11 +472,21 @@ int main(int argc, char *argv[])
         // слушателей посреди итерации.
         events_flush_deferred();
 
+        ST_ACC(s_st_sync);
+
         // Рендер: сцена -> bloom/туман -> оверлеи (см. renderer.c)
         renderer_begin();
         renderer_frame(&game, dt, game.world_loaded &&
                                    (app_state() != APP_MENU || !app_bg_has()));
+        ST_ACC(s_st_render);
+        {
+            static double s_rd_prev = 0;
+            double rd_frame = s_st_render - s_rd_prev;
+            s_rd_prev = s_st_render;
+            if (rd_frame > s_st_render_max) s_st_render_max = rd_frame;
+        }
         renderer_end(&game, dt);
+        ST_ACC(s_st_end);
 
         // FR_TEST 'S': автоскриншот на 450-м кадре и выход на 480-м —
         // headless-проверка картинки + стабильный прогрев для профайлера
@@ -537,6 +574,12 @@ int main(int argc, char *argv[])
         }
 
         SDL_GL_SwapWindow(g_win);
+        ST_ACC(s_st_swap);
+        s_st_n++;
+        {
+            double fr = (SDL_GetPerformanceCounter() - now) / st_f;
+            if (fr > s_st_frame_max) s_st_frame_max = fr;
+        }
 
         // host_framerate — лимит FPS (задержка до следующего кадра)
         {
@@ -555,6 +598,29 @@ int main(int argc, char *argv[])
         if (g_quit_request) {
             g_quit_request = 0;
             running = false;
+        }
+
+        if (!running && s_stages && s_st_n > 0) {
+            SDL_Log("FR_STAGES (среднее по %d кадрам, мс): input %.3f | "
+                    "logic %.3f [reload %.3f | demo %.3f | game_update %.3f | "
+                    "phys %.3f | audio+lua %.3f]"
+                    " | sync %.3f | render %.3f | end %.3f | "
+                    "swap %.3f | СУММА %.3f",
+                    s_st_n, s_st_in * 1000.0 / s_st_n,
+                    s_st_logic * 1000.0 / s_st_n,
+                    s_st_reload * 1000.0 / s_st_n,
+                    s_st_demo * 1000.0 / s_st_n,
+                    s_st_gu * 1000.0 / s_st_n, s_st_phys * 1000.0 / s_st_n,
+                    s_st_aux * 1000.0 / s_st_n,
+                    s_st_sync * 1000.0 / s_st_n,
+                    s_st_render * 1000.0 / s_st_n, s_st_end * 1000.0 / s_st_n,
+                    s_st_swap * 1000.0 / s_st_n,
+                    (s_st_in + s_st_logic + s_st_sync + s_st_render +
+                     s_st_end + s_st_swap) * 1000.0 / s_st_n);
+            SDL_Log("FR_STAGES max (мс): кадр %.1f | game_update %.1f | "
+                    "render %.1f  (boot-кадр портит reload-среднее — не смотри туда)",
+                    s_st_frame_max * 1000.0, s_st_gu_max * 1000.0,
+                    s_st_render_max * 1000.0);
         }
 
         fps_accum += dt;

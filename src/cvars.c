@@ -14,6 +14,10 @@
 static Cvar *s_cvars = NULL;
 static int  s_cap = 0;         // вместимость массива
 static int  s_count = 0;       // занято
+// Идёт cvar_load_config: незнакомые имена из config.cfg создаются сразу
+// АРХИВНЫМИ (иначе настройки ещё не зарегистрированных систем — плотности
+// травы и пр. — терялись при выходе и возвращались к дефолтам карты).
+static int  s_config_loading = 0;
 
 void cvar_init(void)
 {
@@ -48,7 +52,19 @@ void cvar_register_ex(const char *name, float def, float min, float max,
                       int flags, const char *help)
 {
     if (!name || !name[0]) return;
-    if (cvar_index(name) >= 0) return;
+    int existing = cvar_index(name);
+    if (existing >= 0) {
+        // УЖЕ есть (авто-создана из config.cfg/карты/lua): удочеряем —
+        // обновляем дефолт/диапазон/флаги, но СОХРАНЯЕМ текущее значение
+        // (иначе настройки пользователя затирались дефолтами при загрузке
+        // мира, а незнакомые системе cvar'ы не выживали в config.cfg).
+        Cvar *c = &s_cvars[existing];
+        c->def = def;
+        if (min <= max) { c->minv = min; c->maxv = max; }
+        c->flags |= flags;
+        if (help && !c->help[0]) snprintf(c->help, sizeof c->help, "%s", help);
+        return;
+    }
     Cvar *c = cvar_slot_new();
     if (!c) return;
     snprintf(c->name, sizeof c->name, "%s", name);
@@ -91,6 +107,17 @@ float cvar_get(const char *name)
     return i >= 0 ? s_cvars[i].value : 0.0f;
 }
 
+// Задать значение-умолчание (дефолт карты/системы): НЕ трогает cvar'ы,
+// которые пользователь/конфиг уже задавал явно (флаг CVAR_CFGSET).
+void cvar_set_default(const char *name, float v)
+{
+    int i = cvar_index(name);
+    if (i < 0) return;
+    Cvar *c = &s_cvars[i];
+    if (c->flags & CVAR_CFGSET) return;
+    c->value = v;
+}
+
 void cvar_set(const char *name, float v)
 {
     int i = cvar_index(name);
@@ -99,8 +126,10 @@ void cvar_set(const char *name, float v)
         // переменные), но БЕЗ CVAR_ARCHIVE: чужеродные cvar'ы не попадают
         // в config.cfg (иначе опечатка жила бы в конфиге вечно).
         if (!name || !name[0]) return;
-        SDL_Log("cvar_set: \"%s\" не зарегистрирован — создаю (не сохранится в config.cfg)", name);
-        cvar_register_ex(name, v, 1.0f, -1.0f, 0, "map/lua-переменная");
+        int fl = s_config_loading ? CVAR_ARCHIVE : 0;
+        SDL_Log("cvar_set: \"%s\" не зарегистрирован — создаю%s",
+                name, fl & CVAR_ARCHIVE ? " (из config.cfg — архивный)" : "");
+        cvar_register_ex(name, v, 1.0f, -1.0f, fl, "map/lua-переменная");
         i = cvar_index(name);
     }
     if (i < 0) return;
@@ -115,6 +144,7 @@ void cvar_set(const char *name, float v)
         if (v > c->maxv) v = c->maxv;
     }
     c->value = v;
+    c->flags |= CVAR_CFGSET;              // явная установка (конфиг/юзер/карта)
     if (c->flags & CVAR_STRING)           // держим строку в синхроне с числом
         snprintf(c->str, sizeof c->str, "%g", v);
 }
@@ -172,6 +202,7 @@ int cvar_load_config(const char *path)
 {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
+    s_config_loading = 1;
     char line[128];
     while (fgets(line, sizeof line, f)) {
         char name[32];
@@ -183,6 +214,7 @@ int cvar_load_config(const char *path)
             cvar_set_from_string(name, value);
     }
     fclose(f);
+    s_config_loading = 0;
     return 1;
 }
 

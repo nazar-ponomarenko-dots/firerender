@@ -912,7 +912,7 @@ void veg_node_render(SceneNode *n, float dt)
     glUniform1f(p->u_dyn, 0.0f);   // статика: полный LOD (в т.ч. lod2)
     if (g_draw_static_main) {
         if (g_has_base_instance) {
-        float vis = s_vis_r;
+        float vis = s_vis_r * cvar_get("r_veg_vis_mult");
         if (rc->cam_pos[1] > VEG_VIS_H)
             vis += (rc->cam_pos[1] - VEG_VIS_H) * VEG_VIS_F;
         float vr2 = vis * vis;
@@ -1104,7 +1104,7 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc)
         if (q < 2) {
             // СТАТИКА: только видимые супер-чанки (как фолбэк). Это и есть
             // главная экономия: не гонять compute по ВСЕЙ карте каждый кадр.
-            float vis = s_vis_r;
+            float vis = s_vis_r * cvar_get("r_veg_vis_mult");
             if (rc->cam_pos[1] > VEG_VIS_H)
                 vis += (rc->cam_pos[1] - VEG_VIS_H) * VEG_VIS_F;
             float vr2 = vis * vis;
@@ -1169,6 +1169,16 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
         cvar_register("r_grass_density", s_grass_density, "трава шт/м2");
         cvar_register("r_dandelion_density", s_dandelion_density,
                       "одуванчики шт/м2 (сверх травы)");
+        // Значения КАРТЫ применяются только к cvar'ам, которые юзер/пресет
+        // явно не задавал (CVAR_CFGSET): настройки пользователя важнее карты,
+        // а на первом запуске поле выглядит так, как задумал автор карты.
+        cvar_set_default("r_wheat_density", s_wheat_density);
+        cvar_set_default("r_grass_density", s_grass_density);
+        cvar_set_default("r_dandelion_density", s_dandelion_density);
+        // Множитель радиуса статической пшеницы: <1 — дальнее поле остаётся
+        // только в текстуре земли (режим «КАРТОШКА», минус овердров)
+        cvar_register_ex("r_veg_vis_mult", 1.0f, 0.25f, 1.0f, CVAR_ARCHIVE,
+                         "множитель радиуса прорисовки пшеницы (1 = карта)");
         SDL_Log("Veg cfg: wheat %.0f/m2, grass %.1f/m2, dandelion %.2f/m2, "
                 "dyn %.0fm, vis %.0fm",
                 s_wheat_density, s_grass_density, s_dandelion_density,

@@ -582,10 +582,18 @@ static void audio_load_map(Game *g)
 // прогресса справа снизу с подписью фазы (loading.c предъявляет кадры).
 int game_load_world(Game *g)
 {
+    // FR_STAGES: тайминг фаз загрузки мира (поиск тяжёлых мест загрузки)
+    const int st = getenv("FR_STAGES") != NULL;
+    double st_f = (double)SDL_GetPerformanceFrequency();
+    Uint64 st_t = SDL_GetPerformanceCounter(), st_p = st_t;
+#define STLOG(msg) do { if (st) { st_p = SDL_GetPerformanceCounter(); \
+        SDL_Log("LOAD %s: %.0f мс", msg, (st_p - st_t) * 1000.0 / st_f); \
+        st_t = st_p; } } while (0)
     loading_begin();
     loading_progress(0.05f, "Загрузка уровня");
     WorldTextures wt;
     if (world_load_geometry(g, &wt) != 0) { loading_end(); return -1; } // фаза 1
+    STLOG("geometry+textures");
     loading_progress(0.30f, "Собираем сцену");
     if (scene_build(g, &wt) != 0) {
         // scene_build уже освободила частичную сцену (scene_teardown внутри);
@@ -595,6 +603,7 @@ int game_load_world(Game *g)
         loading_end();
         return -1;                                       // фаза 2: сцена
     }
+    STLOG("scene_build");
     loading_progress(0.60f, "Настройки карты");
     map_apply();                                       // фаза 3: cvar'ы/команды
     loading_progress(0.75f, "Звук карты");
@@ -606,6 +615,7 @@ int game_load_world(Game *g)
         terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
     // Мокрость: запечённая маска "под крышей" (всегда, полезна для мокрости)
     terrain_wetness_mask_bake(&g->world);
+    STLOG("bakes");
     SDL_Log("World loaded (%.0fx%.0f m)", g->world.world_w, g->world.world_d);
 
     // Скрипт карты (lua/maps/<карта>.lua): после сцены и сущностей

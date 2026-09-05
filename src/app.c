@@ -150,6 +150,20 @@ void app_init(void)
     memset(&s_ui, 0, sizeof s_ui);
     s_ui.active = -1;
 
+    // FR_MENU=graphics|settings|... — дев-хук: стартовать с указанного экрана
+    // меню (headless-скриншоты UI: FR_MENU=graphics FR_SHOT=120)
+    {
+        const char *m = getenv("FR_MENU");
+        if (m && m[0]) {
+            if (!strcmp(m, "graphics")) s_screen = SCR_GRAPHICS;
+            else if (!strcmp(m, "settings")) s_screen = SCR_SETTINGS;
+            else if (!strcmp(m, "audio")) s_screen = SCR_AUDIO;
+            else if (!strcmp(m, "controls")) s_screen = SCR_CONTROLS;
+            else if (!strcmp(m, "pause")) s_screen = SCR_PAUSE;
+            s_state = APP_PAUSE;
+        }
+    }
+
     s_bg_tex = resources_texture("img/menu.png", 3, GL_CLAMP_TO_EDGE, 1);
     if (s_bg_tex) {
         s_bg_prog = make_program("shaders/minimap.vs", "shaders/minimap.fs");
@@ -226,14 +240,18 @@ static void menu_panel(float x, float y, float w, float h)
 
 // Начало экрана: крупный заголовок сверху по центру, панель внизу слева.
 // items — число строк в панели. Возвращает высоту пункта (для позиций).
+// Панель учитывает межстрочные ЗАЗОРЫ (4px между строк): раньше считались
+// только строки, и последняя кнопка ("НАЗАД") вылезала за панель, а на
+// низких окнах — за край экрана (кликнуть было нельзя).
 static float menu_start(const char *title, int items, float pw)
 {
     ui_title_big(&s_ui, title);
     float ih = s_ui.font_h + 14.0f;   // высота одного пункта
     float px = 90.0f;
-    float py = s_ui.vh - 26.0f - items * ih;
+    float gaps = (float)(items + 1) * 4.0f;
+    float py = s_ui.vh - 26.0f - items * ih - gaps;
     if (py < 12.0f) py = 12.0f;       // маленькое окно: панель не за экран
-    menu_panel(px - 16.0f, py - 12.0f, pw + 32.0f, items * ih + 24.0f);
+    menu_panel(px - 16.0f, py - 12.0f, pw + 32.0f, items * ih + gaps + 24.0f);
     ui_col(&s_ui, px, py, pw);
     return ih;
 }
@@ -306,45 +324,111 @@ static int menu_audio(void)
     return s_screen;
 }
 
+// Пресеты качества: одним кликом — согласованный набор графики. Заточены
+// под слабые ноутбуки (iGPU): трава — главный жрец (fill-bound), поэтому
+// пресет в первую очередь режет её плотность; MSAA/bloom/облака на iGPU
+// тоже дороги (все проходы фуллскрин — цена растёт от пикселей).
+// Пресеты качества: одним кликом — согласованный набор графики. Заточены
+// под слабые ноутбуки (iGPU): трава — главный жрец (fill-bound), поэтому
+// пресет в первую очередь режет её плотность; MSAA/bloom/облака на iGPU
+// тоже дороги (все проходы фуллскрин — цена растёт от пикселей).
+//                 msaa gi  shadow wheat grass dand  ssr  bloom clouds fog  gi_sc gi_rays gi_steps rscale vegvis minpix terrLOD
+static const float GFX_PRESETS[][17] = {
+    { 0,    0,   3,     12,   0.5f, 0.0f, 0,   0,    0,     0,   0.25f, 4,  6,  0.6f,  0.45f, 3,     60    }, // КАРТОШКА
+    { 4,    1,   1,     45,   3.1f, 0.05f, 0,  1,    0.15f, 1,   0.5f,  6,  10, 1.0f,  1.0f,  1,     0     }, // СРЕДНИЕ
+    { 16,   1,   1,     80,   5.0f, 0.10f, 1,  1,    0.30f, 1,   1.0f,  12, 16, 1.0f,  1.0f,  1,     0     }, // УЛЬТРА
+};
+static const char *const GFX_PRESET_NAMES[] = { "КАРТОШКА", "СРЕДНИЕ", "УЛЬТРА" };
+
+static void gfx_preset_apply(int level)
+{
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;
+    static const char *const order[] = {
+        "r_msaa", "r_gi", "r_shadows_mode", "r_wheat_density",
+        "r_grass_density", "r_dandelion_density", "r_ssr",
+        "r_bloom", "r_clouds", "r_fog_mode",
+        "r_gi_scale", "r_gi_rays", "r_gi_steps", "r_render_scale",
+        "r_veg_vis_mult", "r_veg_minpix", "r_terr_detail_dist"
+    };
+    for (int k = 0; k < 17; k++)
+        cvar_set(order[k], GFX_PRESETS[level][k]);
+    console_save_config();   // сразу в config.cfg — переживёт перезапуск
+    console_print("пресет графики: %s", GFX_PRESET_NAMES[level]);
+}
+
+// Текущий пресет по cvar'ам (точное совпадение со всеми 17 значениями);
+// 0..2 — совпал, -1 — пользователь крутил вручную («свои» настройки)
+static int gfx_preset_current(void)
+{
+    static const char *const cvars[] = {
+        "r_msaa", "r_gi", "r_shadows_mode", "r_wheat_density",
+        "r_grass_density", "r_dandelion_density", "r_ssr",
+        "r_bloom", "r_clouds", "r_fog_mode",
+        "r_gi_scale", "r_gi_rays", "r_gi_steps", "r_render_scale",
+        "r_veg_vis_mult", "r_veg_minpix", "r_terr_detail_dist"
+    };
+    for (int p = 0; p < 3; p++) {
+        int match = 1;
+        for (int k = 0; k < 7 && match; k++)
+            if (cvar_get(cvars[k]) < GFX_PRESETS[p][k] - 0.01f ||
+                cvar_get(cvars[k]) > GFX_PRESETS[p][k] + 0.01f) match = 0;
+        if (match) return p;
+    }
+    return -1;
+}
+
+// Ряд из трёх кнопок пресетов: активный подсвечен жёлтой чертой снизу.
+// Клик мимо активного применяет пресет; клик по активному — ничего.
+static void menu_preset_row(void)
+{
+    const float ih = s_ui.font_h + 10.0f;
+    const float gap = 8.0f;
+    float total = s_ui.col_w < 520.0f ? s_ui.col_w : 520.0f;
+    float x0 = s_ui.cx + (s_ui.col_w - total) * 0.5f;
+    const float bw = (total - 2.0f * gap) / 3.0f;
+    int cur = gfx_preset_current();
+    for (int i = 0; i < 3; i++) {
+        float x = x0 + i * (bw + gap);
+        if (ui_button_at(&s_ui, x, s_ui.cy, bw, ih, GFX_PRESET_NAMES[i])
+            && i != cur)
+            gfx_preset_apply(i);
+        if (i == cur) {   // жёлтая черта под активным пресетом
+            const float hl[4] = { 1.0f, 0.78f, 0.20f, 1.0f };
+            hud_rect_draw(s_ui.vw, s_ui.vh, x + 14.0f, s_ui.cy + ih - 3.0f,
+                          bw - 28.0f, 2.0f, hl);
+        }
+    }
+    s_ui.cy += ih + 2.0f;
+}
+
 static int menu_graphics(void)
 {
-    menu_start("ГРАФИКА", 15, 460.0f);
+    // Компактная двухколоночная панель: пресеты сверху, слева — экран и
+    // детализация, справа — эффекты, внизу — сброс и назад в один ряд.
+    const float pw = 780.0f;
+    const int items = cvar_get("r_bloom") > 0.5f ? 10 : 9;  // силу свечения
+    menu_start("ГРАФИКА", items, pw);                       // показываем при bloom
+    const float px = 90.0f;
+    const float half = pw * 0.5f;
+    const float ih = s_ui.font_h + 10.0f;
+
+    menu_preset_row();
+
+    const float top = s_ui.cy;
+    // ЛЕВАЯ колонка: экран + детализация
+    ui_col(&s_ui, px, top, half - 14.0f);
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
-    // Тени: 4 режима (клик — переключение)
-    {
-        static const char *names[] = {
-            "Выкл", "Динамические (CSM)", "Статические", "Пятна (blob)"
-        };
-        int m = (int)cvar_get("r_shadows_mode");
-        if (m < 0) m = 0;
-        if (m > 3) m = 3;
-        char lbl[96];
-        snprintf(lbl, sizeof lbl, "Тени: %s", names[m]);
-        if (ui_button(&s_ui, lbl))
-            cvar_set("r_shadows_mode", (float)((m + 1) % 4));
-    }
-    // Туман: 3 режима (клик — переключение)
-    {
-        static const char *names[] = { "Выкл", "Объёмный", "Простой" };
-        int m = (int)cvar_get("r_fog_mode");
-        if (m < 0) m = 0;
-        if (m > 2) m = 2;
-        char lbl[96];
-        snprintf(lbl, sizeof lbl, "Туман: %s", names[m]);
-        if (ui_button(&s_ui, lbl))
-            cvar_set("r_fog_mode", (float)((m + 1) % 3));
-    }
-    cvar_checkbox(&s_ui, "r_bloom", "Свечение (bloom)");
-    cvar_slider(&s_ui, "r_bloom_strength", "Сила свечения", 0.0f, 1.5f, "%.2f");
+    cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
+    cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
+    cvar_slider(&s_ui, "r_render_scale", "Масштаб рендера", 0.4f, 1.0f, "%.2f");
     cvar_slider(&s_ui, "r_gamma", "Гамма", 0.5f, 2.5f, "%.2f");
-    // SSR-отражения на мокром рельефе (сила — не в меню, cvar r_ssr_strength).
-    cvar_checkbox(&s_ui, "r_ssr", "Отражения луж (SSR)");
-    // Глобальное освещение (GI, аналог Lumen): вкл/выкл. Тонкие настройки —
-    // в консоли: r_gi_strength, r_gi_ao, r_gi_skylight и пр.
-    cvar_checkbox(&s_ui, "r_gi", "Глобальное освещение (GI)");
-    // MSAA-сглаживание: клик циклит Выкл/4x/16x (применяется сразу)
+    float bottom = s_ui.cy;
+
+    // ПРАВАЯ колонка: качество и эффекты
+    ui_col(&s_ui, px + half, top, half - 14.0f);
     {
         static const int vals[] = { 0, 4, 16 };
         static const char *names[] = { "Выкл", "4x MSAA", "16x MSAA" };
@@ -357,15 +441,44 @@ static int menu_graphics(void)
         if (ui_button(&s_ui, lbl))
             cvar_set("r_msaa", (float)vals[(idx + 1) % 3]);
     }
-    cvar_slider(&s_ui, "r_wheat_density", "Плотность пшеницы", 0.0f, 200.0f, "%.0f");
-    cvar_slider(&s_ui, "r_grass_density", "Плотность травы", 0.0f, 10.0f, "%.1f");
-    ui_sep(&s_ui);
-    if (ui_button(&s_ui, "СБРОСИТЬ НАСТРОЙКИ ГРАФИКИ")) {
+    {
+        static const char *names[] = {
+            "Выкл", "Динамические (CSM)", "Статические", "Пятна (blob)"
+        };
+        int m = (int)cvar_get("r_shadows_mode");
+        if (m < 0) m = 0;
+        if (m > 3) m = 3;
+        char lbl[96];
+        snprintf(lbl, sizeof lbl, "Тени: %s", names[m]);
+        if (ui_button(&s_ui, lbl))
+            cvar_set("r_shadows_mode", (float)((m + 1) % 4));
+    }
+    {
+        static const char *names[] = { "Выкл", "Объёмный", "Простой" };
+        int m = (int)cvar_get("r_fog_mode");
+        if (m < 0) m = 0;
+        if (m > 2) m = 2;
+        char lbl[96];
+        snprintf(lbl, sizeof lbl, "Туман: %s", names[m]);
+        if (ui_button(&s_ui, lbl))
+            cvar_set("r_fog_mode", (float)((m + 1) % 3));
+    }
+    cvar_checkbox(&s_ui, "r_gi", "Глобальное освещение (GI)");
+    cvar_checkbox(&s_ui, "r_ssr", "Отражения луж (SSR)");
+    cvar_checkbox(&s_ui, "r_bloom", "Свечение (bloom)");
+    if (cvar_get("r_bloom") > 0.5f)   // сила не нужна при выключенном bloom
+        cvar_slider(&s_ui, "r_bloom_strength", "Сила свечения", 0.0f, 1.5f, "%.2f");
+    if (s_ui.cy > bottom) bottom = s_ui.cy;
+
+    // Низ: сброс и назад — в один ряд
+    s_ui.cy = bottom + 8.0f;
+    if (ui_button_at(&s_ui, px, s_ui.cy, half - 14.0f, ih, "СБРОС ГРАФИКИ")) {
         int n = cvar_reset_graphics();
         console_save_config();          // сразу в config.cfg (дефолты не пишутся)
         console_print("графика: сброшено к дефолтам (%d cvar)", n);
     }
-    if (ui_button(&s_ui, "НАЗАД")) return SCR_ACT_BACK;
+    if (ui_button_at(&s_ui, px + half, s_ui.cy, half - 14.0f, ih, "НАЗАД"))
+        return SCR_ACT_BACK;
     return s_screen;
 }
 

@@ -41,6 +41,7 @@ typedef struct TerrainParams {
     // Поверхности (splat): маска материалов + 4 слоя текстур
     GLuint tex_splat_layer[SPLAT_LAYERS];   // грунт/песок/щебень/асфальт
     GLint u_splat, u_splat_on, u_layer[SPLAT_LAYERS], u_layer_scale;
+    GLint u_detail_dist;            // LOD деталей террейна (0 = выкл)
     TerrainTile *tiles;             // массив тайлов (tiles_n штук)
     int tiles_n;
     int vert_count;                // индексов в геометрии (все тайлы и LOD)

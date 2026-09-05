@@ -66,7 +66,9 @@ uniform mat4 uShadowMatrix3;
 uniform float uShadowBias3;
 uniform sampler2D uShadowDepth3;
 uniform float uShadowGrad3;
-uniform float uShadowOn;         // 1 = тени включены (клавиша [)
+uniform float uShadowOn;         // 1 = тени включены (клавиша [])
+uniform float uDetailDist;       // LOD деталей: дальше — чистая базовая карта
+                                 // (0 = полный сплаттинг везде, как было)
 
 // Статические тени (режим 2): baked-карта на весь мир
 uniform sampler2D uStaticShadow;   // R8: 1 = свет, ~0.25 = тень
@@ -204,6 +206,15 @@ float shadow_at(vec3 wp, vec3 n) {
 }
 
 void main() {
+    // LOD деталей (uDetailDist > 0, режим «КАРТОШКА»): дальше дистанции
+    // детали не видны — шум нормалей и сплат-слои фейдятся в ноль, остаётся
+    // базовая карта (в неё уже вшита дальняя трава/дороги) + туман. Это
+    // срезает 6-8 текстурных выборок на БОЛЬШУЮ часть экрана.
+    float det_f = 0.0;
+    if (uDetailDist > 0.5) {
+        float dcam = distance(uCamPos, vWorldPos);
+        det_f = smoothstep(uDetailDist * 0.55, uDetailDist, dcam);
+    }
     vec3 base = texture(uBasemap, vUV * uTexScale).rgb;
     vec3 N = normalize(texture(uNormalmap, vUV).rgb * 2.0 - 1.0);
     // Детальные нормали на основе шума: у мелкомасштабного рельефа
@@ -214,10 +225,10 @@ void main() {
     // шума дают интерференцию — регулярную диагональную «рябь» на плоских
     // пространствах (у берега читалась как фальшивые дюны). С маской рябь
     // живёт пятнами, как настоящая microgeometry.
-    {
+    if (det_f < 0.999) {
         vec2 nd = vWorldPos.xz;
         float mask = texture(uNoise, nd / 48.0 + 1.37).r;
-        float amp = 0.25 * (0.25 + 0.75 * mask * mask);
+        float amp = 0.25 * (0.25 + 0.75 * mask * mask) * (1.0 - det_f);
         float w1 = texture(uNoise, nd / 2.0 + 7.11).r;
         float w2 = texture(uNoise, nd / 8.0 + 3.77).r;
         vec2 perturb = vec2(w1 * 2.0 - 1.0, w2 * 2.0 - 1.0);
@@ -230,9 +241,9 @@ void main() {
     // шумовое возмущение нормали на асфальте (он ровный).
     float smooth_layer = 0.0;
     float layer_sum = 0.0;
-    if (uSplatOn > 0.5) {
+    if (uSplatOn > 0.5 && det_f < 0.999) {
         vec4 sp = texture(uSplat, vWorldPos.xz / uWorldSize);
-        layer_sum = min(sp.r + sp.g + sp.b + sp.a, 1.0);
+        layer_sum = min(sp.r + sp.g + sp.b + sp.a, 1.0) * (1.0 - det_f);
         if (layer_sum > 0.002) {
             vec3 c0 = texture(uLayer0, vWorldPos.xz / max(uLayerScale.x, 0.01)).rgb;
             vec3 c1 = texture(uLayer1, vWorldPos.xz / max(uLayerScale.y, 0.01)).rgb;

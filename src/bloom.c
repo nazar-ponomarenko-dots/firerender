@@ -42,6 +42,21 @@ void bloom_set_underwater(float amount, const float tint[3], float time)
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 
+static GLuint make_ldr_tex(int w, int h)
+{
+    // LDR-копия сцены для present-пути картошки: полбанды на запись/чтение
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    return id;
+}
+
 static GLuint make_color_tex(int w, int h)
 {
     GLuint id;
@@ -296,7 +311,19 @@ void bloom_resize(BloomParams *b, int vw, int vh)
         glDeleteFramebuffers(2, b->fbo_glow);
         glDeleteTextures(2, b->tex_glow);
     }
+    if (b->fbo_ldr) {
+        glDeleteFramebuffers(1, &b->fbo_ldr);
+        glDeleteTextures(1, &b->tex_ldr);
+    }
     make_fbo(&b->fbo, &b->tex, &b->depth, vw, vh, 1);
+    // LDR-копия для present: композит (grade) рисуется в масштабе сцены,
+    // на экран — аппаратный blit (дешевле шейдерного фуллскрина)
+    glGenFramebuffers(1, &b->fbo_ldr);
+    glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_ldr);
+    b->tex_ldr = make_ldr_tex(vw, vh);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, b->tex_ldr, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     make_fbo(&b->fbo_glow[0], &b->tex_glow[0], NULL, gw, gh, 0);
     make_fbo(&b->fbo_glow[1], &b->tex_glow[1], NULL, gw, gh, 0);
     // MSAA-таргет под новый размер (или под сменившийся r_msaa)
@@ -318,7 +345,8 @@ GLuint bloom_scene_depth(const BloomParams *b)
     return b->depth;
 }
 
-void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
+void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
+                  int out_w, int out_h)
 {
     if (!b->fbo) return;
     // Настройки из cvar'ов (меню/консоль): применяются каждый кадр.
@@ -363,7 +391,9 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
     // При strength <= 0 (bloom выключен) glow умножается на ноль — проход
     // служит копией сцены на экран (один квад вместо четырёх).
     glBindFramebuffer(GL_FRAMEBUFFER, target_fbo);
-    glViewport(0, 0, b->vw, b->vh);
+    // Размер ЦЕЛИ: экран нативен (апскейл сцены r_render_scale тут),
+    // fbo тумана — в масштабе сцены. b->vw тут был бы углом на экране.
+    glViewport(0, 0, out_w, out_h);
     glUseProgram(b->prog_composite);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_tex);
@@ -395,6 +425,28 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo)
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
+// Present-путь (нет тумана): grade+тонмаппинг в масштабе сцены в RGBA8,
+// затем аппаратный blit-апскейл на экран — на слабых iGPU шейдерный
+// фуллскрин-апскейл стоит заметно дороже фиксированного blit.
+void bloom_present(BloomParams *b, GLuint scene_tex, int out_w, int out_h)
+{
+    if (!b->fbo_ldr) return;
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_ldr);
+    bloom_render(b, scene_tex, b->fbo_ldr, b->vw, b->vh);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo_ldr);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);            // blit уважает ножницы — гасим
+    glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, out_w, out_h,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    // HUD/прицел рисуются следом: вернуть viewport ЦЕЛИ (натив) и FBO
+    glViewport(0, 0, out_w, out_h);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+}
+
 void bloom_cleanup(BloomParams *b)
 {
     if (s_bloom_p == b) s_bloom_p = NULL;
@@ -410,6 +462,11 @@ void bloom_cleanup(BloomParams *b)
         glDeleteFramebuffers(2, b->fbo_glow);
         glDeleteTextures(2, b->tex_glow);
         b->fbo = 0;
+    }
+    if (b->fbo_ldr) {
+        glDeleteFramebuffers(1, &b->fbo_ldr);
+        glDeleteTextures(1, &b->tex_ldr);
+        b->fbo_ldr = 0;
     }
     msaa_free(b);
 }

@@ -17,6 +17,7 @@ typedef struct {
     GLuint fbo_ms;             // MSAA-сцена: мультисэмпл-FBO (r_msaa > 0)
     GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
     int msaa;                  // активные сэмплы (0 = MSAA выключен)
+    GLuint fbo_ldr, tex_ldr;   // LDR-копия сцены для present (bloom_present)
     GLuint fbo_glow[2];        // ping-pong буферы glow (половинный размер)
     GLuint tex_glow[2];
     GLuint vao, vbo;           // полноэкранный треугольник
@@ -62,7 +63,9 @@ GLuint bloom_scene_depth(const BloomParams *b);
 // или уже с объёмным туманом (voxfog). target_fbo — куда писать композит:
 // 0 = экран; иначе FBO (voxfog подставляет свой, чтобы туман лёг ПОВЕРХ
 // bloom'а и сам не светился).
-void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo);
+void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
+                  int out_w, int out_h);
+void bloom_present(BloomParams *b, GLuint scene_tex, int out_w, int out_h);
 
 // Освобождает GL-ресурсы.
 void bloom_cleanup(BloomParams *b);

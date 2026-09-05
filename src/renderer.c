@@ -74,6 +74,32 @@ void renderer_set_viewport(int vw, int vh)
     if (vw > 0 && vh > 0) { s_vw = vw; s_vh = vh; }
 }
 
+// --- Масштаб рендера (r_render_scale) ------------------------------------------
+// Сцена (вместе с MSAA/GI/SSR/вокс-туманом) рисуется в УМЕНЬШЕННОМ
+// разрешении, финальный композит (voxfog/bloom) и HUD — в нативе окна:
+// апскейл получается сам, текстуры сэмплятся по нормализованным UV.
+// Все фуллскрин-проходы стоят пропорционально пикселям — это главный
+// рычаг фпс на слабых iGPU (0.6 = ~2.8x меньше пикселей).
+static int s_rsw = 1280, s_rsh = 720;  // размер сцены с масштабом
+
+static void scene_size_update(void)
+{
+    float sc = cvar_get("r_render_scale");
+    if (sc < 0.4f) sc = 0.4f;
+    if (sc > 1.0f) sc = 1.0f;
+    int w = (int)((float)s_vw * sc + 0.5f);
+    int h = (int)((float)s_vh * sc + 0.5f);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (w == s_rsw && h == s_rsh) return;
+    s_rsw = w;
+    s_rsh = h;
+    bloom_resize(&s_bloom, s_rsw, s_rsh);
+    ssr_resize(&s_ssr, s_rsw, s_rsh);
+    gi_resize(&s_gi, s_rsw, s_rsh);
+    voxfog_resize(s_rsw, s_rsh);
+}
+
 // --- Cubemap reflection FBO ----------------------------------------------------
 static GpuTex make_cubemap_color_tex(int size)
 {
@@ -197,8 +223,8 @@ static void renderer_ctx_fill(Game *g)
 {
     RendererContext *rc = &s_rc;
     memset(rc, 0, sizeof *rc);
-    rc->vw = s_vw;
-    rc->vh = s_vh;
+    rc->vw = s_rsw;   // сцена в масштабе r_render_scale (HUD остаётся натив)
+    rc->vh = s_rsh;
 
     // Камера
     if (g->cam) {
@@ -308,8 +334,8 @@ static void renderer_ctx_fill(Game *g)
     // Вьюпорт текущего прохода (проходы кубомапа переопределяют его)
     rc->view_vp[0] = 0;
     rc->view_vp[1] = 0;
-    rc->view_vp[2] = s_vw;
-    rc->view_vp[3] = s_vh;
+    rc->view_vp[2] = s_rsw;
+    rc->view_vp[3] = s_rsh;
     // Кубомап отражений — статический: загружается из cubemaps/ при старте.
     // refl_cubemap_dirty оставлен для совместимости, но не используется.
     if (g->cam && g->world_loaded)
@@ -504,12 +530,24 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
 void renderer_setup(const WorldState *w, int vw, int vh)
 {
     if (!s_gpu) s_gpu = gpu_create();   // RHI-бэкенд (GL): один на процесс
+    cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
+                     "масштаб рендера сцены (1 = полное разрешение окна)");
+    cvar_register_ex("r_present_blit", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "present: blit-апскейл LDR-копии (1) / шейдерный композит (0)");
+    // Сцена сразу в масштабе: таргеты (MSAA/GI/SSR/туман) меньше окна
+    float sc = cvar_get("r_render_scale");
+    if (sc < 0.4f) sc = 0.4f;
+    if (sc > 1.0f) sc = 1.0f;
+    s_rsw = (int)((float)vw * sc + 0.5f);
+    s_rsh = (int)((float)vh * sc + 0.5f);
+    if (s_rsw < 1) s_rsw = 1;
+    if (s_rsh < 1) s_rsh = 1;
     memset(&s_bloom, 0, sizeof s_bloom);
-    bloom_init(&s_bloom, vw, vh);
-    ssr_init(&s_ssr, vw, vh);
+    bloom_init(&s_bloom, s_rsw, s_rsh);
+    ssr_init(&s_ssr, s_rsw, s_rsh);
     memset(&s_gi, 0, sizeof s_gi);
-    gi_init(&s_gi, vw, vh);
-    voxfog_init(w, vw, vh);
+    gi_init(&s_gi, s_rsw, s_rsh);
+    voxfog_init(w, s_rsw, s_rsh);
     make_cubemap_fbo(256); // кубомап фиксированного размера
     s_cubemap_valid = 0;
     s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
@@ -611,10 +649,13 @@ void renderer_begin(void)
     prof_reset();
     float clear_rgb[3] = { 0.6f, 0.65f, 0.7f };
     if (s_active) sky_fog_color(clear_rgb);
-    // Смена r_msaa вживую: пересоздать MSAA-таргет ДО привязки FBO сцены
+    // Смена r_render_scale/r_msaa вживую: пересоздать таргеты ДО привязки
+    scene_size_update();
     bloom_msaa_sync(&s_bloom);
     gpu_bind_framebuffer(s_gpu, s_active ? bloom_scene_fbo(&s_bloom) : 0);
-    gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
+    // Сцена — в масштабе; прямой рендер в экран (фон меню) — натив
+    if (s_active) gpu_viewport(s_gpu, 0, 0, s_rsw, s_rsh);
+    else          gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
     gpu_clear(s_gpu, clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
 }
 
@@ -818,7 +859,8 @@ gpu_wireframe(s_gpu, s_wire);
         if (voxfog_is_on()) {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, scene_for_post, voxfog_fbo());
+            bloom_render(&s_bloom, scene_for_post, voxfog_fbo(),
+                         s_rsw, s_rsh);
             prof_gpu_end(PROF_BLOOM);
             Uint64 t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
@@ -832,7 +874,12 @@ gpu_wireframe(s_gpu, s_wire);
         } else {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, scene_for_post, 0);
+            // r_present_blit=1 — grade в масштабе сцены + аппаратный blit
+            // (быстрее на слабых iGPU); 0 — шейдерный композит на экран.
+            if (cvar_get("r_present_blit") > 0.5f)
+                bloom_present(&s_bloom, scene_for_post, s_vw, s_vh);
+            else
+                bloom_render(&s_bloom, scene_for_post, 0, s_vw, s_vh);
             prof_gpu_end(PROF_BLOOM);
             Uint64 t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);

@@ -515,6 +515,13 @@ void objects_node_render(SceneNode *n, float dt)
         glBindTexture(GL_TEXTURE_2D, p->blob_tex);
         for (int i = 0; i < p->count; i++) {
             ObjectInst *it = &p->inst[i];
+            // Пятно не во фрустуме — мимо (и uniform'ы не льём): без этого
+            // слабый iGPU перемалывал тысячи невидимых квадов каждый кадр
+            if (!frustum_test_sphere(&p->rc->frustum, it->pos[0],
+                                     it->pos[1] + it->height * 0.5f,
+                                     it->pos[2],
+                                     it->height + it->width))
+                continue;
             float h = it->height;
             float sz = it->width * 0.65f;
             float px = it->pos[0] - sdx * h * 0.55f;

@@ -5,6 +5,7 @@
 
 #include "assets.h"
 #include "cvars.h"
+#include "jobs.h"
 #include "profiler.h"
 #include "gl_loader.h"
 #include "linalg.h"
@@ -56,6 +57,7 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     // мокростью/кубомапом/шумом — см. ниже).
     p->u_splat = glGetUniformLocation(prog, "uSplat");
     p->u_splat_on = glGetUniformLocation(prog, "uSplatOn");
+    p->u_detail_dist = glGetUniformLocation(prog, "uDetailDist");
     p->u_layer_scale = glGetUniformLocation(prog, "uLayerScale");
     for (int i = 0; i < SPLAT_LAYERS; i++) {
         char name[16];
@@ -611,6 +613,8 @@ void terrain_node_render(SceneNode *n, float dt)
                      "рельеф LOD2: дальность средней сетки, м");
     cvar_register_ex("r_terrain_lod3", s_lod3, 30.0f, 8000.0f, CVAR_ARCHIVE,
                      "рельеф LOD3: дальность грубой сетки, м");
+    cvar_register_ex("r_terr_detail_dist", 0.0f, 0.0f, 500.0f, CVAR_ARCHIVE,
+                     "LOD деталей террейна: дальше — базовая карта (0 = выкл)");
 
     // Теневой проход (RP_SHADOW): глубина рельефа в текущий каскад.
     // Оркестрацию делает shadow.c (см. shadow_render в renderer_frame).
@@ -652,6 +656,11 @@ void terrain_node_render(SceneNode *n, float dt)
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, terrain_wetness_mask_tex());
     }
+    // LOD деталей: 0 = полный сплаттинг (дефолт), >0 = радиус деталей (м).
+    // Дальше — чистая базовая карта: 6-8 текстурных выборок на пиксель
+    // экономим на БОЛЬШОЙ части экрана (режим «КАРТОШКА»).
+    if (p->u_detail_dist >= 0)
+        glUniform1f(p->u_detail_dist, cvar_get("r_terr_detail_dist"));
     // Поверхности (splat): маска на юните 10, слои на 12..15
     if (p->u_splat_on >= 0)
         glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
@@ -836,21 +845,24 @@ static int ray_hits_object_up(float x, float y, float z)
     return 0;
 }
 
-void terrain_wetness_mask_bake(const WorldState *w)
+// Один кусок строк маски мокрости для job-пула (см. jobs.h). Данные только
+// читаем (s_shobjs построен, w->heights готовы) — безопасно параллелить.
+typedef struct {
+    const WorldState *w;
+    unsigned char *tex;
+    SDL_AtomicInt dry, total;
+} WetnessJob;
+
+static void wetness_rows(int i0, int i1, void *ud)
 {
-    if (s_wetness_mask_baked) return; // already baked this session
-    shobjs_build(w);   // строим список объектов (цилиндры крон)
-
-    unsigned char *tex = malloc((size_t)WETNESS_MASK_W * WETNESS_MASK_H * 2);
-    if (!tex) return;
-
-    Uint64 t0 = SDL_GetTicks();
-    int dry_px = 0, total_px = 0;
-
-    for (int j = 0; j < WETNESS_MASK_H; j++) {
+    WetnessJob *j = (WetnessJob *)ud;
+    const WorldState *w = j->w;
+    unsigned char *tex = j->tex;
+    int dry_local = 0, total_local = 0;
+    for (int jj = i0; jj < i1; jj++) {
         for (int i = 0; i < WETNESS_MASK_W; i++) {
             float x = ((float)i + 0.5f) / WETNESS_MASK_W * w->world_w;
-            float z = ((float)j + 0.5f) / WETNESS_MASK_H * w->world_d;
+            float z = ((float)jj + 0.5f) / WETNESS_MASK_H * w->world_d;
             float y = static_ground(w, x, z) + 0.1f; // чуть выше земли
             int dry = 0;
 
@@ -863,13 +875,36 @@ void terrain_wetness_mask_bake(const WorldState *w)
 
             // В OpenGL первый ряд = v=0 (НИЗ текстуры), z=0 -> v=0.
             // R = открытое небо (падает дождь/снег), G = под крышей (сухо).
-            size_t k = ((size_t)j * WETNESS_MASK_W + i) * 2;
+            size_t k = ((size_t)jj * WETNESS_MASK_W + i) * 2;
             tex[k]     = dry ? 0 : 255;
             tex[k + 1] = dry ? 255 : 0;
-            total_px++;
-            if (dry) dry_px++;
+            total_local++;
+            if (dry) dry_local++;
         }
     }
+    SDL_AddAtomicInt(&j->dry, dry_local);
+    SDL_AddAtomicInt(&j->total, total_local);
+}
+
+void terrain_wetness_mask_bake(const WorldState *w)
+{
+    if (s_wetness_mask_baked) return; // already baked this session
+    shobjs_build(w);   // строим список объектов (цилиндры крон)
+
+    unsigned char *tex = malloc((size_t)WETNESS_MASK_W * WETNESS_MASK_H * 2);
+    if (!tex) return;
+
+    Uint64 t0 = SDL_GetTicks();
+
+    // Параллельно по строкам: 512 строк * 256 шагов луча — чистый CPU,
+    // ни GL, ни общих записей (текстура режется по строкам без пересечений)
+    WetnessJob j;
+    j.w = w;
+    j.tex = tex;
+    SDL_SetAtomicInt(&j.dry, 0);
+    SDL_SetAtomicInt(&j.total, 0);
+    jobs_parallel_for(0, WETNESS_MASK_H, wetness_rows, &j);
+    int dry_px = SDL_GetAtomicInt(&j.dry), total_px = SDL_GetAtomicInt(&j.total);
     SDL_Log("Wetness mask baked (%dx%d) in %llu ms: %d/%d px dry (%.1f%%)",
             WETNESS_MASK_W, WETNESS_MASK_H,
             (unsigned long long)(SDL_GetTicks() - t0),
