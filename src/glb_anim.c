@@ -319,7 +319,10 @@ AnimGlb *glb_anim_parse(const char *path)
                 if(au) rvv(bin,ub,au,(int)v,u);
                 P->verts[3*v]=p[0]; P->verts[3*v+1]=p[1]; P->verts[3*v+2]=p[2];
                 P->normals[3*v]=n[0]; P->normals[3*v+1]=n[1]; P->normals[3*v+2]=n[2];
-                P->uvs[2*v]=u[0]; P->uvs[2*v+1]=1.0f-u[1]; // glTF: V=0 сверху; GL: t=0 снизу → флип
+                // БЕЗ флипа V: stb_image кладёт верхнюю строку картинки в
+                // t=0, а glTF v=0 — тоже верх изображения (top-left origin).
+                // Флип зеркалил текстуру вертикально: губы оказывались на лбу.
+                P->uvs[2*v]=u[0]; P->uvs[2*v+1]=u[1];
                 if(P->bone_idx){
                     float ji[4]={0,0,0,0},we[4]={0,0,0,0};
                     if(aj) rvv(bin,jb,aj,(int)v,ji);

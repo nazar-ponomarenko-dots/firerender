@@ -202,10 +202,19 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'g')) {
         cmd_glb("models/vaz-2105.glb");
     }
-    // l — анимированная модель в 4 м перед камерой (тест автопостановки
-    // glbanim и теней скиннинга): FR_TEST=Sl
+    // l — анимированная модель в 3 м перед камерой (тест UV лица и теней
+    // скиннинга): FR_TEST=Sl. y=0 → автопостановка на рельеф.
     if (strchr(fr_test, 'l')) {
-        cmd_glbanim("models/handpaint_-_girl_01.glb");
+        const float *cp = g->cam->cam.pos;
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        char args[300];
+        snprintf(args, sizeof args,
+                 "models/handpaint_-_girl_01.glb %.2f 0 %.2f 1",
+                 cp[0] + fwd[0] * 3.0f, cp[2] + fwd[2] * 3.0f);
+        cmd_glbanim(args);
+        g->cam->cam.pitch = -0.26f;      // вниз — лицо крупным планом
+        camera_sync_look(&g->cam->cam);
     }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };

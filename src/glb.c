@@ -450,7 +450,9 @@ GlbModel *glb_parse_file(const char *path)
                         mat4_transform_point(world, p, p);
                         if (an) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
                         if (au) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
-                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], 1.0f - u[1]);
+                        // БЕЗ флипа V: stb_image кладёт верхнюю строку
+                        // картинки в t=0, glTF v=0 — тоже верх (см. glb_anim)
+                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1]);
                     }
                     if (ai) {
                         long idx_base = ai->bufferView >= 0 && ai->bufferView < bv_n
