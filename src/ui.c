@@ -93,16 +93,18 @@ static float ui_text_w(Ui *u, const char *s)
 }
 
 // Общая обработка хитбокса виджета: hover -> hot/focus, клик -> active.
-// Возвращает 1, если курсор над виджетом.
+// Возвращает 1, если курсор над виджетом. Фокус НЕ крадётся во время
+// перетаскивания (active >= 0): иначе драг слайдера через соседние строки
+// переключал фокус и спамил звук навигации.
 static int ui_hit(Ui *u, int id, float x, float y, float w, float h)
 {
     int hover = u->mx >= x && u->mx <= x + w &&
                 u->my >= y && u->my <= y + h;
     if (hover) {
         u->hot = id;
-        u->focus = id;
+        if (u->active < 0) u->focus = id;
     }
-    if (hover && u->mouse_click)
+    if (hover && u->mouse_click && u->active < 0)
         u->active = id;
     return hover;
 }
@@ -180,11 +182,16 @@ void ui_begin(Ui *u, int vw, int vh, int big, int input)
 void ui_end(Ui *u)
 {
     // Навигация стрелками: фокус ходит по виджетам кадра, по кругу.
-    // Home/End — в начало/конец списка.
+    // Home/End — в начало/конец списка. Если слайдер уже съел Home/End
+    // (поставил min/max) — фокус ими не листаем: одно нажатие = одно
+    // действие.
     if (u->key_up) u->focus = (u->focus <= 1 || u->focus > u->id) ? u->id : u->focus - 1;
     if (u->key_down) u->focus = (u->focus >= u->id || u->focus < 1) ? 1 : u->focus + 1;
-    if (u->key_home) u->focus = u->id ? 1 : 0;
-    if (u->key_end) u->focus = u->id;
+    if (!u->eat_home_end) {
+        if (u->key_home) u->focus = u->id ? 1 : 0;
+        if (u->key_end)  u->focus = u->id;
+    }
+    u->eat_home_end = false;
     if (u->focus < 0) u->focus = 0;
     if (u->focus > u->id) u->focus = u->id;
     // Звук навигации: клик ТОЛЬКО при переходе на другой пункт
@@ -303,8 +310,11 @@ bool ui_slider(Ui *u, const char *label, float *value,
     if (tw < 40.0f) tw = 40.0f;
     float tyy = u->cy + u->font_h + 7.0f;
 
-    // Захват и перетаскивание: клик по строке ставит значение
-    if (hover && u->mouse_click) u->active = id;
+    // Захват — ТОЛЬКО кликом по треку (с запасом в пару пикселей): клик по
+    // подписи или числу справа раньше запускал драг со скачком значения.
+    int track_hover = u->mx >= tx - 8.0f && u->mx <= tx + tw + 8.0f &&
+                      u->my >= u->cy && u->my <= u->cy + ih;
+    if (track_hover && u->mouse_click && u->active < 0) u->active = id;
     if (u->active == id && u->mouse_down) {
         float t = (u->mx - tx) / tw;
         if (t < 0) t = 0;
@@ -314,13 +324,15 @@ bool ui_slider(Ui *u, const char *label, float *value,
     }
     if (u->active == id && u->mouse_release) u->active = -1;
 
-    // Клавиатура: ←/→ шаг 5% диапазона, Home/End — крайние значения
+    // Клавиатура: ←/→ шаг 5% диапазона, Home/End — крайние значения.
+    // Съеденные Home/End помечаются: ui_end не должен ОДНОВРЕМЕННО листать
+    // фокус на первый/последний пункт (двойное действие на одно нажатие).
     if (u->focus == id) {
         float step = (max - min) * 0.05f;
         if (u->key_left)  { *value -= step; changed = true; }
         if (u->key_right) { *value += step; changed = true; }
-        if (u->key_home)  { *value = min; changed = true; }
-        if (u->key_end)   { *value = max; changed = true; }
+        if (u->key_home)  { *value = min; changed = true; u->eat_home_end = true; }
+        if (u->key_end)   { *value = max; changed = true; u->eat_home_end = true; }
     }
     if (*value < min) *value = min;
     if (*value > max) *value = max;

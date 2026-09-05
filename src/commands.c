@@ -17,6 +17,7 @@
 #include "cvars.h"
 #include "fx.h"
 #include "entity.h"
+#include "physics.h"
 #include "events.h"
 #include "game.h"
 #include "gl_loader.h"
@@ -608,6 +609,19 @@ void cmd_glbanim(const char *args)
     float x = 0, y = 0, z = 0, scale = 1.0f;
     int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
     if (n < 1) { console_print("usage: glbanim <glb> [x y z] [scale]"); return; }
+    // Автопостановка НА ЗЕМЛЮ — как у cmd_glb: без координат — в 6 м
+    // впереди игрока по взгляду, при y <= 0 — высота рельефа в точке XZ.
+    if (n < 4 && g->cam) {
+        const float *cp = g->cam->cam.pos;
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        float d = (n >= 2) ? x : 6.0f;
+        x = cp[0] + fwd[0] * d;
+        z = cp[2] + fwd[2] * d;
+        y = sample_height(&g->world, x, z) + 0.3f;
+    } else if (y <= 0.0f) {
+        y = sample_height(&g->world, x, z) + 0.3f;
+    }
     float pos[3] = { x, y, z };
     SceneNode *nd = glb_anim_make_node(path, pos, scale, renderer_context());
     if (!nd) { console_print("glbanim: не удалось загрузить %s", path); return; }
@@ -623,6 +637,84 @@ void cmd_glbanim(const char *args)
         for (int i = 0; i < glb_anim_clip_count(nd); i++)
             console_print("  [%d] %s", i, glb_anim_clip_name(nd, i) ? glb_anim_clip_name(nd, i) : "?");
     }
+}
+
+// --- Мини-физика (Verlet): демо-верёвка перед камерой ---------------------------
+void cmd_phys_rope(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->cam || !g->world_loaded) {
+        console_print("phys: мир не загружен");
+        return;
+    }
+    int n = 12;
+    sscanf(args, "%d", &n);
+    if (n < 2) n = 2;
+    if (n > 48) n = 48;
+    PhysWorld *w = physics_world();
+    physics_reset(w);
+    const float *cp = g->cam->cam.pos;
+    float fwd[3] = { 0, 0, 1 };
+    camera_dirs(&g->cam->cam, fwd, NULL);
+    float ax = cp[0] + fwd[0] * 5.0f;
+    float az = cp[2] + fwd[2] * 5.0f;
+    float ay = sample_height(&g->world, ax, az) + 3.0f;
+    float seg = 0.35f;
+    for (int i = 0; i < n; i++) {
+        float p[3] = { ax, ay - i * seg, az };
+        physics_add_part(w, p, 1.0f, 0.08f);
+        if (i > 0) physics_add_link(w, i - 1, i);
+    }
+    physics_pin(w, 0, 1);                    // первый узел прибит к воздуху
+    console_print("phys: верёвка из %d звеньев в (%.0f,%.0f)", n, ax, az);
+}
+
+void cmd_phys_push(const char *args)
+{
+    Game *g = game_instance();
+    PhysWorld *w = physics_world();
+    if (!g || !g->cam || w->np <= 0) { console_print("phys: верёвки нет (phys_rope)"); return; }
+    float force = 10.0f;
+    sscanf(args, "%f", &force);
+    float fwd[3] = { 0, 0, 1 };
+    camera_dirs(&g->cam->cam, fwd, NULL);
+    float vel[3] = { fwd[0] * force, force * 0.3f, fwd[2] * force };
+    physics_impulse(w, w->np - 1, vel);
+    console_print("phys: толчок %.0f м/с", force);
+}
+
+void cmd_phys_clear(const char *args)
+{
+    (void)args;
+    physics_reset(physics_world());
+    console_print("phys: очищено");
+}
+
+// phys_ragdoll [hang] [kick] — рэгдолл на последней анимированной модели:
+// кости становятся Verlet-частицами, анимация вытесняется физикой.
+// hang=1 (по умолчанию) — origin прибит, модель обвисает в воздухе;
+// kick — импульс всем частицам (м/с) — толчок, модель падает.
+void cmd_phys_ragdoll(const char *args)
+{
+    int hang = 1, kick = 0;
+    sscanf(args, "%d %d", &hang, &kick);
+    if (!s_last_anim) {
+        console_print("phys_ragdoll: нет аним-модели (сначала glbanim ...)");
+        return;
+    }
+    if (glb_anim_ragdoll_enable(s_last_anim, hang) != 0) {
+        console_print("phys_ragdoll: не удалось (слишком много костей?)");
+        return;
+    }
+    Game *g = game_instance();
+    if (kick > 0 && g && g->cam) {
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        float vel[3] = { fwd[0] * kick, kick * 0.4f, fwd[2] * kick };
+        glb_anim_ragdoll_kick(s_last_anim, vel);
+    }
+    console_print("phys_ragdoll: включён (%s%s)", hang ? "висит" : "падает",
+                  kick > 0 ? " + толчок" : "");
 }
 
 // Список клипов анимации узла: glbclips [имя-узла]

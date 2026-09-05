@@ -37,6 +37,10 @@ void player_teleport(Player *p, Camera *cam, const float pos[3],
     cam->pitch = pitch;
     cam->vx = cam->vy = cam->vz = 0.0f;
     cam->fly = 0;
+    // Цели сглаживания мыши — к новому взгляду: иначе m_smooth тянет камеру
+    // обратно к старой точке (заметно при загрузке/спавне с малой дельтой,
+    // не доходящей до эвристики «>3 рад» в camera_update).
+    camera_sync_look(cam);
     SDL_Log("Teleport: %.1f %.1f %.1f yaw=%.2f pitch=%.2f",
             pos[0], pos[1], pos[2], yaw, pitch);
 }

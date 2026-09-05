@@ -47,6 +47,21 @@ static int comp_size(int c)
     }
     return 0;
 }
+
+// Какой набор TEXCOORD использует baseColorTexture материала (0 по умолчанию).
+// glTF разрешает до двух развёрток на примитив: глаза/лицо персонажей часто
+// живут в TEXCOORD_1 — читать всегда только нулевую = сломанные текстуры.
+static int base_uv_set(const JsonNode *mt_a, const JsonNode *tx_a, int mat)
+{
+    if (mat < 0 || !mt_a || mt_a->type != JSON_ARRAY) return 0;
+    const JsonNode *m = json_array_get(mt_a, mat);
+    const JsonNode *pbr = m ? json_find(m, "pbrMetallicRoughness") : NULL;
+    const JsonNode *tex = pbr ? json_find(pbr, "baseColorTexture") : NULL;
+    int ti = (int)json_num(tex, -1);
+    if (ti < 0 || !tx_a || tx_a->type != JSON_ARRAY) return 0;
+    const JsonNode *t = json_array_get(tx_a, ti);
+    return (int)json_num(t ? json_find(t, "texCoord") : NULL, 0);
+}
 static int type_vec(const char *t)
 {
     if (!t) return 1;
@@ -398,7 +413,14 @@ GlbModel *glb_parse_file(const char *path)
                     const JsonNode *attrs = json_find(prim, "attributes");
                     int ipos = (int)json_num(attrs ? json_find(attrs, "POSITION") : NULL, -1);
                     int inrm = (int)json_num(attrs ? json_find(attrs, "NORMAL") : NULL, -1);
-                    int iuv = (int)json_num(attrs ? json_find(attrs, "TEXCOORD_0") : NULL, -1);
+                    // UV-набор — тот, на который ссылается baseColorTexture
+                    // материала (глаза/лицо персонажей часто в TEXCOORD_1)
+                    int uvset = base_uv_set(materials, textures, mat_idx);
+                    char uvkey[24];
+                    snprintf(uvkey, sizeof uvkey, "TEXCOORD_%d", uvset);
+                    int iuv = (int)json_num(attrs ? json_find(attrs, uvkey) : NULL, -1);
+                    if (iuv < 0)
+                        iuv = (int)json_num(attrs ? json_find(attrs, "TEXCOORD_0") : NULL, -1);
                     int iidx = (int)json_num(json_find(prim, "indices"), -1);
                     if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "нет POSITION"; break; }
                     GlbAcc *ap = &accs[ipos];
@@ -428,7 +450,9 @@ GlbModel *glb_parse_file(const char *path)
                         mat4_transform_point(world, p, p);
                         if (an) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
                         if (au) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
-                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], 1.0f - u[1]);
+                        // БЕЗ флипа V: stb_image кладёт верхнюю строку
+                        // картинки в t=0, glTF v=0 — тоже верх (см. glb_anim)
+                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1]);
                     }
                     if (ai) {
                         long idx_base = ai->bufferView >= 0 && ai->bufferView < bv_n
