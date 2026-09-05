@@ -34,6 +34,10 @@ flat out float vLayer;   // LOD целый для всего квада (не и
 #define WHEAT_BASE 4.0
 #define WHEAT_MARK 3.5
 
+// Прогиб под игроком и полезная высота квада — ОБЩИЙ блок с wheat.vs:
+// геометрия тени обязана совпадать с геометрией растения.
+#include "veg_common.glsl"
+
 void main() {
     // Густую растительность (70 шт/м2) в карте теней прореживаем на 40%:
     // плотные тени от пшеницы на пшенице должны быть цельными, а не
@@ -90,9 +94,13 @@ void main() {
     wp.y = iPos.y + (iSlope.x * hvec.x + iSlope.y * hvec.z) * hw;
     // пшеница (вид 4+) вытянута в высоту в 3 раза — как в wheat.vs
     float ht = iAttr.y * (iAttr.w > WHEAT_MARK ? 3.0 : 1.0);
+    // квад укорочен до непрозрачной части картинки — как в wheat.vs, иначе
+    // силуэт тени был бы выше самого растения
+    float cf = veg_content_frac(layer);
+    float vis = ht * cf;
     float lc = cos(iLean), ls = sin(iLean);
     vec3 lt = hvec * (aPos.y * ls * iAttr.y * wmul)
-            + up  * (aPos.y * lc * ht);
+            + up  * (aPos.y * lc * vis);
     wp += lt;
     // тот же ветер и прогиб под игроком, что в wheat.vs, — тени не
     // отрываются от растений
@@ -105,16 +113,17 @@ void main() {
     float sway = (w1 * 0.07 + w2 * 0.035) * aPos.y * amp;
     wp.x += sway;
     wp.z += sway * 0.35 + w2 * 0.02 * aPos.y;
-    vec2 toCam = iPos.xz - uCamPos.xz;
-    float pd = length(toCam);
-    float push = 1.0 - smoothstep(0.35, mix(1.0, 2.0, uWalk), pd);
-    if (push > 0.0) {
-        vec2 dir = toCam / max(pd, 0.0001);
-        float bend = push * push * mix(0.85, 1.35, uWalk) * aPos.y * iAttr.y;
-        wp.xz += dir * bend;
-        wp.y -= push * push * mix(0.55, 0.85, uWalk) * aPos.y * iAttr.y;
+    // прогиб под игроком — общий блок veg_common.glsl (поворот вокруг
+    // основания, сильнее у высоких растений)
+    vec2 bdir;
+    float bang = veg_bend_angle(iPos.xz, iPos.y, uCamPos, vis, aPos.y, uWalk,
+                                bdir);
+    if (bang > 0.0) {
+        float rise = aPos.y * lc * vis;
+        wp.xz += bdir * (sin(bang) * rise);
+        wp.y  -= (1.0 - cos(bang)) * rise;
     }
-    vUV = aUV;
+    vUV = vec2(aUV.x, 1.0 - (1.0 - aUV.y) * cf);   // UV под укороченный квад
     // Холст 256x178, спрайты слева сверху. Кусок берём по текущей wx;
     // слой для альфа-теста в shadowveg.fs отсекается по GL_NEAREST —
     // переключение силуэта происходит в середине полосы, где в кадре

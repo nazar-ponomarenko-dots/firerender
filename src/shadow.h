@@ -53,6 +53,9 @@ extern int g_shadow_cull;
 extern int g_shadow_terrain;
 extern int g_shadow_veg;
 extern int g_shadow_obj;
+// Кэш статических каскадов (2/3 не перерисовываются, пока не сменилась
+// снапнутая матрица). FR_TEST 'C' выключает — для A/B-замеров.
+extern int g_shadow_cache;
 int shadow_is_on(void);
 void shadow_toggle(void);
 void shadow_set(int on);   // для консоли (cvar r_shadows)

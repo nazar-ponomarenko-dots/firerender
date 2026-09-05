@@ -17,6 +17,7 @@ layout (location = 2) in vec2 aUV;
 // glVertexAttribIPointer. Значения целые (0..255) — int() точен.
 layout (location = 3) in vec4 aBoneIndices;
 layout (location = 4) in vec4 aBoneWeights;
+layout (location = 5) in float aSnow;    // per-vertex "открыто небу сверху" (снег)
 
 uniform mat4 uViewProj;
 uniform mat4 uModel;            // перенос + масштаб объекта
@@ -29,8 +30,10 @@ uniform int uHasSkin;           // 0 — не скиннинг (просто м�
 out vec3 vWorldPos;
 out vec3 vNormal;
 out vec2 vUV;
+out float vSnow;
 
 void main() {
+    vSnow = aSnow;
     vec3 pos = aPos;
     vec3 nrm = aNormal;
     if (uHasSkin > 0) {

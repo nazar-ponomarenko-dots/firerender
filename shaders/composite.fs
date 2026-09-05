@@ -20,7 +20,7 @@ uniform float uExposure;     // экспозиция
 uniform float uGamma;        // гамма (1 = без изменений)
 uniform float uSat;          // насыщенность (>1 — сочнее)
 uniform float uContrast;     // контраст (1 = без изменений)
-uniform float uWetness;      // мокрость 0..1 — в дождь цветастость ниже
+uniform float uWetness;      // мокрота 0..1 — в дождь цветастость ниже
 uniform float uUnderwater;   // 0..1 — сила подводных эффектов (плавный вход)
 uniform vec3  uWaterTint;    // тон водоёма под глазами
 uniform float uTime;         // время (анимация подводных волн)
@@ -34,7 +34,7 @@ void main() {
 
     // Под водой: UV «плывёт» — две низкочастотные волны двигают выборку
     // сцены. Чем глубже, тем сильнее (uUnderwater) — у поверхности дрожит
-    // слабо. Истоньчение к низу: там вода толще, искажение сильнее.
+    // слабо. Истончение к низу: там вода толще, искажение сильнее.
     if (uUnderwater > 0.001) {
         float amp = 0.0105 * uUnderwater;
         vec2 w;
@@ -48,7 +48,7 @@ void main() {
 
     vec3 sc = texture(uScene, uv).rgb;
     vec3 gl = texture(uGlow, uv).rgb;
-    vec3 c = sc + gl * uStrength;
+    vec3     c = sc + gl * uStrength;
 
     c *= uExposure;
 
@@ -74,7 +74,7 @@ void main() {
     // Можно поднять в консоли, если хочется ярче/поднять тени.
     c = pow(max(c, 0.0), vec3(1.0 / uGamma));
 
-    // --- Подводное окрашение ------------------------------------------------------
+    // --- Подводное окрашивание ------------------------------------------------------
     if (uUnderwater > 0.001) {
         // Тон воды фильтрует свет: дальнее и тёмное уходит в цвет толщи.
         c = mix(c, uWaterTint * (0.25 + 0.75 * dot(c, luma)),

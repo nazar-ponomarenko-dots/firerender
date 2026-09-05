@@ -9,13 +9,15 @@
 // ============================================================================
 #ifndef SELECTION_H
 #define SELECTION_H
-#include "gl_loader.h"
+#include "gpu.h"
 #include "render_ctx.h"
 #include "scene.h"
 
 typedef struct {
-    GLuint prog, vao, vbo;         // программа и буфер рёбер (каждый кадр)
-    GLint u_viewproj, u_color;
+    GpuProg prog;                  // программа
+    GpuVao vao;                    // вершинный массив рёбер
+    GpuBuf vbo;                    // вершинный буфер (содержимое каждый кадр)
+    GpuLoc u_viewproj, u_color;
     const RendererContext *rc;     // матрицы вида/проекции
     SceneNode *root;               // корень дерева: по нему ищем 3D-узлы
 } SelParams;

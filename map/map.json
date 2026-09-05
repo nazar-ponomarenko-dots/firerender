@@ -39,8 +39,32 @@
     "fog_start": 0.75,
     "fog_end": 1.6
   },
+  "surfaces": {
+    "dirt": {
+      "tex": "img/dirt.png",
+      "scale": 3.0,
+      "grass": 0.25
+    },
+    "sand": {
+      "tex": "img/sand.png",
+      "scale": 2.5,
+      "grass": 0.0
+    },
+    "gravel": {
+      "tex": "img/gravel.png",
+      "scale": 2.0,
+      "grass": 0.0
+    },
+    "asphalt": {
+      "tex": "img/asphalt.png",
+      "scale": 4.0,
+      "grass": 0.0
+    },
+    "resolution": 1.0,
+    "slope_rock": 42.0
+  },
   "veg": {
-    "grass_density": 1.2,
+    "grass_density": 10.0,
     "wheat_density": 140,
     "grass_floor": 0.012,
     "wheat_floor": 1.0,
@@ -97,6 +121,94 @@
     ],
     "attached": false
   },
+  "roads": [
+    {
+      "name": "ring_road",
+      "type": "auto",
+      "width": 7.0,
+      "shoulder": 1.8,
+      "points": [
+        [
+          724.0,
+          386.5
+        ],
+        [
+          1276.0,
+          386.5
+        ],
+        [
+          1276.0,
+          738.5
+        ],
+        [
+          724.0,
+          738.5
+        ],
+        [
+          724.0,
+          386.5
+        ]
+      ]
+    },
+    {
+      "name": "field_spur",
+      "type": "dirt",
+      "width": 4.0,
+      "points": [
+        [
+          1000.0,
+          386.5
+        ],
+        [
+          1000.0,
+          406.5
+        ]
+      ]
+    },
+    {
+      "name": "west_trail",
+      "type": "path",
+      "width": 1.3,
+      "points": [
+        [
+          724.0,
+          562.5
+        ],
+        [
+          684.0,
+          632.5
+        ],
+        [
+          634.0,
+          692.5
+        ]
+      ]
+    }
+  ],
+  "paints": [
+    {
+      "material": "sand",
+      "shape": "circle",
+      "pos": [
+        850.0,
+        60.0
+      ],
+      "radius": 236.0,
+      "edge": 22.0,
+      "strength": 1.0
+    },
+    {
+      "material": "dirt",
+      "shape": "circle",
+      "pos": [
+        1000.0,
+        402.5
+      ],
+      "radius": 12.0,
+      "edge": 5.0,
+      "strength": 0.85
+    }
+  ],
   "lights": [
     {
       "type": "directional",

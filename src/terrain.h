@@ -13,6 +13,7 @@
 #ifndef TERRAIN_H
 #define TERRAIN_H
 #include "gl_loader.h"
+#include "mapdata.h"     // SPLAT_LAYERS
 #include "render_ctx.h"
 #include "scene.h"
 #include "world.h"
@@ -37,6 +38,9 @@ typedef struct TerrainParams {
     GLint u_heightmin, u_heightmax, u_texscale;
     GLint u_statictex, u_static_on, u_worldsize;   // статические тени
     GLint u_wetness_mask;           // маска мокрости (unit 8)
+    // Поверхности (splat): маска материалов + 4 слоя текстур
+    GLuint tex_splat_layer[SPLAT_LAYERS];   // грунт/песок/щебень/асфальт
+    GLint u_splat, u_splat_on, u_layer[SPLAT_LAYERS], u_layer_scale;
     TerrainTile *tiles;             // массив тайлов (tiles_n штук)
     int tiles_n;
     int vert_count;                // индексов в геометрии (все тайлы и LOD)

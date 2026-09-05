@@ -25,6 +25,11 @@ uniform vec3 uFogColor;       // цвет горизонта (туман рел�
 uniform vec3 uSunDir;         // направление на солнце (узел Sun)
 uniform vec3 uSunColor;       // цвет солнца
 uniform float uSunGlow;       // видимость солнечного диска 0..1 (гаснет в дождь)
+// Процедурные облака: 2 октавы шума на плоскости 500 м над камерой
+uniform sampler2D uNoise;     // img/noise.png (unit 1)
+uniform vec2 uCamXZ;          // позиция камеры XZ (облака в мире, не на камере)
+uniform float uTime;          // дрейф облаков
+uniform float uClouds;        // покрытие 0..1 (cvar r_clouds)
 
 out vec4 FragColor;
 
@@ -49,6 +54,27 @@ void main() {
     float s = dot(rd, normalize(uSunDir));
     col += uSunColor * uSunGlow * (pow(max(s, 0.0), 600.0) * 4.0
                                  + pow(max(s, 0.0), 10.0) * 0.35);
+    // --- Процедурные облака ------------------------------------------------
+    // Плоскость 3000 м над камерой: параллакс медленный, у горизонта облака
+    // НЕ разгоняются в «спидометр» и не заворачивают вниз (раньше слой был
+    // на 500 м — проекция rd.xz/rd.y у горизонта улетала и рвал картинку).
+    // Затухание широкое и раннее: ниже ~25° над горизонтом облаков нет.
+    if (uClouds > 0.001 && rd.y > 0.05) {
+        vec2 cuv = (uCamXZ + rd.xz / max(rd.y, 0.25) * 3000.0) / 2600.0;
+        float n = texture(uNoise, cuv + vec2(uTime * 0.0011, uTime * 0.0007)).r * 0.65
+                + texture(uNoise, cuv * 2.6 - vec2(uTime * 0.0018, 0.0)).r * 0.35;
+        // Порог по покрытию: uClouds 0..1 -> чем больше, тем ниже порог
+        float cov = smoothstep(0.78 - uClouds * 0.55, 0.95 - uClouds * 0.45, n);
+        cov *= smoothstep(0.10, 0.40, rd.y);          // у горизонта тонут
+        if (cov > 0.003) {
+            float warm = pow(max(s, 0.0), 3.0);        // сторона солнца
+            vec3 cc = mix(vec3(0.82, 0.84, 0.88),          // пасмурная сторона
+                          vec3(1.05, 0.98, 0.9),           // к солнцу теплее
+                          0.25 + 0.6 * warm);
+            cc *= 0.75 + 0.25 * uSunGlow;              // в дождь — темнее
+            col = mix(col, cc, cov * 0.5);             // деликатно, не в лоб
+        }
+    }
     // под горизонтом панорама — это земля, но у нас настоящий рельеф: глушим
     col = mix(col, uFogColor, smoothstep(0.46, 0.50, v));
     FragColor = vec4(col, 1.0);

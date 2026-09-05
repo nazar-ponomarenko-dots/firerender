@@ -23,6 +23,7 @@ typedef enum {
     PROF_FOG,          // объёмный туман
     PROF_BLOOM,        // bloom
     PROF_SSR,          // отражения экранного пространства
+    PROF_GI,           // глобальное освещение (непрямой свет + AO)
     PROF_N
 } ProfSlot;
 

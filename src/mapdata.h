@@ -142,6 +142,72 @@ typedef struct {
     float fog_start, fog_end;       // дистанция тумана (множители мира)
 } MapTerrain;
 
+// --- Поверхности рельефа: surfaces = { ... } ----------------------------------
+//  Слои splat-карты (см. src/splat.h). Базовый слой — трава/земля из
+//  terrain.ground_tex; поверх него по маске смешиваются 4 материала.
+//  Индексы фиксированы: 0 dirt (грунт), 1 sand (песок), 2 gravel (щебень/
+//  тропинка), 3 asphalt (асфальт). tex — текстура, scale — метров на тайл.
+#define SPLAT_LAYERS 4
+enum { SPLAT_DIRT = 0, SPLAT_SAND, SPLAT_GRAVEL, SPLAT_ASPHALT };
+
+typedef struct {
+    char tex[SPLAT_LAYERS][256];   // текстуры слоёв
+    float scale[SPLAT_LAYERS];     // метров на тайл текстуры
+    float grass[SPLAT_LAYERS];     // множитель плотности травы на слое (0 = нет)
+    float resolution;              // метров на тексель splat-карты
+    float slope_rock;              // с какого уклона (град) проступает щебень
+    int set;                       // блок surfaces был в JSON
+} MapSurfaces;
+
+// --- Покраска поверхности: paints[] -------------------------------------------
+//  Пятна материала: круг (pos + radius), прямоугольник (pos + size) или
+//  полоса по осевой линии (points + width). edge — мягкость края, м.
+typedef enum { PAINT_CIRCLE = 0, PAINT_RECT, PAINT_PATH } MapPaintShape;
+
+#define MAP_MAX_PAINTS       64
+#define MAP_PAINT_MAX_POINTS 64
+
+typedef struct {
+    int material;        // SPLAT_DIRT..SPLAT_ASPHALT
+    int shape;           // MapPaintShape
+    float pos[2];        // центр (circle/rect)
+    float radius;        // радиус (circle)
+    float size[2];       // [w, d] (rect)
+    float width;         // ширина полосы (path)
+    float points[MAP_PAINT_MAX_POINTS][2];
+    int point_n;
+    float edge;          // мягкость края, м
+    float strength;      // сила слоя 0..1
+} MapPaint;
+
+// --- Дороги: roads[] ----------------------------------------------------------
+//  Дорога — осевая линия points[] + ширина. type задаёт пресет:
+//    "auto"   асфальтовая автодорога (обочина щебнем, сильное выравнивание)
+//    "dirt"   грунтовка (бурая земля, лёгкое выравнивание, колеи)
+//    "gravel" щебёночная дорога
+//    "path"   тропинка (узкая, вытоптанная земля, почти без выравнивания)
+//  Любое поле пресета можно переопределить в JSON.
+typedef enum { ROAD_AUTO = 0, ROAD_DIRT, ROAD_GRAVEL, ROAD_PATH } MapRoadType;
+
+#define MAP_MAX_ROADS       32
+#define MAP_ROAD_MAX_POINTS 64
+
+typedef struct {
+    char name[64];
+    int type;                 // MapRoadType (пресет)
+    int material;             // SPLAT_* — покрытие полотна
+    int shoulder_material;    // SPLAT_* — покрытие обочины
+    float width;              // ширина полотна, м
+    float shoulder;           // ширина обочины с каждой стороны, м (0 = нет)
+    float edge;               // мягкость кромки полотна, м
+    float flatten;            // 0..1 — насколько полотно выравнивает рельеф
+    float flatten_extra;      // за пределы полотна выравнивание сходит, м
+    float ruts;               // колеи 0..1 (грунтовка): продавленность
+    int veg_clear;            // 1 — растительность на полотне не растёт
+    float points[MAP_ROAD_MAX_POINTS][2];
+    int point_n;
+} MapRoad;
+
 // --- Растительность: veg = { ... } -------------------------------------------
 typedef struct {
     float grass_density, wheat_density;  // шт/м2 вплотную к камере
@@ -217,6 +283,13 @@ void mapdata_veg(MapVeg *v);
 void mapdata_sky(MapSky *s);
 void mapdata_bloom(MapBloom *b);
 void mapdata_shadows(MapShadows *s);
+
+// --- Поверхности рельефа (splat) / покраска / дороги --------------------------
+void mapdata_surfaces(MapSurfaces *s);
+int mapdata_paint_count(void);
+const MapPaint *mapdata_paint(int i);
+int mapdata_road_count(void);
+const MapRoad *mapdata_road(int i);
 
 // --- Объекты (модели) ---------------------------------------------------------
 int mapdata_object_count(void);

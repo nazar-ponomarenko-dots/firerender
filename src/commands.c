@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "app.h"
+#include "attach.h"
 #include "audio.h"
 #include "camera.h"
 #include "console.h"
@@ -28,6 +29,7 @@
 #include "renderer.h"
 #include "selection.h"
 #include "shader.h"
+#include "splat.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
@@ -521,6 +523,8 @@ void cmd_mesh(const char *args)
                                    renderer_context());
     if (!nd) { console_print("mesh: не удалось загрузить %s", path); return; }
     node_add(g->root, nd);
+    // Занятость: трава не растёт внутри поставленного меша (splat.c)
+    splat_occupy_circle(x, z, 1.0f * (scale > 0.01f ? scale : 1.0f), 1.0f);
     console_print("mesh: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
 }
 
@@ -560,17 +564,38 @@ void cmd_glb(const char *args)
     float x = 0, y = 0, z = 0, scale = 1.0f;
     int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
     if (n < 1) { console_print("usage: glb <glb> [x y z] [scale]"); return; }
+    // Автопостановка НА ЗЕМЛЮ: без координат — в 6 м впереди игрока по
+    // взгляду («glb model 12» — в 12 м), при y <= 0 — в точку XZ с высотой
+    // рельефа. Спавн машин/пропсов без ручного подбора высоты.
+    if (n < 4 && g->cam) {
+        const float *cp = g->cam->cam.pos;
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        float d = (n >= 2) ? x : 6.0f;         // «glb model 12» — в 12 м
+        x = cp[0] + fwd[0] * d;
+        z = cp[2] + fwd[2] * d;
+        y = sample_height(&g->world, x, z) + 0.3f;
+    } else if (y <= 0.0f) {
+        y = sample_height(&g->world, x, z) + 0.3f;
+    }
     float pos[3] = { x, y, z };
     SceneNode *nd = NULL;
     // авто-выбор: есть скин+анимация -> скелетный путь (skinning)
-    if (glb_anim_has_anim(path))
+    int is_anim = glb_anim_has_anim(path);
+    if (is_anim)
         nd = glb_anim_make_node(path, pos, scale, renderer_context());
     else
         nd = glb_make_node(path, pos, scale, renderer_context());
     if (!nd) { console_print("glb: не удалось загрузить %s", path); return; }
     anim_last_hook();
     node_add(g->root, nd);
-    if (glb_anim_clip_count(nd) > 0) s_last_anim = nd;
+    // Занятость: трава не растёт внутри поставленной модели (splat.c).
+    // Радиус берём от масштаба — точную сферу считать не нужно, важно, чтобы
+    // травинки не торчали сквозь кузов/корпус.
+    splat_occupy_circle(x, z, 1.2f * (scale > 0.01f ? scale : 1.0f), 1.0f);
+    // glb_anim_clip_count/… работают ТОЛЬКО с AnimInstance3D (AnimParams).
+    // Для статичного GlbInstance у него нет поля data — читать нельзя (SEGV).
+    if (is_anim && glb_anim_clip_count(nd) > 0) s_last_anim = nd;
     console_print("glb: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
 }
 
@@ -588,6 +613,7 @@ void cmd_glbanim(const char *args)
     if (!nd) { console_print("glbanim: не удалось загрузить %s", path); return; }
     anim_last_hook();
     node_add(g->root, nd);
+    splat_occupy_circle(x, z, 1.0f * (scale > 0.01f ? scale : 1.0f), 1.0f);
     s_last_anim = nd;
     console_print("glbanim: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
     if (glb_anim_clip_count(nd) > 0) {
@@ -669,6 +695,283 @@ void cmd_glbanim_loop(const char *args)
     if (!nd) { console_print("glbanim_loop: нет анимик-узла"); return; }
     glb_anim_set_loop(nd, v);
     console_print("glbanim_loop: %s = %d", nd->name ? nd->name : "?", v?1:0);
+}
+// Поставить время клипа в секундах: glbanim_seek <сек> [имя-узла]
+void cmd_glbanim_seek(const char *args)
+{
+    float t = 0; char name[128] = "";
+    if (sscanf(args, "%f %127s", &t, name) < 1) { console_print("usage: glbanim_seek <сек> [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_seek: нет анимик-узла"); return; }
+    glb_anim_set_time(nd, t);
+    console_print("glbanim_seek: %s = %.3f с", nd->name ? nd->name : "?", t);
+}
+// Поставить кадр: glbanim_frame <кадр> [fps] [имя-узла] (fps по умолч. 24)
+void cmd_glbanim_frame(const char *args)
+{
+    int frame = 0; float fps = 24.0f; char name[128] = "";
+    int n = sscanf(args, "%d %f %127s", &frame, &fps, name);
+    if (n < 1) { console_print("usage: glbanim_frame <кадр> [fps] [имя-узла]"); return; }
+    SceneNode *nd = anim_find(name);
+    if (!nd) { console_print("glbanim_frame: нет анимик-узла"); return; }
+    glb_anim_set_time(nd, frame / (fps > 0 ? fps : 24.0f));
+    console_print("glbanim_frame: %s = кадр %d @%.0f fps (%.3f с)",
+                  nd->name ? nd->name : "?", frame, fps, glb_anim_time(nd));
+}
+
+// ---- Инструмент anim: реестр всех анимик-моделей, обращение по индексу ---------
+//   anim                    — список всех загруженных моделей
+//   anim <N>                — инфо о модели с индексом N
+//   anim <N> pos x y z      — телепорт
+//   anim <N> move x y z [spd] — плавное движение к точке (spd=ед/с, по умолч. 5)
+//   anim <N> stop           — остановить плавное движение
+//   anim <N> clip <имя|№>   — переключить анимацию
+//   anim <N> play | pause   — играть / пауза
+//   anim <N> loop <0|1>     — зациклить / отключить цикл
+//   anim <N> speed <x>      — скорость воспроизведения
+//   anim <N> seek <сек>     — поставить время клипа
+//   anim <N> frame <n> [fps]— поставить кадр
+//   anim <N> on | off       — показать / скрыть (заморозить)
+//   anim <N> scale <s>      — масштаб модели
+//   anim <N> clips          — список клипов модели
+//   anim <N> remove         — выгрузить модель
+static void anim_show_state(SceneNode *nd)
+{
+    console_print("  pos(%.2f,%.2f,%.2f) scale=%.2g enabled=%d paused=%d loop=%d speed=%.2g time=%.3f клип=%s",
+                  nd->pos[0], nd->pos[1], nd->pos[2],
+                  glb_anim_scale_get(nd), glb_anim_enabled(nd),
+                  glb_anim_paused_get(nd), glb_anim_loop_get(nd),
+                  glb_anim_speed_get(nd), glb_anim_time(nd),
+                  glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+}
+void cmd_anim(const char *args)
+{
+    char a0[64] = "";
+    if (!args) args = "";
+    sscanf(args, "%63s", a0);
+    if (a0[0] == 0 || strcmp(a0, "list") == 0 || strcmp(a0, "help") == 0 || strcmp(a0, "?") == 0 ||
+        !(a0[0] >= '0' && a0[0] <= '9')) {
+        int n = glb_anim_count();
+        console_print("anim: моделей %d (спавн: glb/glbanim <файл> …); usage подсказка: anim help", n);
+        for (int i = 0; i < n; i++) {
+            SceneNode *nd = glb_anim_by_index(i);
+            if (!nd) continue;
+            console_print(" [%d] %s  pos(%.2f,%.2f,%.2f) %s%s клип=%s",
+                          i, glb_anim_path(nd) ? glb_anim_path(nd) : "?",
+                          nd->pos[0], nd->pos[1], nd->pos[2],
+                          glb_anim_enabled(nd) ? "" : " [off] ",
+                          glb_anim_loop_get(nd) ? "loop" : "",
+                          glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+        }
+        console_print("anim: usage: anim | anim <N> | anim <N> pos|move x y z [spd] | clip <имя|№> | play|pause | loop <0|1> | speed <x> | seek <сек> | frame <n> [fps] | on|off | scale <s> | clips | stop | remove");
+        return;
+    }
+    int idx = atoi(a0);
+    SceneNode *nd = glb_anim_by_index(idx);
+    if (!nd) { console_print("anim: нет модели с индексом %d (см. anim)", idx); return; }
+    char sub[24];
+    int n = sscanf(args, "%*s %23s", sub);
+    if (n < 1 || sub[0] == 0) { anim_show_state(nd); return; }
+
+    float p[3], spd;
+    if (strcmp(sub, "pos") == 0) {
+        if (sscanf(args, "%*s %*s %f %f %f", &p[0], &p[1], &p[2]) == 3) {
+            glb_anim_set_pos(nd, p);
+            console_print("anim %d: позиция (%.2f,%.2f,%.2f)", idx, p[0], p[1], p[2]);
+        } else console_print("usage: anim %d pos x y z", idx);
+        return;
+    }
+    if (strcmp(sub, "move") == 0) {
+        float tail[5]; int nr = sscanf(args, "%*s %*s %f %f %f %f", &p[0], &p[1], &p[2], &spd);
+        if (nr < 3) { console_print("usage: anim %d move x y z [spd] (spd = ед/с)", idx); return; }
+        if (nr < 4) spd = 5.0f;
+        glb_anim_move_to(nd, p, spd);
+        console_print("anim %d: движение к (%.2f,%.2f,%.2f) со скоростью %.1f", idx, p[0], p[1], p[2], spd);
+        (void)tail;
+        return;
+    }
+    if (strcmp(sub, "stop") == 0) { glb_anim_stop_move(nd); console_print("anim %d: движение остановлено", idx); return; }
+    if (strcmp(sub, "clip") == 0) {
+        char sel[64]; sscanf(args, "%*s %*s %63s", sel);
+        int cidx = atoi(sel);
+        if (!(sel[0] >= '0' && sel[0] <= '9')) cidx = glb_anim_clip_find(nd, sel);
+        if (cidx < 0) { console_print("anim %d: клип '%s' не найден", idx, sel); return; }
+        glb_anim_set_clip(nd, cidx);
+        console_print("anim %d: клип -> %s", idx, glb_anim_clip_name(nd, cidx) ? glb_anim_clip_name(nd, cidx) : "?");
+        return;
+    }
+    if (strcmp(sub, "play") == 0) { glb_anim_set_paused(nd, 0); console_print("anim %d: играет", idx); return; }
+    if (strcmp(sub, "pause") == 0) { glb_anim_set_paused(nd, 1); console_print("anim %d: пауза", idx); return; }
+    if (strcmp(sub, "loop") == 0) {
+        int v; if (sscanf(args, "%*s %*s %d", &v) != 1) { console_print("usage: anim %d loop <0|1>", idx); return; }
+        glb_anim_set_loop(nd, v); console_print("anim %d: loop=%d", idx, v ? 1 : 0); return;
+    }
+    if (strcmp(sub, "speed") == 0) {
+        float v; if (sscanf(args, "%*s %*s %f", &v) != 1) { console_print("usage: anim %d speed <x>", idx); return; }
+        glb_anim_set_speed(nd, v); console_print("anim %d: speed=%.2g", idx, v); return;
+    }
+    if (strcmp(sub, "seek") == 0) {
+        float v; if (sscanf(args, "%*s %*s %f", &v) != 1) { console_print("usage: anim %d seek <сек>", idx); return; }
+        glb_anim_set_time(nd, v); console_print("anim %d: время %.3f с", idx, v); return;
+    }
+    if (strcmp(sub, "frame") == 0) {
+        int fr; float fps = 24; sscanf(args, "%*s %*s %d %f", &fr, &fps);
+        glb_anim_set_time(nd, fr / (fps > 0 ? fps : 24.0f));
+        console_print("anim %d: кадр %d @%.0f fps (%.3f с)", idx, fr, fps, glb_anim_time(nd)); return;
+    }
+    if (strcmp(sub, "on") == 0 || strcmp(sub, "off") == 0) {
+        int on = sub[0] == 'o' && sub[1] == 'n';
+        glb_anim_set_enabled(nd, on);
+        console_print("anim %d: %s", idx, on ? "включён" : "выключен"); return;
+    }
+    if (strcmp(sub, "scale") == 0) {
+        float v; if (sscanf(args, "%*s %*s %f", &v) != 1) { console_print("usage: anim %d scale <s>", idx); return; }
+        glb_anim_set_scale(nd, v); console_print("anim %d: scale=%.2g", idx, v); return;
+    }
+    if (strcmp(sub, "clips") == 0) {
+        int nc = glb_anim_clip_count(nd);
+        console_print("anim %d: клипов %d, активный: %s", idx, nc,
+                      glb_anim_current_clip(nd) ? glb_anim_current_clip(nd) : "?");
+        for (int i = 0; i < nc; i++)
+            console_print("  [%d] %s", i, glb_anim_clip_name(nd, i) ? glb_anim_clip_name(nd, i) : "?");
+        return;
+    }
+    if (strcmp(sub, "remove") == 0) {
+        console_print("anim %d: выгружаю %s", idx, glb_anim_path(nd) ? glb_anim_path(nd) : "?");
+        glb_anim_remove_node(nd);
+        return;
+    }
+    if (strcmp(sub, "rot") == 0) {
+        // Поворот в ГРАДУСАХ (yaw pitch roll) — узел хранит радианы.
+        if (sscanf(args, "%*s %*s %f %f %f", &p[0], &p[1], &p[2]) >= 1) {
+            nd->rot[1] = p[0] * 0.0174532925f;
+            nd->rot[0] = p[1] * 0.0174532925f;
+            nd->rot[2] = p[2] * 0.0174532925f;
+            console_print("anim %d: поворот yaw=%.1f pitch=%.1f roll=%.1f",
+                          idx, p[0], p[1], p[2]);
+        } else console_print("usage: anim %d rot <yaw> [pitch] [roll] (градусы)", idx);
+        return;
+    }
+    if (strcmp(sub, "bones") == 0) {
+        int bn = glb_anim_bone_count(nd);
+        console_print("anim %d: узлов/костей %d (attach <имя> — прицепить)", idx, bn);
+        for (int i = 0; i < bn; i++) {
+            const char *bname = glb_anim_bone_name(nd, i);
+            if (bname && bname[0]) console_print("  [%d] %s", i, bname);
+        }
+        return;
+    }
+    console_print("anim %d: неизвестная команда '%s' (см. anim help)", idx, sub);
+}
+
+// ---- attach: прицепить узел к модели/кости ------------------------------------
+//   attach sprite <N> <кость> <png> [w h] [up]  — спрайт на кость модели N
+//   attach glb    <N> <кость> <файл.glb> [scale] — модель на кость модели N
+//   attach mesh   <N> <кость> <файл.obj> [scale] [tex]
+//   attach list   <N>                            — что прицеплено
+//   attach bones  <N>                            — список костей
+void cmd_attach(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->root) { console_print("attach: мир не загружен"); return; }
+    char what[24] = "", bone[64] = "", file[256] = "";
+    int idx = -1;
+    if (!args) args = "";
+    if (sscanf(args, "%23s", what) != 1 || !what[0]) {
+        console_print("usage: attach sprite|glb|mesh <N> <кость> <файл> [...]");
+        console_print("       attach list <N> | attach bones <N>");
+        console_print("  <N> — индекс модели из `anim`, <кость> — имя (или - для origin)");
+        return;
+    }
+    if (sscanf(args, "%*s %d", &idx) != 1) {
+        console_print("attach: укажи индекс модели (см. anim)");
+        return;
+    }
+    SceneNode *parent = glb_anim_by_index(idx);
+    if (!parent) { console_print("attach: нет модели с индексом %d", idx); return; }
+
+    if (strcmp(what, "bones") == 0) {
+        int bn = glb_anim_bone_count(parent);
+        console_print("attach: у модели %d узлов/костей %d", idx, bn);
+        for (int i = 0; i < bn; i++) {
+            const char *bname = glb_anim_bone_name(parent, i);
+            if (bname && bname[0]) console_print("  %s", bname);
+        }
+        return;
+    }
+    if (strcmp(what, "list") == 0) {
+        int n = 0;
+        for (SceneNode *c = parent->first_child; c; c = c->next, n++) {
+            const char *bname = c->attach_slot >= 0
+                              ? glb_anim_bone_name(parent, c->attach_slot) : NULL;
+            console_print("  [%d] %s (%s) -> %s  off(%.2f,%.2f,%.2f)", n,
+                          c->name ? c->name : "?", c->type ? c->type : "?",
+                          bname ? bname : "origin",
+                          c->pos[0], c->pos[1], c->pos[2]);
+        }
+        if (!n) console_print("attach: у модели %d ничего не прицеплено", idx);
+        return;
+    }
+
+    if (sscanf(args, "%*s %*d %63s %255s", bone, file) != 2) {
+        console_print("usage: attach %s <N> <кость|-> <файл> [...]", what);
+        return;
+    }
+    const char *bone_arg = (bone[0] == '-' && bone[1] == 0) ? NULL : bone;
+
+    SceneNode *child = NULL;
+    int upright = 0;
+    if (strcmp(what, "sprite") == 0) {
+        float w = 0.5f, h = 0.5f;
+        int up = 0;
+        sscanf(args, "%*s %*d %*s %*s %f %f %d", &w, &h, &up);
+        upright = up;
+        child = sprite_make_node(file, w, h, 1, renderer_context());
+        if (child) child->name = "Attached Sprite";
+    } else if (strcmp(what, "glb") == 0) {
+        float scale = 1.0f;
+        sscanf(args, "%*s %*d %*s %*s %f", &scale);
+        child = glb_anim_has_anim(file)
+              ? glb_anim_make_node(file, NULL, scale, renderer_context())
+              : glb_make_node(file, NULL, scale, renderer_context());
+    } else if (strcmp(what, "mesh") == 0) {
+        float scale = 1.0f;
+        char tex[256] = "";
+        int nn = sscanf(args, "%*s %*d %*s %*s %f %255s", &scale, tex);
+        child = mesh_make_node(file, NULL, scale, nn >= 2 && tex[0] ? tex : NULL,
+                               renderer_context());
+    } else {
+        console_print("attach: неизвестный тип '%s' (sprite|glb|mesh)", what);
+        return;
+    }
+    if (!child) { console_print("attach: не удалось создать %s из %s", what, file); return; }
+    int rc = attach_node(parent, child, bone_arg, NULL, upright);
+    console_print("attach: %s '%s' -> модель %d, кость %s%s", what, file, idx,
+                  bone_arg ? bone_arg : "origin",
+                  rc == 0 ? "" : " (кость не найдена, прицеплено к origin)");
+}
+
+// ---- sprite: поставить свободный спрайт в мир ---------------------------------
+//   sprite <png> [x y z] [w h] [flat]
+void cmd_sprite(const char *args)
+{
+    Game *g = game_instance();
+    if (!g || !g->root) { console_print("sprite: мир не загружен"); return; }
+    char path[256] = "";
+    float x = 0, y = 0, z = 0, w = 1.0f, h = 1.0f;
+    char flag[16] = "";
+    int n = sscanf(args, "%255s %f %f %f %f %f %15s", path, &x, &y, &z, &w, &h, flag);
+    if (n < 1) {
+        console_print("usage: sprite <png> [x y z] [w h] [flat]");
+        return;
+    }
+    int billboard = strcmp(flag, "flat") != 0;
+    SceneNode *nd = sprite_make_node(path, w, h, billboard, renderer_context());
+    if (!nd) { console_print("sprite: не удалось загрузить %s", path); return; }
+    nd->pos[0] = x; nd->pos[1] = y; nd->pos[2] = z;
+    node_add(g->root, nd);
+    console_print("sprite: %s в (%.1f,%.1f,%.1f) %.2fx%.2f м%s", path, x, y, z,
+                  w, h, billboard ? " (биллборд)" : " (плоский)");
 }
 
 // cubemap_capture [x y z] [size] — захватить кубомап отражений в позиции

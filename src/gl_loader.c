@@ -10,6 +10,13 @@
 GL_FUNCS(F)
 #undef F
 
+// OPTIONAL GPU-driven указатели (могут остаться NULL на старых контекстах).
+#define F(ret, name, args) ret (APIENTRY *p_##name) args;
+GL_FUNCS_OPT(F)
+#undef F
+
+int g_gl_gpu_driven = 0;
+
 int load_gl_funcs(void)
 {
 #define F(ret, name, args)                                                    \
@@ -20,6 +27,19 @@ int load_gl_funcs(void)
     }
     GL_FUNCS(F)
 #undef F
+
+    // OPTIONAL GPU-driven функции: загружаем без фатальности. Если любая из
+    // них отсутствует (контекст < GL 4.3) — оставляем NULL и выключаем
+    // gpu-driven путь (фолбэк на инстансный рендер в vegetation.c).
+#define F(ret, name, args)                                                    \
+    p_##name = (ret (APIENTRY *) args)SDL_GL_GetProcAddress(#name);
+    GL_FUNCS_OPT(F)
+#undef F
+    g_gl_gpu_driven = (p_glDispatchCompute && p_glMemoryBarrier &&
+                       p_glBindBufferBase && p_glBindBufferRange &&
+                       p_glShaderStorageBlockBinding &&
+                       p_glDrawElementsIndirect && p_glMultiDrawElementsIndirect)
+                      ? 1 : 0;
     return 0;
 }
 

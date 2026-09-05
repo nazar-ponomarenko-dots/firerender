@@ -12,6 +12,7 @@
 #include "resources.h"
 #include "shader.h"
 #include "sky.h"
+#include "splat.h"
 
 #include "stb_image.h"
 #include <math.h>
@@ -49,17 +50,18 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
     p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
     p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
-
-    scene_uniforms_init(&p->su, prog);    // общий набор сцены
-    p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
-    p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
-    p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
-    p->u_heightmax = glGetUniformLocation(prog, "uHeightMax");
-    p->u_texscale  = glGetUniformLocation(prog, "uTexScale");
-    p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
-    p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
-    p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
     p->u_wetness_mask = glGetUniformLocation(prog, "uWetnessMask");
+    // Поверхности (splat): маска + 4 слоя. Юниты: 10 — маска, 12..15 — слои
+    // (0..9 и 11 заняты базой/нормалями/высотами/каскадами/статикой/
+    // мокростью/кубомапом/шумом — см. ниже).
+    p->u_splat = glGetUniformLocation(prog, "uSplat");
+    p->u_splat_on = glGetUniformLocation(prog, "uSplatOn");
+    p->u_layer_scale = glGetUniformLocation(prog, "uLayerScale");
+    for (int i = 0; i < SPLAT_LAYERS; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "uLayer%d", i);
+        p->u_layer[i] = glGetUniformLocation(prog, name);
+    }
 
     // Материал рельефа: статичные параметры шейдера
     MapTerrain tc;
@@ -81,6 +83,18 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
     glUniform1i(p->u_static_on, 0);
     glUniform2f(p->u_worldsize, w->world_w, w->world_d);
+    // Слои поверхностей: сэмплеры и масштабы тайлов (метров на тайл).
+    if (p->u_splat >= 0) glUniform1i(p->u_splat, 10);
+    for (int i = 0; i < SPLAT_LAYERS; i++)
+        if (p->u_layer[i] >= 0) glUniform1i(p->u_layer[i], 12 + i);
+    {
+        const MapSurfaces *sf = splat_surfaces();
+        if (p->u_layer_scale >= 0)
+            glUniform4f(p->u_layer_scale, sf->scale[0], sf->scale[1],
+                        sf->scale[2], sf->scale[3]);
+        if (p->u_splat_on >= 0)
+            glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
+    }
     // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
     glUniform1f(p->u_specpow, 40.0f);
     glUniform1f(p->u_specint, 0.0f);   // земля матовая — без отражения солнца
@@ -214,10 +228,12 @@ static int s_static_baked = 0;
 // кромки юбки drop = TERRAIN_SKIRT_DEPTH (шейдер: y = h - drop).
 
 #define TERRAIN_SKIRT_DEPTH 4.0f    // глубина юбки, м (скрывает стыки LOD)
-// Дистанции переключения LOD (до ближайшей точки тайла), м
-#define TERRAIN_LOD1_DIST 200.0f
-#define TERRAIN_LOD2_DIST 500.0f
-#define TERRAIN_LOD3_DIST 1200.0f
+// Дистанции переключения LOD (до ближайшей точки тайла), м.
+// Реализованы как cvar'ы r_terrain_lod1..3: можно тюнить дальность отрисовки
+// без пересборки (например, на слабых машинах уменьшить LOD3 = грубее дальний план).
+static float s_lod1 = 200.0f;
+static float s_lod2 = 500.0f;
+static float s_lod3 = 1200.0f;
 static const float s_lod_step[TERRAIN_LODS] = { 2.0f, 8.0f, 32.0f, 128.0f };
 
 // Растущие буферы вершин/индексов (один VBO+IBO на весь рельеф)
@@ -432,26 +448,33 @@ static float terrain_tile_dist2(const TerrainTile *t, const float *p)
     return dx * dx + dy * dy + dz * dz;
 }
 
-// Рисует тайлы. Цветной проход: рисуем ВСЕ тайлы (без отсечения фрустумом),
-// LOD выбирается по дистанции до игрока — так нет «подгрузок» тайлов при
-// повороте камеры, а дальние LOD держат число полигонов малым. Теневой
-// проход: отсечение по орто-боксу каскада (rc->shadow_vp), т.к. в каскад
-// нужны только тайлы в объёме света.
+// Рисует тайлы. Цветной проход: отсечение фрустумом + LOD по дистанции.
+// Теневой проход: отсечение по орто-боксу каскада (rc->shadow_vp).
 static void terrain_draw_tiles(const TerrainParams *p,
                                const RendererContext *rc)
 {
     if (!p->tiles) return;               // OOM при построении — нечего рисовать
     int shadow = (rc->pass == RP_SHADOW);
+    // LOD-дистанции из cvar'ов (r_terrain_lod1..3) — применяются сразу
+    float lod1 = cvar_get("r_terrain_lod1");
+    float lod2 = cvar_get("r_terrain_lod2");
+    float lod3 = cvar_get("r_terrain_lod3");
+    s_lod1 = lod1; s_lod2 = lod2; s_lod3 = lod3;
     Frustum lf;                              // фрустум света (для тени)
     if (shadow) frustum_build(&lf, rc->shadow_vp);
-    int dbg_t = 0, dbg_n = 0, dbg_lod[4] = {0};
     glBindVertexArray(p->vao);
     for (int i = 0; i < p->tiles_n; i++) {
         const TerrainTile *t = &p->tiles[i];
         float mn[3] = { t->xmin, t->ymin, t->zmin };
         float mx[3] = { t->xmax, t->ymax, t->zmax };
-        if (shadow && !frustum_test_aabb(&lf, mn, mx))
-            continue;
+        // Фрустум-куллинг: цветной проход использует камеру, теневой — свет
+        if (shadow) {
+            if (!frustum_test_aabb(&lf, mn, mx))
+                continue;
+        } else {
+            if (!frustum_test_aabb(&rc->frustum, mn, mx))
+                continue;
+        }
         float d2 = terrain_tile_dist2(t, rc->cam_pos);
         int lod;
         if (shadow) {
@@ -460,24 +483,15 @@ static void terrain_draw_tiles(const TerrainParams *p,
                 : box <= 96.0f ? (d2 < 96.0f * 96.0f ? 1 : 2)
                 :                (d2 < 256.0f * 256.0f ? 2 : 3);
         } else {
-            lod = d2 < TERRAIN_LOD1_DIST * TERRAIN_LOD1_DIST ? 0
-                : d2 < TERRAIN_LOD2_DIST * TERRAIN_LOD2_DIST ? 1
-                : d2 < TERRAIN_LOD3_DIST * TERRAIN_LOD3_DIST ? 2 : 3;
+            lod = d2 < s_lod1 * s_lod1 ? 0
+                : d2 < s_lod2 * s_lod2 ? 1
+                : d2 < s_lod3 * s_lod3 ? 2 : 3;
         }
+        // Убрано: доклад в консоль "Terrain/frame: ..." каждые 240 кадров (шум).
         if (!t->count[lod]) continue;
-        dbg_t += t->count[lod] / 3; dbg_n++; dbg_lod[lod]++;
         glDrawElements(GL_TRIANGLES, t->count[lod], GL_UNSIGNED_INT,
                        (const void *)(uintptr_t)((size_t)t->first[lod] *
                                                  sizeof(GLuint)));
-    }
-    static int s_frames = 0; static long s_color = 0, s_sh = 0;
-    if (shadow) { s_sh += dbg_t; return; }
-    s_color += dbg_t;
-    if (++s_frames >= 240) {
-        SDL_Log("Terrain/frame: color %d tris (%d tiles) [lod %d/%d/%d/%d] | shadow avg %d tris",
-                dbg_t, dbg_n, dbg_lod[0], dbg_lod[1], dbg_lod[2], dbg_lod[3],
-                (int)(s_sh / 240));
-        s_frames = 0; s_sh = 0; (void)s_color;
     }
 }
 
@@ -565,6 +579,15 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     p->tiles = tiles;
     p->tiles_n = tiles_n;
     p->vert_count = vert_count;
+    // Слои поверхностей (splat): текстуры тайлятся (REPEAT) с мип-фильтром —
+    // асфальт/песок на дистанции не рябят. Пути и масштабы — из map.json
+    // (surfaces = { ... }), дефолты — img/dirt|sand|gravel|asphalt.png.
+    {
+        const MapSurfaces *sf = splat_surfaces();
+        for (int i = 0; i < SPLAT_LAYERS; i++)
+            p->tex_splat_layer[i] = resources_texture(sf->tex[i], 3,
+                                                      GL_REPEAT, 1);
+    }
     terrain_prog_init(p, w);              // uniform'ы (+ статичные)
     s_terr = p;                           // для hot-reload
     shader_on_reshade(terrain_reshade);
@@ -580,6 +603,14 @@ void terrain_node_render(SceneNode *n, float dt)
     (void)dt;
     TerrainParams *p = n->params;
     const RendererContext *rc = p->rc;
+
+    // Регистрация LOD-дистанций как cvar'ов (no-op при повторе).
+    cvar_register_ex("r_terrain_lod1", s_lod1, 10.0f, 2000.0f, CVAR_ARCHIVE,
+                     "рельеф LOD1: дальность детальной сетки, м");
+    cvar_register_ex("r_terrain_lod2", s_lod2, 20.0f, 4000.0f, CVAR_ARCHIVE,
+                     "рельеф LOD2: дальность средней сетки, м");
+    cvar_register_ex("r_terrain_lod3", s_lod3, 30.0f, 8000.0f, CVAR_ARCHIVE,
+                     "рельеф LOD3: дальность грубой сетки, м");
 
     // Теневой проход (RP_SHADOW): глубина рельефа в текущий каскад.
     // Оркестрацию делает shadow.c (см. shadow_render в renderer_frame).
@@ -621,6 +652,18 @@ void terrain_node_render(SceneNode *n, float dt)
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, terrain_wetness_mask_tex());
     }
+    // Поверхности (splat): маска на юните 10, слои на 12..15
+    if (p->u_splat_on >= 0)
+        glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
+    if (splat_have()) {
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_2D, splat_texture());
+        for (int i = 0; i < SPLAT_LAYERS; i++) {
+            if (!p->tex_splat_layer[i]) continue;
+            glActiveTexture(GL_TEXTURE12 + i);
+            glBindTexture(GL_TEXTURE_2D, p->tex_splat_layer[i]);
+        }
+    }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex_base);     // земля (unit 0)
     glActiveTexture(GL_TEXTURE1);
@@ -643,6 +686,11 @@ void terrain_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->ibo);
     glDeleteVertexArrays(1, &p->vao);
     glDeleteTextures(1, &p->tex_base);   // вычисленная текстура — не из кеша
+    for (int i = 0; i < SPLAT_LAYERS; i++)
+        if (p->tex_splat_layer[i]) {
+            resources_texture_release(p->tex_splat_layer[i]);
+            p->tex_splat_layer[i] = 0;
+        }
     free(p->tiles);
     if (s_static_tex) {
         glDeleteTextures(1, &s_static_tex);

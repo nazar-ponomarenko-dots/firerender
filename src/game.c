@@ -38,6 +38,7 @@
 #include "selection.h"
 #include "shadow.h"
 #include "sky.h"
+#include "splat.h"
 #include "sun.h"
 #include "terrain.h"
 #include "vegetation.h"
@@ -374,6 +375,10 @@ static int world_load_geometry(Game *g, WorldTextures *wt)
         w->field_w = w->world_w;
         w->field_d = w->world_d;
     }
+    // Поверхности рельефа: splat-маска материалов (грунт/песок/щебень/асфальт),
+    // дороги и карта занятости (где не растёт трава). Высоты под дороги уже
+    // выровнены внутри world_load (splat_flatten_roads).
+    splat_build(w);
     return 0;
 }
 
@@ -510,6 +515,7 @@ static int scene_build(Game *g, const WorldTextures *wt)
 
     // Первый кадр сцены (фон готов, камера посчитана)
     node_update_tree(g->root, 1.0f / 60.0f);
+    node_update_transforms(g->root);   // мировые матрицы до первого рендера
     entity_update_all(1.0f / 60.0f);
     voxfog_update(g->cam->cam.pos);
 
@@ -654,6 +660,7 @@ static void scene_teardown(Game *g)
 //  Инверс фазы 1 (world_load_geometry)
 static void world_unload_geometry(Game *g)
 {
+    splat_free();                // ~ splat_build (маска материалов/занятости)
     mapdata_free();              // ~ mapdata_load
     world_free(&g->world);       // ~ world_load
     resources_pak_close();       // ~ resources_pak_open
@@ -732,6 +739,10 @@ void game_update(Game *g, float dt)
         // FOV из меню применяется сразу, а не только при входе в игру.
         camera_node_update(g->cam_node, dt);
     }
+    // Мировые матрицы узлов: ПОСЛЕ всей логики (позиции/повороты уже
+    // окончательные) и ДО рендера. Дети, прицепленные к костям моделей,
+    // получают свежие матрицы точек крепления в этом же кадре.
+    node_update_transforms(g->root);
     voxfog_update(g->cam->cam.pos);
     audio_set_listener(g->cam->cam.pos);
     // Таймер сообщения карты (message из триггеров/use)

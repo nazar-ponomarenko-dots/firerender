@@ -27,6 +27,7 @@
 #include "world.h"
 #include "game.h"
 #include "commands.h"
+#include "events.h"
 #include "renderer.h"
 #include "buildnum.h"
 #include "input.h"
@@ -137,6 +138,7 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'x')) console_selftest();
     if (strchr(fr_test, 's')) shadow_toggle();
     if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
+    if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // кэш статических каскадов off
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
     if (strchr(fr_test, 'p')) g_shadow_terrain = 0;
     if (strchr(fr_test, 'q')) g_shadow_veg = 0;
@@ -147,6 +149,31 @@ static int fr_test_apply(Game *g)
     if (game_load_world(g) != 0) {
         SDL_Log("FR_TEST: world load failed");
         return -1;
+    }
+    // FR_POS="x,z[,yaw_deg]" — телепорт игрока после загрузки мира
+    // (скриншоты графики в разных точках карты: FR_POS="300,500" FR_TEST=S)
+    {
+        const char *pos = getenv("FR_POS");
+        if (pos && *pos) {
+            float fx, fz, fyaw = 0.0f, fpitch = 0.0f;
+            if (sscanf(pos, "%f,%f,%f,%f", &fx, &fz, &fyaw, &fpitch) >= 2) {
+                g->cam->cam.pos[0] = fx;
+                g->cam->cam.pos[2] = fz;
+                // Глаз 2.4 м: чуть выше пшеницы — точки обзора для тестов
+                g->cam->cam.pos[1] = sample_height(&g->world, fx, fz) + 2.4f;
+                g->cam->cam.vy = 0;
+                // noclip: камера не падает и pitch не ограничен ходьбой
+                // (удобно смотреть на небо/вниз для скриншотов)
+                g->cam->cam.fly = 1;
+                if (fyaw != 0.0f) g->cam->cam.yaw = fyaw * 3.14159f / 180.0f;
+                g->cam->cam.pitch = fpitch * 3.14159f / 180.0f;
+                // Цели сглаживания мыши — к новому взгляду (иначе m_smooth
+                // потащит камеру обратно к спавну)
+                camera_sync_look(&g->cam->cam);
+                SDL_Log("FR_POS: телепорт %.0f,%.0f yaw=%.2f pitch=%.2f",
+                        fx, fz, g->cam->cam.yaw, g->cam->cam.pitch);
+            }
+        }
     }
     // t/k — отключить рельеф/небо (нужны узлы, поэтому после load_world)
     if (strchr(fr_test, 't')) g->terr_node->render = NULL;
@@ -168,6 +195,13 @@ static int fr_test_apply(Game *g)
     }
     // w — мокрость=1 БЕЗ частиц дождя (чистый тест мокрого SSR, A/B-кадры)
     if (strchr(fr_test, 'w')) fx_force_wetness(1.0f);
+    // D — демо-полёт (headless-скриншоты красивой точки обзора, FR_TEST=SD)
+    if (strchr(fr_test, 'D')) game_demo_toggle(g);
+    // g — glb-машина в 6 м перед камерой НА ЗЕМЛЕ (тест автопостановки
+    // cmd_glb без координат и теней моделей): FR_TEST=Sg
+    if (strchr(fr_test, 'g')) {
+        cmd_glb("models/vaz-2105.glb");
+    }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);
@@ -247,8 +281,12 @@ int main(int argc, char *argv[])
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
+    // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
+    // раньше. Если драйвер не даст 4.5, SDL вернёт ближайший доступный, и
+    // vegetation.c сам откатится на инстансный путь (g_gl_gpu_driven == 0).
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -276,6 +314,8 @@ int main(int argc, char *argv[])
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
     SDL_Log("OpenGL: %s", glGetString(GL_VERSION));
+    SDL_Log("GPU-driven veg (compute+indirect): %s",
+            g_gl_gpu_driven ? "ENABLED" : "disabled (instanced fallback)");
     SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
     // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------
@@ -357,11 +397,25 @@ int main(int argc, char *argv[])
         sync_cvars(&game);
         input_sync_mode();
 
+        // Отложенные события (events_emit_deferred) — безопасная точка после
+        // всех тиков, до рендера: колбэки не могут переиспользовать списки
+        // слушателей посреди итерации.
+        events_flush_deferred();
+
         // Рендер: сцена -> bloom/туман -> оверлеи (см. renderer.c)
         renderer_begin();
         renderer_frame(&game, dt, game.world_loaded &&
                                    (app_state() != APP_MENU || !app_bg_has()));
         renderer_end(&game, dt);
+
+        // FR_TEST 'S': автоскриншот на 450-м кадре и выход на 480-м —
+        // headless-проверка картинки + стабильный прогрев для профайлера
+        // (SDL_VIDEODRIVER=offscreen FR_TEST=S).
+        if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'S')) {
+            static int s_frames = 0;
+            if (++s_frames == 450) cmd_screenshot(NULL);
+            if (s_frames >= 480) running = false;
+        }
 
         // Меню (главное/пауза/настройки) — поверх замороженной сцены
         if (app_state() != APP_PLAY) {

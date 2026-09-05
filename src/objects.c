@@ -41,7 +41,7 @@
 // общий набор сцены (SceneUniforms) + геометрия объекта + материал.
 typedef struct {
     SceneUniforms su;            // общий набор сцены (render_ctx.h)
-    GLint u_objpos, u_objsize, u_objright, u_tex;
+    GLint u_objpos, u_objsize, u_objright, u_objslope, u_tex;
     MaterialLocs mat;            // материал (material.h)
 } ObjLocs;
 
@@ -55,6 +55,8 @@ typedef struct {
                              // плотнее mapdata (пустые model пропускаются),
                              // поэтому связь только через src
     float pos[3];
+    float slope[2];          // уклон земли под объектом (dh/dx, dh/dz):
+                             // низ креста ложится на рельеф, как у травы
     float width, height;
     int collision;           // цилиндр непроходимости
     float radius;            // радиус коллизии, м
@@ -67,7 +69,7 @@ typedef struct {
     GLuint prog, vao, vbo, ibo;
     GLuint flat_prog;        // встроенный "flat" (без освещения)
     GLuint shadow_prog;      // глубина в карты теней
-    GLint s_viewproj, s_objpos, s_objsize, s_objright;
+    GLint s_viewproj, s_objpos, s_objsize, s_objright, s_objslope;
     // Blob-тени (режим r_shadows_mode 3): мягкое пятно под объектом
     GLuint blob_prog, blob_tex;
     GLint b_viewproj, b_objpos, b_objsize, b_objright, b_objfwd, b_tex, b_color;
@@ -97,6 +99,7 @@ static ObjLocs obj_locs(GLenum prog)
     l.u_objpos   = glGetUniformLocation(prog, "uObjPos");
     l.u_objsize  = glGetUniformLocation(prog, "uObjSize");
     l.u_objright = glGetUniformLocation(prog, "uObjRight");
+    l.u_objslope = glGetUniformLocation(prog, "uObjSlope");
     l.u_tex      = glGetUniformLocation(prog, "uTex");
     return l;
 }
@@ -169,6 +172,7 @@ static void objects_reshade(void)
     p->s_objpos   = glGetUniformLocation(p->shadow_prog, "uObjPos");
     p->s_objsize  = glGetUniformLocation(p->shadow_prog, "uObjSize");
     p->s_objright = glGetUniformLocation(p->shadow_prog, "uObjRight");
+    p->s_objslope = glGetUniformLocation(p->shadow_prog, "uObjSlope");
 }
 
 // Кадровые uniform'ы (виды, свет, тени, туман) — при переключении программы
@@ -256,6 +260,18 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         it->pos[2] = o->pos[2];
         if (it->pos[1] <= 0.0f)   // y = 0 — поставить на рельеф
             it->pos[1] = sample_height(ws, it->pos[0], it->pos[2]);
+        // Уклон земли под объектом: низ креста ложится на рельеф по уклону
+        // (как база растительности в wheat.vs). Дерево шириной ~12.5 м иначе
+        // на склоне висело одним углом в воздухе, а другим уходило в землю.
+        {
+            const float e = 1.0f;         // шаг замера уклона, м
+            float sdx = sample_height(ws, it->pos[0] + e, it->pos[2])
+                      - sample_height(ws, it->pos[0] - e, it->pos[2]);
+            float sdz = sample_height(ws, it->pos[0], it->pos[2] + e)
+                      - sample_height(ws, it->pos[0], it->pos[2] - e);
+            it->slope[0] = sdx / (2.0f * e);
+            it->slope[1] = sdz / (2.0f * e);
+        }
         float sy = o->scale[1] > 0.01f ? o->scale[1] : 1.0f;
         if (it->r.set && it->r.fixed_size) {
             it->height = it->r.height * sy;
@@ -390,6 +406,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     p->s_objpos   = glGetUniformLocation(p->shadow_prog, "uObjPos");
     p->s_objsize  = glGetUniformLocation(p->shadow_prog, "uObjSize");
     p->s_objright = glGetUniformLocation(p->shadow_prog, "uObjRight");
+    p->s_objslope = glGetUniformLocation(p->shadow_prog, "uObjSlope");
     glUseProgram(p->shadow_prog);
     glUniform1i(glGetUniformLocation(p->shadow_prog, "uTex"), 0);
     glUseProgram(0);
@@ -445,6 +462,8 @@ static void objects_shadow_draw(ObjectsParams *p, const RendererContext *rc)
         glBindTexture(GL_TEXTURE_2D, it->tex);
         glUniform3f(p->s_objpos, it->pos[0], it->pos[1], it->pos[2]);
         glUniform2f(p->s_objsize, it->width, it->height);
+        if (p->s_objslope >= 0)
+            glUniform2f(p->s_objslope, it->slope[0], it->slope[1]);
         // тот же выбор грани, что в objects_node_render
         if (it->billboard) {
             float d = sqrtf(dx * dx + dz * dz);
@@ -483,10 +502,12 @@ void objects_node_render(SceneNode *n, float dt)
         float sdx = ll > 0.001f ? ld[0] / ll : 0.0f;   // горизонталь к солнцу
         float sdz = ll > 0.001f ? ld[2] / ll : 0.0f;
         const float col[4] = { 0.05f, 0.05f, 0.06f, 0.5f };
-        glDisable(GL_BLEND);
+        // БЕЗ записи глубины: пятна полупрозрачные, а запись глубины
+        // отсекала биллборды, нарисованные позже ЗА пятном (дырки в траве
+        // вокруг теней деревьев). Блендинг поверх рельефа, глубина читается.
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_TRUE);
+        glDepthMask(GL_FALSE);
         glUseProgram(p->blob_prog);
         glUniformMatrix4fv(p->b_viewproj, 1, GL_FALSE, p->rc->viewproj);
         glUniform4f(p->b_color, col[0], col[1], col[2], col[3]);
@@ -506,6 +527,7 @@ void objects_node_render(SceneNode *n, float dt)
             glUniform3f(p->b_objfwd, 0.0f, 0.0f, 1.0f);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
         }
+        glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
         glUseProgram(0);
     }
@@ -535,6 +557,8 @@ void objects_node_render(SceneNode *n, float dt)
         glBindTexture(GL_TEXTURE_2D, it->tex);
         glUniform3f(l->u_objpos, it->pos[0], it->pos[1], it->pos[2]);
         glUniform2f(l->u_objsize, it->width, it->height);
+        if (l->u_objslope >= 0)
+            glUniform2f(l->u_objslope, it->slope[0], it->slope[1]);
         // Ось ширины квада:
         //  - биллборд: перпендикуляр к направлению на камеру (квад к ней);
         //  - крест: статичный выбор грани по углу обзора.

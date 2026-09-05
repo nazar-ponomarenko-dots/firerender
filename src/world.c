@@ -7,6 +7,7 @@
 #include "gl_loader.h"
 #include "mapdata.h"
 #include "resources.h"
+#include "splat.h"
 
 #include "stb_image.h"
 #include <math.h>
@@ -257,6 +258,10 @@ int world_load(WorldState *w, WorldTextures *out)
     if (w->terrain_erosion > 0)
         slope_limit_heights(w->heights, mw, mh, w->terrain_erosion,
                             w->terrain_erosion_slope);
+    // ДОРОГИ РЕЖУТ РЕЛЬЕФ: полотно выравнивается по продольному профилю
+    // ПОСЛЕ blur/эрозии и ДО нормалей — нормали, коллизия (sample_height),
+    // растительность и геометрия видят один и тот же выровненный рельеф.
+    splat_flatten_roads(w);
     unsigned char *nm = malloc((size_t)mw * mh * 3);
     if (!nm) {
         free(lum); free(color);

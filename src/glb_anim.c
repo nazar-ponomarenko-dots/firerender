@@ -20,6 +20,8 @@
 #include "json.h"
 #include "resources.h"
 #include "shader.h"
+#include "snowmask.h"
+#include "frustum.h"
 #include "stb_image.h"
 
 #include <math.h>
@@ -46,10 +48,32 @@ static int tv(const char*t){ if(!t)return 1;
     if(!strcmp(t,"MAT4"))return 16;
     return 1; }
 
-typedef struct { int bufferView; long byteOffset; int comp, vec, norm; long count; } GA;
+typedef struct { int bufferView; long byteOffset; int comp, vec, norm; int stride; long count; } GA;
 typedef struct { long byteOffset, byteLength; int byteStride; } GB;
 
 static void m4id(float m[16]){ memset(m,0,16*sizeof(float)); m[0]=m[5]=m[10]=m[15]=1; }
+
+// --- Тени скиннед-моделей -----------------------------------------------------
+// Глубинный проход (skinned_shadow.vs + mesh_shadow.fs): та же кожа, что в
+// цветном проходе — модель отбрасывает тень В ПОЗЕ ТЕКУЩЕГО КАДРА. Программа
+// одна на все anim-узлы (модульный статик, hot-reload через reshade-хук).
+static GLuint s_anim_shadow_prog=0;
+static GLint s_as_model=-1,s_as_vp=-1,s_as_bones=-1,s_as_hasskin=-1,s_as_tex=-1,s_as_at=-1;
+static void anim_shadow_init(void){
+    s_as_model=glGetUniformLocation(s_anim_shadow_prog,"uModel");
+    s_as_vp=glGetUniformLocation(s_anim_shadow_prog,"uViewProj");
+    s_as_bones=glGetUniformLocation(s_anim_shadow_prog,"uBones");
+    s_as_hasskin=glGetUniformLocation(s_anim_shadow_prog,"uHasSkin");
+    s_as_tex=glGetUniformLocation(s_anim_shadow_prog,"uTex");
+    s_as_at=glGetUniformLocation(s_anim_shadow_prog,"uAlphaTest");
+}
+static void anim_shadow_reshade(void){
+    GLuint p=resources_program_replace(s_anim_shadow_prog,
+                                       "shaders/skinned_shadow.vs",
+                                       "shaders/mesh_shadow.fs");
+    if(p)s_anim_shadow_prog=p;
+    anim_shadow_init();
+}
 static void m4mul(float o[16],const float a[16],const float b[16]){
     float r[16];
     for(int c=0;c<4;c++)for(int rr=0;rr<4;rr++){
@@ -70,14 +94,24 @@ static void quat_mat(float m[16],const float q[4],const float s[3],const float t
     m[12]=t[0]; m[13]=t[1]; m[14]=t[2];
 }
 static float rfv(const unsigned char*bin,long base,const GA*a,int elem,int comp){
-    int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->vec*sz+(long)comp*sz;
+    int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->stride+(long)comp*sz;
     switch(a->comp){ case C_FLOAT:{float v;memcpy(&v,p,4);return v;}
         case C_UINT:{unsigned v;memcpy(&v,p,4);return (float)v;}
         case C_USHORT:{unsigned short v;memcpy(&v,p,2);return (float)v;}
         case C_SHORT:{short v;memcpy(&v,p,2);return (float)v;}
         case C_UBYTE:return (float)p[0]; case C_BYTE:return (float)((signed char)p[0]);} return 0;}
+// Безопасное чтение индекса: только беззнаковые SCALAR-типы, диапазон [0,maxIdx].
+static long rfi(const unsigned char*bin,long base,const GA*a,int elem,long maxIdx){
+    if(a->vec!=1) return -1;
+    long idx=-1; int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->stride;
+    switch(a->comp){ case C_UINT:{unsigned v;memcpy(&v,p,4);idx=(long)v;break;}
+        case C_USHORT:{unsigned short v;memcpy(&v,p,2);idx=(long)v;break;}
+        case C_UBYTE:idx=(long)p[0];break; default:return -1;}
+    if(idx<0) return -1;
+    if(maxIdx>0&&idx>=maxIdx) return -1;
+    return idx;}
 static void rvv(const unsigned char*bin,long base,const GA*a,int elem,float*out){
-    long st=(long)a->vec*cs(a->comp); const unsigned char*p=bin+base+(long)elem*st;
+    long st=a->stride; const unsigned char*p=bin+base+(long)elem*st;
     float f[16]={0};
     for(int c=0;c<a->vec;c++) switch(a->comp){
         case C_FLOAT:{float v;memcpy(&v,p+(long)c*4,4);f[c]=v;break;}
@@ -91,15 +125,17 @@ static float spec_from_rough(float rough,float metallic){
 
 // Акцессор укладывается в свой bufferView и в bin-чанк (защита от битого/
 // вредоносного GLB: смещения/длины берутся из JSON и ДО чтения обязаны быть
-// проверены против реального размера файла). Шаг чтения rvv/rfv = vec*sz.
+// проверены против реального размера файла). Шаг чтения rvv/rfv = a->stride.
 static int acc_fits(const GA*a,const GB*bvs,int bv_n,long bin_len){
     if(!a||a->count<=0)return 0;
     if(a->bufferView<0||a->bufferView>=bv_n)return 0;
     const GB*bv=&bvs[a->bufferView];
     int sz=cs(a->comp)*a->vec; if(sz<=0)return 0;
     if(a->count>bin_len)return 0;
-    long need=a->count*(long)sz;
-    long base=bv->byteOffset+a->byteOffset;
+    // Для интерлевинга: реальный размер = (count-1)*stride + sz
+    long stride = a->stride > 0 ? a->stride : sz;
+    long need = (a->count - 1) * stride + sz;
+    long base = bv->byteOffset + a->byteOffset;
     return base>=0&&bv->byteLength>=0&&need<=bv->byteLength&&base+need<=bin_len;
 }
 // bufferView (картинка/сырые данные) целиком внутри bin-чанка
@@ -149,15 +185,20 @@ AnimGlb *glb_anim_parse(const char *path)
         accs[i].comp=(int)json_num(json_find(a,"componentType"),C_FLOAT);
         accs[i].vec=tv(json_str(json_find(a,"type"),"SCALAR"));
         accs[i].norm=json_bool(json_find(a,"normalized"),0);
-        accs[i].count=(long)json_num(json_find(a,"count"),0);}
+        accs[i].count=(long)json_num(json_find(a,"count"),0);
+        // Шаг между элементами: byteStride bufferView если задан, иначе плотная упаковка.
+        int bv_i=accs[i].bufferView, elem_sz=cs(accs[i].comp)*accs[i].vec;
+        accs[i].stride=(bv_i>=0&&bv_i<bv_n&&bvs[bv_i].byteStride>0)?bvs[bv_i].byteStride:elem_sz;}
 
     AnimGlb*out=calloc(1,sizeof* out);
     out->nodes=calloc((size_t)node_n,sizeof* out->nodes);
+    if(!out||(node_n>0&&!out->nodes)){ SDL_Log("glb_anim: %s — нехватка памяти",path); free(out); free(file); return NULL; }
     out->nnode=node_n;
     for(int i=0;i<node_n;i++) out->nodes[i].parent=-1;
     // родители и дети
     for(int i=0;i<node_n;i++){const JsonNode*nd=json_array_get(nd_a,i); AnimNode*N=&out->nodes[i];
         const JsonNode*ch=json_find(nd,"children");
+        snprintf(N->name,sizeof N->name,"%s",json_str(json_find(nd,"name"),""));
         if(ch&&ch->type==JSON_ARRAY){for(int k=0;k<json_array_len(ch);k++){int ci=(int)json_num(json_array_get(ch,k),-1);
             if(ci>=0&&ci<node_n&&N->nchildren<64){N->children[N->nchildren++]=ci; out->nodes[ci].parent=i;}}}
         N->mesh=(int)json_num(json_find(nd,"mesh"),-1);
@@ -181,12 +222,15 @@ AnimGlb *glb_anim_parse(const char *path)
     if(nskin>0){
         out->skins=calloc((size_t)nskin,sizeof* out->skins); out->nskin=nskin;
         out->skin_of_node=calloc((size_t)node_n,sizeof* out->skin_of_node);
+        if(!out->skins||(node_n>0&&!out->skin_of_node)){ out->nskin=0; }
         for(int i=0;i<node_n;i++)out->skin_of_node[i]=-1;
         for(int s=0;s<nskin;s++){const JsonNode*sk=json_array_get(sk_a,s);
             const JsonNode*jn=json_find(sk,"joints"); int jc=jn&&jn->type==JSON_ARRAY?json_array_len(jn):0;
+            if(jc<0||jc>32*1024*1024) jc=0;      // потолок на число суставов
             AnimSkin*S=&out->skins[s]; S->joint_count=jc;
             S->joints=calloc((size_t)(jc?jc:1),sizeof* S->joints);
             S->inv_bind=calloc((size_t)(jc?jc:1)*16,sizeof* S->inv_bind);
+            if(!S->joints||!S->inv_bind){ S->joint_count=0; continue; }
             for(int j=0;j<jc;j++)S->joints[j]=(int)json_num(json_array_get(jn,j),-1);
             int ibm=(int)json_num(json_find(sk,"inverseBindMatrices"),-1);
             if(ibm>=0&&ibm<acc_n&&accs[ibm].vec==16&&acc_fits(&accs[ibm],bvs,bv_n,(long)bin_len)){
@@ -236,11 +280,13 @@ AnimGlb *glb_anim_parse(const char *path)
                 continue;
             }
             AnimPrim*o=realloc(out->prims,(size_t)(out->nprim+1)*sizeof* out->prims);
-            out->prims=o; AnimPrim*P=&out->prims[out->nprim++]; memset(P,0,sizeof* P);
+            if(!o) goto prim_fail; out->prims=o;
+            AnimPrim*P=&out->prims[out->nprim++]; memset(P,0,sizeof* P);
             P->verts=malloc((size_t)nv*3*sizeof(float));
             P->normals=malloc((size_t)nv*3*sizeof(float));
             P->uvs=calloc((size_t)nv*2,sizeof(float));
-            if(aj&&aw){ P->bone_idx=malloc((size_t)nv*4); P->bone_w=malloc((size_t)nv*4*sizeof(float)); }
+            if(aj&&aw){ P->bone_idx=malloc((size_t)nv*4*sizeof(int)); P->bone_w=malloc((size_t)nv*4*sizeof(float)); }
+            if(!P->verts||!P->normals||!P->uvs||(aj&&aw&&(!P->bone_idx||!P->bone_w))) goto prim_fail;
             long pb=ap->bufferView>=0&&ap->bufferView<bv_n?bvs[ap->bufferView].byteOffset+ap->byteOffset:0;
             long nb=an&&an->bufferView>=0?bvs[an->bufferView].byteOffset+an->byteOffset:0;
             long ub=au&&au->bufferView>=0?bvs[au->bufferView].byteOffset+au->byteOffset:0;
@@ -253,29 +299,39 @@ AnimGlb *glb_anim_parse(const char *path)
                 if(au) rvv(bin,ub,au,(int)v,u);
                 P->verts[3*v]=p[0]; P->verts[3*v+1]=p[1]; P->verts[3*v+2]=p[2];
                 P->normals[3*v]=n[0]; P->normals[3*v+1]=n[1]; P->normals[3*v+2]=n[2];
-                P->uvs[2*v]=u[0]; P->uvs[2*v+1]=u[1];
+                P->uvs[2*v]=u[0]; P->uvs[2*v+1]=1.0f-u[1]; // glTF: V=0 сверху; GL: t=0 снизу → флип
                 if(P->bone_idx){
                     float ji[4]={0,0,0,0},we[4]={0,0,0,0};
                     if(aj) rvv(bin,jb,aj,(int)v,ji);
                     if(aw) rvv(bin,wb,aw,(int)v,we);
-                    for(int k=0;k<4;k++) P->bone_idx[4*v+k]=(unsigned char)ji[k];
+                    for(int k=0;k<4;k++) P->bone_idx[4*v+k]=(int)ji[k];
                     for(int k=0;k<4;k++) P->bone_w[4*v+k]=we[k];
                 }
             }
             if(ai){ long ib=ai->bufferView>=0&&ai->bufferView<bv_n?bvs[ai->bufferView].byteOffset+ai->byteOffset:0;
-                P->indices=malloc((size_t)ai->count*sizeof(unsigned int));
-                for(long i=0;i<ai->count;i++) P->indices[i]=(unsigned int)rfv(bin,ib,ai,(int)i,0);
-                P->index_count=(int)ai->count;
+                P->indices=malloc((size_t)ai->count*sizeof(unsigned int)); if(!P->indices) goto prim_fail;
+                for(long i=0;i<ai->count;i++){ long ii=rfi(bin,ib,ai,(int)i,nv);
+                    if(ii>=0) P->indices[P->index_count++]=(unsigned int)ii; }
             }
             else {
                 P->indices=malloc((size_t)nv*sizeof(unsigned int));
+                if(!P->indices) goto prim_fail;
                 for(long i=0;i<nv;i++) P->indices[i]=(unsigned)i;
                 P->index_count=(int)nv;
             }
             P->vcount=(int)nv;
+            goto prim_ok;
+        prim_fail:
+            // Сбой аллокации: освободить недостроенный примитив и пропустить.
+            SDL_Log("glb_anim: %s — нехватка памяти на примитив",path);
+            free(P->verts); free(P->normals); free(P->uvs);
+            free(P->bone_idx); free(P->bone_w); free(P->indices);
+            out->nprim--;
+            continue;
+        prim_ok:;
             // материал (псевдо-PBR 2004)
             memcpy(P->tint,(float[]){1,1,1},sizeof P->tint); P->alpha=1; P->blend=MAT_BLEND_OPAQUE;
-            P->cull=MAT_CULL_BACK; P->tile[0]=P->tile[1]=1; P->specular=0.2f;
+            P->cull=MAT_CULL_NONE; P->tile[0]=P->tile[1]=1; P->specular=0.2f;
             if(mat_idx>=0&&mt_a&&mt_a->type==JSON_ARRAY&&mat_idx<json_array_len(mt_a)){
                 const JsonNode*mt=json_array_get(mt_a,mat_idx);
                 const JsonNode*pbr=json_find(mt,"pbrMetallicRoughness");
@@ -292,8 +348,10 @@ AnimGlb *glb_anim_parse(const char *path)
                 const char*am=json_str(json_find(mt,"alphaMode"),"OPAQUE");
                 if(!strcmp(am,"BLEND"))P->blend=MAT_BLEND_ALPHA;
                 else if(!strcmp(am,"MASK"))P->blend=MAT_BLEND_ALPHATEST;
-                else P->blend=MAT_BLEND_OPAQUE;
-                P->cull=json_bool(json_find(mt,"doubleSided"),0)?MAT_CULL_NONE:MAT_CULL_BACK;
+                // gltf-пропсы рендерим двусторонними: иначе односторонний салон/
+                // тонкие детали пропадают (видно «сквозь», и внутрянка не видна
+                // извне через стекло). Игнорируем doubleSided файла — всегда NONE.
+                P->cull=MAT_CULL_NONE;
                 const JsonNode*em=json_find(mt,"emissiveFactor");
                 if(em&&em->type==JSON_ARRAY&&json_array_len(em)>=3){
                     P->tint[0]+=(float)json_num(json_array_get(em,0),0);
@@ -309,14 +367,27 @@ AnimGlb *glb_anim_parse(const char *path)
                     int iv=(int)json_num(json_find(json_array_get(im_a,src),"bufferView"),-1);
                     if(bv_fits(bvs,bv_n,iv,(long)bin_len)){int w,h,ch;
                         unsigned char*px=stbi_load_from_memory(bin+bvs[iv].byteOffset,(int)bvs[iv].byteLength,&w,&h,&ch,4);
-                        if(px){P->img=px;P->iw=w;P->ih=h;P->wrap=MAT_WRAP_REPEAT;P->filter=MAT_FILTER_MIPMAP;
+                        if(px){P->img=px;P->iw=w;P->ih=h;P->wrap=MAT_WRAP_CLAMP;P->filter=MAT_FILTER_MIPMAP;
                             if(smp>=0&&sm_a&&sm_a->type==JSON_ARRAY&&smp<json_array_len(sm_a)){
                                 const JsonNode*sa=json_array_get(sm_a,smp);
                                 int wS=(int)json_num(json_find(sa,"wrapS"),33071);
-                                P->wrap=(wS==33072)?MAT_WRAP_CLAMP:(wS==33648)?MAT_WRAP_MIRROR:MAT_WRAP_REPEAT;
+                                int wT=(int)json_num(json_find(sa,"wrapT"),33071);
+                                // REPEAT из семплера тянет 2-й тайл при UV>1 -> рваный
+                                // рисунок. Для gltf-пропсов используем CLAMP (по краю).
+                                P->wrap=(wS==33648||wT==33648)?MAT_WRAP_MIRROR:MAT_WRAP_CLAMP;
                                 int mag=(int)json_num(json_find(sa,"magFilter"),9729);
                                 P->filter=(mag==9728)?MAT_FILTER_NEAREST:MAT_FILTER_MIPMAP;}
                         }}
+                }
+                if(P->blend==MAT_BLEND_ALPHA&&P->img&&P->alpha>=0.95f){
+                    // стекло, нарисованное непрозрачной текстурой (alpha=255):
+                    // без полупрозрачных пикселей BLEND не смешивается и закрывает
+                    // внутреники. Если альфа в текстуре полностью 255 — стекло.
+                    int has_trans=0;
+                    int npix=P->iw*P->ih;
+                    const unsigned char*pa=P->img+3;
+                    for(int k=0;k<npix;k++,pa+=4) if(*pa<250){has_trans=1;break;}
+                    if(!has_trans) P->alpha=0.35f;
                 }
             }
         }
@@ -344,6 +415,8 @@ AnimGlb *glb_anim_parse(const char *path)
                    acc_fits(&accs[outp],bvs,bv_n,(long)bin_len)){
                     GA*ti=&accs[inp],*vo=&accs[outp];
                     long nk=ti->count>16*1024*1024?0:ti->count;   // потолок против OOM/OOB
+                    // CUBICSPLINE требует output-count >= nk*3*comp (иначе rfv читает мимо акцессора)
+                    if(Samp->interp==ANIM_CUBIC&&vo->count<nk*3){ nk=0; }
                     Samp->comp=vo->vec; Samp->nkeys=nk;
                     // CUBICSPLINE хранит per key 3*comp (in-tangent, value,
                     // out-tangent); LINEAR/STEP — comp на ключ.
@@ -437,9 +510,11 @@ int glb_anim_has_anim(const char*path){
 static void anim_node_exit(const Event*,void*);   // forward (см. ниже)
 typedef struct{
     GLuint vao,vbo,ebo; int index_count; GLenum index_type;
+    GLuint snow_vbo;     // per-vertex "открыто небу сверху" (снег), 0 если нет
     GLuint tex; Material mat; MaterialLocs ml; float specular;
     int skin;            // индекс кожи (-1 — без скиннинга)
     int has_skin;        // рендерить с костями
+    int node;            // узел, несущий этот меш (для не-скинненых: его node_world)
     int tex_owned;       // 1 — glGenTextures (из img), 0 — кеш ресурсов (notfound)
     GLuint joints_bo, weights_bo;
     int *joint_map;      // какие кости этой КОЖИ реально используются (distinct,
@@ -458,11 +533,38 @@ typedef struct{
     int skin_cap;           // вместимость skin[] (макс. joint_count по кожам)
     float*wtrs;             // рабочие TRS узлов: [i*10] = trans3+quat4+scl3 (анимир.)
     int cur_clip;           // номер активного клипа
+    float radius;           // огранич. сфера геометрии в мировом масштабе
+    char path[256];         // путь GLB (для инструмента anim/list)
+    int enabled;            // 0 — скрыт и время не идёт, 1 — виден/играет
+    float dest[3]; float move_speed; int moving;   // плавное движение к dest
 } AnimParams;
+
+// Глобальный реестр анимик-узлов (нумерация = порядок загрузки). Индекс узла
+// фиксируется при регистрации и не меняется — инструмент `anim <индекс>` по нему
+// обращается (узлы, удалённые через anim remove, больше не выдаются).
+typedef struct AnimRegEntry { SceneNode *node; struct AnimRegEntry *next; } AnimRegEntry;
+static AnimRegEntry *s_anim_reg = NULL;
+static void anim_reg_add(SceneNode *n){
+    AnimRegEntry *e = malloc(sizeof *e); if (!e) return;
+    e->node = n; e->next = s_anim_reg; s_anim_reg = e;
+}
+static void anim_reg_remove(SceneNode *n){
+    for (AnimRegEntry **p = &s_anim_reg; *p; p = &(*p)->next) {
+        if ((*p)->node == n) { AnimRegEntry *d = *p; *p = d->next; free(d); return; }
+    }
+}
+static SceneNode *anim_reg_find(int idx){
+    if (idx < 0) return NULL;
+    for (AnimRegEntry *e = s_anim_reg; e; e = e->next)
+        if (idx-- == 0) return e->node;
+    return NULL;
+}
 
 // Глобальная матрица узла из рабочих TRS (анимир. компоненты в wtrs)
 static void node_global_mat(const AnimGlb*a,const float*wtrs,float*out,int idx){
     int chain[256],n=0,cur=idx;
+    // Петля с защитой от циклов родителя (p==cur) — глубина выше 256 обрезается,
+    // но такие иерархии патологические; остаётся консервативно.
     while(cur>=0&&n<256){chain[n++]=cur; int p=a->nodes[cur].parent; if(p==cur)break; cur=p;}
     m4id(out);
     for(int i=n-1;i>=0;i--){int ni=chain[i]; AnimNode*N=&a->nodes[ni];
@@ -587,26 +689,72 @@ static void build_bones(AnimParams*p){
 
 static void anim_update(SceneNode*n,float dt){
     AnimParams*p=n->params; if(!p||!p->data)return;
-    if(!p->paused) p->anim_time+=dt*p->anim_speed;
-    build_bones(p);
+    if(p->moving){
+        float dx=p->dest[0]-n->pos[0], dy=p->dest[1]-n->pos[1], dz=p->dest[2]-n->pos[2];
+        float dist=sqrtf(dx*dx+dy*dy+dz*dz);
+        float step=p->move_speed>0?p->move_speed*dt:0;
+        if(step>=dist) { n->pos[0]=p->dest[0]; n->pos[1]=p->dest[1]; n->pos[2]=p->dest[2]; p->moving=0; }
+        else if(dist>1e-6f){ float k=step/dist;
+            n->pos[0]+=dx*k; n->pos[1]+=dy*k; n->pos[2]+=dz*k; }
+    }
+    if(p->enabled && !p->paused) p->anim_time+=dt*p->anim_speed;
+    if(p->enabled) build_bones(p);
 }
 static void anim_render(SceneNode*n,float dt){
     (void)dt;
-    AnimParams*p=n?n->params:NULL; if(!p||p->rc->pass==RP_SHADOW)return;
-    build_bones(p);
-    // Базовая матрица экземпляра: перенос + масштаб объекта. ВСЕ примитивы
-    // рисуются в ней: скиннинг сам размещает геометрию (jointMatrix =
-    // world[joint]*inverseBind уже в пространстве скелета), а внешний «удобный»
-    // трансформ корня импорта (Sketchfab-FBX) компенсируется inverseBind и НЕ
-    // должен прибавляться ещё раз — иначе не-скиненные меши (напр. земля под
-    // персонажем) раздувает на порядки при движении скелета.
-    float inst[16]={p->scale,0,0,0, 0,p->scale,0,0, 0,0,p->scale,0, n->pos[0],n->pos[1],n->pos[2],1};
+    AnimParams*p=n?n->params:NULL; if(!p||!p->enabled)return;
+    if(p->rc->pass==RP_SHADOW){
+        // Тень анимированной модели в позе текущего кадра (skinning в VS)
+        if(!s_anim_shadow_prog){
+            s_anim_shadow_prog=resources_program_replace(
+                0,"shaders/skinned_shadow.vs","shaders/mesh_shadow.fs");
+            anim_shadow_init();
+            shader_on_reshade(anim_shadow_reshade);
+        }
+        glEnable(GL_DEPTH_TEST); glUseProgram(s_anim_shadow_prog);
+        glUniformMatrix4fv(s_as_vp,1,GL_FALSE,p->rc->shadow_vp);
+        glUniform1i(s_as_at,1);
+        if(s_as_tex>=0)glUniform1i(s_as_tex,0);
+        glActiveTexture(GL_TEXTURE0);
+        for(int i=0;i<p->count;i++){
+            AnimDrawItem*d=&p->items[i];
+            float model[16];
+            if(!d->has_skin&&p->data&&d->node>=0&&d->node<p->data->nnode)
+                m4mul(model,&p->node_world[d->node*16],n->world);
+            else
+                memcpy(model,n->world,sizeof model);
+            glUniformMatrix4fv(s_as_model,1,GL_FALSE,model);
+            if(s_as_hasskin>=0)glUniform1i(s_as_hasskin,d->has_skin?1:0);
+            if(d->has_skin&&s_as_bones>=0)glUniformMatrix4fv(s_as_bones,d->joint_n,GL_FALSE,d->bone);
+            glBindTexture(GL_TEXTURE_2D,d->tex);
+            glBindVertexArray(d->vao);
+            glDrawElements(GL_TRIANGLES,d->index_count,d->index_type,NULL);
+        }
+        glBindVertexArray(0);
+        return;
+    }
+    if(!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13], n->world[14], p->radius))
+        return;
+    // build_bones уже выполнен в anim_update для этого кадра — не дублируем.
+    // Базовая матрица экземпляра = МИРОВАЯ матрица узла (scene.c): в ней
+    // позиция, поворот, масштаб и — если узел прицеплен — матрица кости
+    // родителя. Модель можно вращать и вешать на другие модели.
+    // СКИНЕННЫЕ примитивы рисуются в ней: jointMatrix = world[joint]*inverseBind
+    // уже в пространстве скелета. НЕ-СКИНЕННЫЕ меши (пропсы в иерархии)
+    // дополнительно умножаются на node_world своего узла — иначе они лежат в
+    // «сыром» масштабе файла.
+    const float *inst = n->world;
     glEnable(GL_DEPTH_TEST); glUseProgram(p->prog);
     scene_uniforms_bind(&p->su,p->rc);
     if(p->u_tex>=0)glUniform1i(p->u_tex,0);
     for(int i=0;i<p->count;i++){
         AnimDrawItem*d=&p->items[i];
-        glUniformMatrix4fv(p->u_model,1,GL_FALSE,inst);
+        float model[16];
+        if(!d->has_skin&&p->data&&d->node>=0&&d->node<p->data->nnode)
+            m4mul(model,&p->node_world[d->node*16],inst);
+        else
+            memcpy(model,inst,sizeof model);
+        glUniformMatrix4fv(p->u_model,1,GL_FALSE,model);
         if(p->u_specular>=0)glUniform1f(p->u_specular,d->specular);
         if(p->u_hasskin>=0)glUniform1i(p->u_hasskin,d->has_skin?1:0);
         if(d->has_skin&&p->u_bones>=0)glUniformMatrix4fv(p->u_bones,d->joint_n,GL_FALSE,d->bone);
@@ -619,24 +767,75 @@ static void anim_render(SceneNode*n,float dt){
     glBindVertexArray(0);
 }
 
-static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int skin){
+// --- Точки крепления: матрица кости (хук scene.h) --------------------------------
+// Слот = индекс УЗЛА glTF. Отдаём node_world[slot] — матрицу кости в
+// пространстве МОДЕЛИ (без её мировой матрицы: её scene.c умножит сам).
+// Масштаб модели (p->scale) уже входит в мировую матрицу узла, а node_world
+// несёт только внутреннюю иерархию файла — поэтому цепочка получается
+// world(модель) * bone(модель) * local(ребёнок), как и ожидается.
+static void anim_attach_matrix(SceneNode *parent, int slot, float out[16])
+{
+    AnimParams *p = parent ? parent->params : NULL;
+    if (!p || !p->data || !p->node_world) return;
+    if (slot < 0 || slot >= p->data->nnode) return;
+    memcpy(out, &p->node_world[slot * 16], 16 * sizeof(float));
+}
+
+int glb_anim_bone_count(SceneNode *n)
+{
+    AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
+                  ? n->params : NULL;
+    return (p && p->data) ? p->data->nnode : 0;
+}
+
+const char *glb_anim_bone_name(SceneNode *n, int idx)
+{
+    AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
+                  ? n->params : NULL;
+    if (!p || !p->data || idx < 0 || idx >= p->data->nnode) return NULL;
+    return p->data->nodes[idx].name;
+}
+
+int glb_anim_bone_find(SceneNode *n, const char *name)
+{
+    AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
+                  ? n->params : NULL;
+    if (!p || !p->data || !name || !name[0]) return -1;
+    // Точное совпадение имени
+    for (int i = 0; i < p->data->nnode; i++)
+        if (strcmp(p->data->nodes[i].name, name) == 0) return i;
+    // Иначе — по подстроке (в GLB кости часто зовутся "mixamorig:Hand_R")
+    for (int i = 0; i < p->data->nnode; i++)
+        if (p->data->nodes[i].name[0] && strstr(p->data->nodes[i].name, name))
+            return i;
+    return -1;
+}
+
+static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int skin,int node,const float*snow){
     AnimDrawItem*d=calloc(1,sizeof* d);
-    d->skin=skin; d->has_skin=has_skin;
-    // per-primitive remap: какие кости кожи реально используются (≤ MAX_BONES)
-    int remap[256]; for(int i=0;i<256;i++)remap[i]=-1;
-    int n=0;
+    d->skin=skin; d->has_skin=has_skin; d->node=node;
+    // per-primitive remap: какие кости кожи реально используются (≤ MAX_BONES).
+    // Индексы костей (JOINTS_0) храним как int — компонент может быть ubyte
+    // (0..255) или ushort (0..65535, Blender/Sketchfab-FBX). Приводить к байту
+    // НЕЛЬЗЯ: индекс >255 затрётся, и вершины привяжутся к чужим костям.
+    int used[MAX_BONES]; int n=0, overflow=0;
     if(has_skin){for(int i=0;i<P->vcount;i++)for(int k=0;k<4;k++){
         int b=P->bone_idx[4*i+k];
-        if(b<0||b>255||remap[b]>=0)continue;
-        if(n<MAX_BONES){remap[b]=n;n++;} }
+        if(b<0) continue;
+        int known=-1;
+        for(int u=0;u<n;u++) if(used[u]==b){known=u;break;}
+        if(known<0){
+            if(n<MAX_BONES){ used[n]=b; n++; }
+            else overflow=1;
+        } }
     }
-    if(has_skin&&n>=MAX_BONES)
+    if(has_skin&&overflow)
         SDL_Log("glb_anim: примитив использует >=%d костей — часть вершин привязана к кости 0",MAX_BONES);
     d->joint_n=n;
     if(has_skin&&n>0){
         d->joint_map=malloc((size_t)n*sizeof(int));
+        memcpy(d->joint_map,used,(size_t)n*sizeof(int));
         d->bone=malloc((size_t)n*16*sizeof(float)); m4id(d->bone);
-        for(int b=0,i=0;b<256&&i<n;b++)if(remap[b]>=0&&remap[b]<n)d->joint_map[i++]=b;
     }
     glGenVertexArrays(1,&d->vao); glBindVertexArray(d->vao);
     glGenBuffers(1,&d->vbo); glBindBuffer(GL_ARRAY_BUFFER,d->vbo);
@@ -648,8 +847,9 @@ static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int ski
         cpu[(has_skin?16:8)*i+3]=P->normals[3*i+0]; cpu[(has_skin?16:8)*i+4]=P->normals[3*i+1]; cpu[(has_skin?16:8)*i+5]=P->normals[3*i+2];
         cpu[(has_skin?16:8)*i+6]=P->uvs[2*i+0]; cpu[(has_skin?16:8)*i+7]=P->uvs[2*i+1];
         if(has_skin){ for(int k=0;k<4;k++){
-                int b=P->bone_idx[4*i+k];
-                cpu[(has_skin?16:8)*i+8+k]=(float)((remap[b]>=0)?remap[b]:0); }
+                int b=P->bone_idx[4*i+k],loc=0;
+                for(int u=0;u<n;u++) if(used[u]==b){loc=u;break;}
+                cpu[(has_skin?16:8)*i+8+k]=(float)loc; }
             for(int k=0;k<4;k++)cpu[(has_skin?16:8)*i+12+k]=P->bone_w[4*i+k]; }
     }
     glBufferSubData(GL_ARRAY_BUFFER,0,(GLsizeiptr)((size_t)P->vcount*stride),cpu);
@@ -661,6 +861,12 @@ static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int ski
     if(a_uv>=0){glVertexAttribPointer(a_uv,2,GL_FLOAT,GL_FALSE,(GLsizei)stride,(void*)(6*sizeof(float)));glEnableVertexAttribArray(a_uv);}
     if(has_skin&&a_bi>=0){glVertexAttribPointer(a_bi,4,GL_FLOAT,GL_FALSE,(GLsizei)stride,(void*)(8*sizeof(float)));glEnableVertexAttribArray(a_bi);}
     if(has_skin&&a_bw>=0){glVertexAttribPointer(a_bw,4,GL_FLOAT,GL_FALSE,(GLsizei)stride,(void*)(12*sizeof(float)));glEnableVertexAttribArray(a_bw);}
+    if(snow){
+        glGenBuffers(1,&d->snow_vbo); glBindBuffer(GL_ARRAY_BUFFER,d->snow_vbo);
+        glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)((size_t)P->vcount*sizeof(float)),snow,GL_STATIC_DRAW);
+        GLint a_snow=glGetAttribLocation(prog,"aSnow");
+        if(a_snow>=0){glVertexAttribPointer(a_snow,1,GL_FLOAT,GL_FALSE,0,NULL);glEnableVertexAttribArray(a_snow);}
+    }
     glGenBuffers(1,&d->ebo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,d->ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,(GLsizeiptr)((size_t)P->index_count*sizeof(unsigned int)),P->indices,GL_STATIC_DRAW);
     d->index_count=P->index_count; d->index_type=GL_UNSIGNED_INT;
@@ -692,17 +898,41 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     GLuint prog=make_program("shaders/skinned.vs","shaders/mesh.fs");
     if(!prog){glb_anim_free(a);return NULL;}
     AnimParams*p=calloc(1,sizeof* p); p->rc=rc; p->scale=scale>0?scale:1; p->prog=prog; p->data=a;
+    snprintf(p->path,sizeof p->path,"%s",path); p->enabled=1;
     scene_uniforms_init(&p->su,prog);
     p->u_model=glGetUniformLocation(prog,"uModel"); p->u_tex=glGetUniformLocation(prog,"uTex");
     p->u_specular=glGetUniformLocation(prog,"uSpecular"); p->u_bones=glGetUniformLocation(prog,"uBones");
     p->u_hasskin=glGetUniformLocation(prog,"uHasSkin"); p->u_uvtile=glGetUniformLocation(prog,"uUvTile");
     p->items=calloc((size_t)(a->ninst?a->ninst:1),sizeof* p->items); p->count=a->ninst;
+    p->radius=0.0f;
+    // Per-vertex "открыто небу сверху" по всей модели (все примитивы файла):
+    // крыша/капот получат снег, пол/сиденья под крышей — нет.
+    const float**vp=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vp);
+    int*vc=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vc);
+    const unsigned**ip=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ip);
+    int*ic=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ic);
+    for(int pr=0;pr<a->nprim;pr++){
+        vp[pr]=a->prims[pr].verts; vc[pr]=a->prims[pr].vcount;
+        ip[pr]=a->prims[pr].indices; ic[pr]=a->prims[pr].index_count;
+    }
+    int snow_total=0;
+    float*snow_mask=snow_mask_compute(vp,vc,ip,ic,a->nprim,&snow_total);
+    free(vp); free(vc); free(ip); free(ic);
+    int*prim_off=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*prim_off);
+    { int acc=0; for(int pr=0;pr<a->nprim;pr++){ prim_off[pr]=acc; acc+=a->prims[pr].vcount; } }
     for(int i=0;i<a->ninst;i++){
         AnimInstance*it=&a->instances[i]; AnimPrim*P=&a->prims[it->prim];
         int hs=(P->bone_idx&&it->skin>=0&&it->skin<a->nskin)?1:0;
-        AnimDrawItem*bi=build_item(P,prog,hs,it->skin);
+        AnimDrawItem*bi=build_item(P,prog,hs,it->skin,it->node,
+                                   snow_mask? snow_mask+prim_off[it->prim] : NULL);
         p->items[i]=*bi; free(bi);   // структура скопирована — обёртку освободить
+        for(int v=0;v<P->vcount;v++){
+            float dx=P->verts[3*v+0], dy=P->verts[3*v+1], dz=P->verts[3*v+2];
+            float r2=dx*dx+dy*dy+dz*dz; if(r2>p->radius)p->radius=r2;
+        }
     }
+    free(prim_off); free(snow_mask);
+    p->radius=sqrtf(p->radius)*p->scale;
     p->node_world=malloc((size_t)(a->nnode? a->nnode:1)*16*sizeof(float));
     p->wtrs=calloc((size_t)(a->nnode? a->nnode:1)*10,sizeof(float));
     int jc=0; for(int s=0;s<a->nskin;s++)if(a->skins[s].joint_count>jc)jc=a->skins[s].joint_count;
@@ -713,8 +943,13 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
         if(p->su.u_shadowdepth[c]>=0)glUniform1i(p->su.u_shadowdepth[c],3+c);}
     glUseProgram(0);
     float size[3]={scale,scale,scale};
-    SceneNode*n=node_new("AnimInstance","AnimInstance3D",pos,size,p,anim_update,anim_render);
+    SceneNode*n=node_new(path,"AnimInstance3D",pos,size,p,anim_update,anim_render);
+    // Масштаб — в трансформ узла (scene.c соберёт мировую матрицу).
+    n->scl[0]=n->scl[1]=n->scl[2]=p->scale;
+    n->attach_fn=anim_attach_matrix;      // к костям можно цеплять узлы
     build_bones(p);
+    node_update_transforms(n);            // мировая матрица до первого рендера
+    anim_reg_add(n);
     return n;
 }
 
@@ -723,11 +958,13 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
 // (GPU-буферы, текстуры, программа из кеша, данные модели), — здесь.
 static void anim_free_resources(SceneNode*n){
     AnimParams*p=n?n->params:NULL; if(!p)return;
+    anim_reg_remove(n);
     if(p->items){
         for(int i=0;i<p->count;i++){
             AnimDrawItem*d=&p->items[i];
             glDeleteVertexArrays(1,&d->vao);
             glDeleteBuffers(1,&d->vbo);
+            glDeleteBuffers(1,&d->snow_vbo);
             glDeleteBuffers(1,&d->ebo);
             if(d->tex_owned) glDeleteTextures(1,&d->tex);
             else resources_texture_release(d->tex);
@@ -753,43 +990,122 @@ static void anim_node_exit(const Event*e,void*user){
 void glb_anim_node_render(SceneNode*n,float dt){ anim_render(n,dt); }
 
 // --- Клипы анимации ------------------------------------------------------------
+// Все функции этого раздела работают ТОЛЬКО с узлом AnimInstance3D (AnimParams).
+// Для статичного GlbInstance3D params — GlbParams без поля data: чтение p->data
+// было бы мусором/SEGV. Проверяем тип узла и параметры заранее.
+static AnimParams*anim_params_of(SceneNode*n){
+    if(!n||!n->type||strcmp(n->type,"AnimInstance3D")!=0)return NULL;
+    return n->params;
+}
 int glb_anim_clip_count(SceneNode*n){
-    AnimParams*p=n?n->params:NULL;
+    AnimParams*p=anim_params_of(n);
     return p&&p->data?p->data->nclip:0;
 }
 const char*glb_anim_clip_name(SceneNode*n,int idx){
-    AnimParams*p=n?n->params:NULL;
+    AnimParams*p=anim_params_of(n);
     if(!p||!p->data||idx<0||idx>=p->data->nclip)return NULL;
     return p->data->clips[idx].name[0]?p->data->clips[idx].name:NULL;
 }
 int glb_anim_clip_find(SceneNode*n,const char*name){
-    AnimParams*p=n?n->params:NULL;
+    AnimParams*p=anim_params_of(n);
     if(!p||!p->data||!name)return -1;
     for(int i=0;i<p->data->nclip;i++)
         if(p->data->clips[i].name[0]&&!strcmp(p->data->clips[i].name,name))return i;
     return -1;
 }
 void glb_anim_set_clip(SceneNode*n,int idx){
-    AnimParams*p=n?n->params:NULL;
+    AnimParams*p=anim_params_of(n);
     if(!p||!p->data||p->data->nclip<=0)return;
     p->cur_clip=idx<0?0:(idx>=p->data->nclip?p->data->nclip-1:idx);
     p->anim_time=0;   // старт клипа с начала
     build_bones(p);
 }
 const char*glb_anim_current_clip(SceneNode*n){
-    AnimParams*p=n?n->params:NULL;
+    AnimParams*p=anim_params_of(n);
     if(!p||!p->data||p->cur_clip<0||p->cur_clip>=p->data->nclip)return NULL;
     return p->data->clips[p->cur_clip].name[0]?p->data->clips[p->cur_clip].name:NULL;
 }
 void glb_anim_set_speed(SceneNode*n,float speed){
-    AnimParams*p=n?n->params:NULL; if(!p)return;
+    AnimParams*p=anim_params_of(n); if(!p)return;
     p->anim_speed=speed;
 }
 void glb_anim_set_paused(SceneNode*n,int paused){
-    AnimParams*p=n?n->params:NULL; if(!p)return;
+    AnimParams*p=anim_params_of(n); if(!p)return;
     p->paused=paused?1:0;
 }
 void glb_anim_set_loop(SceneNode*n,int loop){
-    AnimParams*p=n?n->params:NULL; if(!p)return;
+    AnimParams*p=anim_params_of(n); if(!p)return;
     p->loop=loop?1:0;
+}
+void glb_anim_set_time(SceneNode*n,float t){
+    AnimParams*p=anim_params_of(n); if(!p)return;
+    AnimGlb*a=p->data; float d=0;
+    if(a&&p->cur_clip>=0&&p->cur_clip<a->nclip)d=a->clips[p->cur_clip].duration;
+    if(t<0)t=0;
+    if(d>0) t = p->loop ? fmodf(t,d) : (t>d?d:t);
+    p->anim_time=t;
+    build_bones(p);   // обновить позу немедленно (не дожидаясь кадра)
+}
+float glb_anim_time(SceneNode*n){
+    AnimParams*p=anim_params_of(n);
+    return p?p->anim_time:0;
+}
+float glb_anim_scale_get(SceneNode*n){
+    AnimParams*p=anim_params_of(n); return p?p->scale:1;
+}
+int glb_anim_paused_get(SceneNode*n){
+    AnimParams*p=anim_params_of(n); return p?p->paused:0;
+}
+int glb_anim_loop_get(SceneNode*n){
+    AnimParams*p=anim_params_of(n); return p?p->loop:0;
+}
+float glb_anim_speed_get(SceneNode*n){
+    AnimParams*p=anim_params_of(n); return p?p->anim_speed:1;
+}
+int glb_anim_count(void){
+    int c=0; for(AnimRegEntry*e=s_anim_reg;e;e=e->next)c++; return c;
+}
+SceneNode*glb_anim_by_index(int idx){ return anim_reg_find(idx); }
+const char*glb_anim_path(SceneNode*n){
+    AnimParams*p=anim_params_of(n); return p?p->path:(const char*)NULL;
+}
+void glb_anim_set_enabled(SceneNode*n,int on){
+    AnimParams*p=anim_params_of(n); if(!p)return;
+    p->enabled=on?1:0;
+}
+int glb_anim_enabled(SceneNode*n){
+    AnimParams*p=anim_params_of(n); return p?p->enabled:0;
+}
+void glb_anim_set_pos(SceneNode*n,const float pos[3]){
+    if(!n||!anim_params_of(n))return;
+    n->pos[0]=pos[0]; n->pos[1]=pos[1]; n->pos[2]=pos[2];
+}
+void glb_anim_move_to(SceneNode*n,const float pos[3],float speed){
+    AnimParams*p=anim_params_of(n); if(!p)return;
+    p->dest[0]=pos[0]; p->dest[1]=pos[1]; p->dest[2]=pos[2];
+    p->move_speed=speed>0?speed:1; p->moving=1;
+}
+void glb_anim_stop_move(SceneNode*n){
+    AnimParams*p=anim_params_of(n); if(!p)return; p->moving=0;
+}
+void glb_anim_set_scale(SceneNode*n,float s){
+    AnimParams*p=anim_params_of(n); if(!p)return;
+    if(s<=0)s=1;
+    p->scale=s;
+    // Масштаб теперь живёт в ТРАНСФОРМЕ узла (scene.c строит из него мировую
+    // матрицу) — p->scale остаётся для радиуса отсечения и запросов API.
+    n->scl[0]=n->scl[1]=n->scl[2]=s;
+    n->size[0]=n->size[1]=n->size[2]=s;
+    if(p->data){float r=0;
+        for(int i=0;i<p->data->ninst;i++){AnimPrim*P=&p->data->prims[p->data->instances[i].prim];
+            for(int v=0;v<P->vcount;v++){
+                float dx=P->verts[3*v],dy=P->verts[3*v+1],dz=P->verts[3*v+2];
+                float r2=dx*dx+dy*dy+dz*dz; if(r2>r)r=r2; }}
+        p->radius=sqrtf(r)*s;
+    }
+}
+void glb_anim_remove_node(SceneNode*n){
+    if(!n||!anim_params_of(n))return;
+    node_remove(n);
+    node_free_tree(n);   // посылает EV_NODE_EXIT -> anim_free_resources (unreg+GL)
 }

@@ -23,7 +23,8 @@ static const char *shader_version(GLenum type)
         return "#version 300 es\nprecision highp float;\n";  // GLES: точность обязательна
     return "#version 300 es\n";
 #else
-    (void)type;
+    if (type == GL_COMPUTE_SHADER)
+        return "#version 430 core\n";   // compute-шейдеры требуют GLSL 4.30+
     return "#version 330 core\n";
 #endif
 }
@@ -126,6 +127,26 @@ GLuint make_program(const char *vs_path, const char *fs_path)
 {
     // Кеш в resources.c: одна программа на пару файлов, ссылки считаются.
     return resources_program(vs_path, fs_path);
+}
+
+GLuint make_compute_program(const char *cs_path)
+{
+    GLuint cs = compile_shader_file(GL_COMPUTE_SHADER, cs_path);
+    if (!cs) return 0;
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, cs);
+    glLinkProgram(prog);
+    glDeleteShader(cs);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+        SDL_Log("Compute link error (%s): %s", cs_path, log);
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
 }
 
 void shader_on_reshade(ReshadeFn fn)

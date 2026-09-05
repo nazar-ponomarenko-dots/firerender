@@ -108,17 +108,26 @@ float sample_cascade(vec3 wp, int c) {
 float object_shadow(vec3 wp) {
     if (uShadowOn < 0.5) return 1.0;
     float dist = distance(uCamPos, wp);
-    if (dist >= SHADOW_LIMIT) return 1.0;
+    // Дальние деревья: самозатенение биллборда на 100+ м нечитаемо, а цена
+    // — 1-2 тапа CSM на КАЖДЫЙ пиксель дерева (их на экране больше всего).
+    if (dist >= 100.0) return 1.0;
     if (dist < SHADOW_BOX0) {
         float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
+        // Ранний выход вне зоны бленда: большинство пикселей платят за 1 тап
+        if (t < 0.02) return sample_cascade(wp, 0);
+        if (t > 0.98) return sample_cascade(wp, 1);
         return mix(sample_cascade(wp, 0), sample_cascade(wp, 1), t);
     }
     if (dist < SHADOW_BOX1) {
         float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
+        if (t < 0.02) return sample_cascade(wp, 1);
+        if (t > 0.98) return sample_cascade(wp, 2);
         return mix(sample_cascade(wp, 1), sample_cascade(wp, 2), t);
     }
     if (dist < SHADOW_BOX2) {
         float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
+        if (t < 0.02) return sample_cascade(wp, 2);
+        if (t > 0.98) return sample_cascade(wp, 3);
         return mix(sample_cascade(wp, 2), sample_cascade(wp, 3), t);
     }
     return sample_cascade(wp, 3);
@@ -133,19 +142,30 @@ void main() {
     }
     vec3 N = normalize(uCamPos - vWorldPos);   // биллборд смотрит на камеру
     vec3 V = N;
-    float wet = clamp(uWetness, 0.0, 1.0);
-    // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
-    // ≈ 6 м / 1.25 м): каждое дерево в своём пятне мокроты.
-    float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
-                + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
-    wet *= mix(0.05, 1.8, noise * noise);
-    c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
+    // Мокрость/снег — редкие режимы погоды: в ясную погоду (99% времени)
+    // блоки пропускаются ЦЕЛИКОМ (uniform-ветвление бесплатно): экономия
+    // ~4 текстурных выборки на каждый пиксель дерева.
+    float wet = 0.0;
+    if (uWetness > 0.004) {
+        wet = clamp(uWetness, 0.0, 1.0);
+        // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
+        // ≈ 6 м / 1.25 м): каждое дерево в своём пятне мокроты.
+        float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
+                    + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
+        wet *= mix(0.05, 1.8, noise * noise);
+        c.rgb = mix(c.rgb, c.rgb * 0.7, wet * 0.6);
+    }
 
     // Снежный покров (общий блок snow.glsl): крона у биллборда — верх
-    // картинки (v=0 после переворота UV, см. object.vs).
-    {
-        float atop = 1.0 - smoothstep(0.0, 0.7, vUV.y);    // вверх по дереву
-        float a = snow_amount(vWorldPos, atop);
+    // картинки (v=0 после переворота UV, см. object.vs). Крона сама
+    // закрывает небо, поэтому маске даём лишь половину веса — снег
+    // ложится и под соседними нависающими кронами. Гладкая кривая,
+    // без шумных пятен: крона белеет равномерно по мере накопления.
+    if (uSnowCover > 0.02) {
+        float smask = texture(uSnowMask, vWorldPos.xz / uWorldSize).r;
+        float cover = smoothstep(0.10, 0.55, uSnowCover);
+        float atop  = 1.0 - smoothstep(0.15, 0.9, vUV.y);    // верх по дереву
+        float a = cover * atop * (0.5 + 0.5 * smask) * (0.85 + 0.15 * texture(uNoise, vWorldPos.xz / 1.6).r);
         if (a > 0.001) c.rgb = snow_color(c.rgb, vWorldPos, a);
     }
 

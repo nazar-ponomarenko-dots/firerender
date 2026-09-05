@@ -38,6 +38,13 @@ static float  s_wcol[3] = { 0.05f, 0.15f, 0.22f };   // тон тумана на
 
 static GLuint s_fbo = 0, s_tex = 0;   // приёмник композита bloom (полный экран)
 static GLuint s_prog = 0, s_vao = 0, s_vbo = 0;
+// Аналитический туман режима «Простой» (shaders/fog2d.fs): без 3D-текстур
+// и марша — высота рельефа из карты высот в 4 точках луча, замкнутые
+// интегралы. Один и тот же FBO/конвейер, что у объёмного.
+static GLuint s_prog2d = 0;
+static GLint u2d_invvp, u2d_campos, u2d_z, u2d_sundir, u2d_fogcol,
+             u2d_fogcolsun, u2d_skycolor, u2d_glare, u2d_raystr, u2d_wetness,
+             u2d_heightmap, u2d_worldsize, u2d_hmin, u2d_hmax, u2d_fogp;
 static GLint u_scene, u_scenedepth, u_invviewproj, u_campos, u_znear, u_zfar;
 static GLint u_tex3d[VF_CASCADES], u_center[VF_CASCADES];
 static GLint u_box[VF_CASCADES], u_res[VF_CASCADES];
@@ -205,6 +212,9 @@ static void voxfog_reshade(void)
     GLuint prog = resources_program_replace(s_prog, "shaders/postfx.vs",
                                             "shaders/volumetric.fs");
     if (prog) s_prog = prog;
+    GLuint p2 = resources_program_replace(s_prog2d, "shaders/postfx.vs",
+                                          "shaders/fog2d.fs");
+    if (p2) s_prog2d = p2;
     voxfog_prog_init();
 }
 
@@ -259,6 +269,31 @@ void voxfog_init(const WorldState *w, int vw, int vh)
     // Программа тумана (replace: old==0 после cleanup => plain-загрузка)
     s_prog = resources_program_replace(s_prog, "shaders/postfx.vs",
                                        "shaders/volumetric.fs");
+    // Аналитический туман «Простого» режима
+    s_prog2d = resources_program_replace(s_prog2d, "shaders/postfx.vs",
+                                         "shaders/fog2d.fs");
+    if (s_prog2d) {
+        u2d_invvp     = glGetUniformLocation(s_prog2d, "uInvViewProj");
+        u2d_campos    = glGetUniformLocation(s_prog2d, "uCamPos");
+        u2d_z         = glGetUniformLocation(s_prog2d, "uZ");
+        u2d_sundir    = glGetUniformLocation(s_prog2d, "uSunDir");
+        u2d_fogcol    = glGetUniformLocation(s_prog2d, "uFogColor");
+        u2d_fogcolsun = glGetUniformLocation(s_prog2d, "uFogColorSun");
+        u2d_skycolor  = glGetUniformLocation(s_prog2d, "uSkyColor");
+        u2d_glare     = glGetUniformLocation(s_prog2d, "uGlare");
+        u2d_raystr    = glGetUniformLocation(s_prog2d, "uRayStrength");
+        u2d_wetness   = glGetUniformLocation(s_prog2d, "uWetness");
+        u2d_heightmap = glGetUniformLocation(s_prog2d, "uHeightmap");
+        u2d_worldsize = glGetUniformLocation(s_prog2d, "uWorldSize");
+        u2d_hmin      = glGetUniformLocation(s_prog2d, "uHeightMin");
+        u2d_hmax      = glGetUniformLocation(s_prog2d, "uHeightMax");
+        u2d_fogp      = glGetUniformLocation(s_prog2d, "uFogP");
+        glUseProgram(s_prog2d);
+        glUniform1i(glGetUniformLocation(s_prog2d, "uScene"), 0);
+        glUniform1i(glGetUniformLocation(s_prog2d, "uSceneDepth"), 1);
+        glUniform1i(u2d_heightmap, 10);
+        glUseProgram(0);
+    }
     voxfog_prog_init();    // uniform'ы (для hot-reload)
     if (!s_prog) return;
     u_scenedepth = glGetUniformLocation(s_prog, "uSceneDepth");
@@ -367,9 +402,10 @@ void voxfog_resize(int vw, int vh)
 void voxfog_update(const float cam_pos[3])
 {
     if (!s_on) return;
-    // Режим 2: только грубый каскад 2 (дешевле CPU) — ближние не нужны
-    int first = (s_mode == 2) ? 2 : 0;
-    for (int c = first; c < VF_CASCADES; c++) {
+    // Режим 2 (аналитический): 3D-каскады не нужны вовсе — и память, и
+    // CPU-перестройки при движении камеры не тратятся.
+    if (s_mode == 2) return;
+    for (int c = 0; c < VF_CASCADES; c++) {
         float cell = s_box[c] / s_res[c];
         float nc[3];
         for (int k = 0; k < 3; k++)
@@ -438,6 +474,47 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     glDisable(GL_BLEND);
     glBindFramebuffer(GL_FRAMEBUFFER, target_fbo);
     glViewport(0, 0, vw, vh);
+
+    // --- Режим 2 «Простой»: аналитический туман (fog2d.fs) ----------------
+    // Замкнутые интегралы + 4 сэмпла карты высот вдоль луча — поведение
+    // объёмного (туман в лощинах, ореол у солнца, дождевая дымка) без
+    // 3D-текстур, марша и теневых запросов.
+    if (s_mode == 2 && s_prog2d) {
+        glUseProgram(s_prog2d);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, scene_tex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, scene_depth);
+        GLuint htex = world_height_tex();
+        glActiveTexture(GL_TEXTURE10);
+        if (htex) glBindTexture(GL_TEXTURE_2D, htex);
+        glUniformMatrix4fv(u2d_invvp, 1, GL_FALSE, invvp);
+        glUniform3f(u2d_campos, rc->view_pos[0], rc->view_pos[1],
+                    rc->view_pos[2]);
+        glUniform2f(u2d_z, rc->znear, rc->zfar);
+        glUniform3f(u2d_sundir, rc->light_dir[0][0], rc->light_dir[0][1],
+                    rc->light_dir[0][2]);
+        glUniform3f(u2d_fogcol, s_cfg.color[0], s_cfg.color[1], s_cfg.color[2]);
+        glUniform3f(u2d_fogcolsun, s_cfg.color_sun[0], s_cfg.color_sun[1],
+                    s_cfg.color_sun[2]);
+        glUniform3f(u2d_skycolor, rc->sky_color[0], rc->sky_color[1],
+                    rc->sky_color[2]);
+        glUniform1f(u2d_glare, s_cfg.glare);
+        glUniform1f(u2d_raystr, s_cfg.ray_strength);
+        glUniform1f(u2d_wetness, rc->wetness);
+        glUniform2f(u2d_worldsize, s_world->world_w, s_world->world_d);
+        glUniform1f(u2d_hmin, s_world->min_height);
+        glUniform1f(u2d_hmax, s_world->max_height);
+        // x: плотность у земли, y: высота спада, z: сила, w: дальность
+        // (как FOG_MAX у объёмного — 96 м)
+        glUniform4f(u2d_fogp, s_cfg.density_ground, s_cfg.ground_height,
+                    s_cfg.strength, 96.0f);
+        glBindVertexArray(s_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
     glUseProgram(s_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_tex);
@@ -527,11 +604,13 @@ void voxfog_cleanup(void)
         glDeleteTextures(1, &s_tex);
     }
     if (s_prog) resources_program_release(s_prog);
+    if (s_prog2d) resources_program_release(s_prog2d);
     if (s_noise_tex) resources_texture_release(s_noise_tex);
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     s_fbo = s_tex = 0;
     s_prog = 0;
+    s_prog2d = 0;
     s_noise_tex = 0;
     s_on = 0;
 }

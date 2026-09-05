@@ -18,8 +18,10 @@
 #include "events.h"
 #include "json.h"
 #include "render_ctx.h"
+#include "frustum.h"
 #include "resources.h"
 #include "shader.h"
+#include "snowmask.h"
 #include "stb_image.h"
 
 #include <math.h>
@@ -167,25 +169,37 @@ static void b_free(Bucket *b)
 }
 
 // --- Чтение данных accessor ---------------------------------------------------
-static float read_comp(const unsigned char *bin, long base, const GlbAcc *a,
-                       int elem, int comp)
+// Безопасное чтение индекса: только беззнаковые целые типа SCALAR.
+// Возвращает -1 на невалидный accessor/тип, иначе индекс в диапазоне [0,maxIdx].
+static long read_index(const unsigned char *bin, long base, const GlbAcc *a,
+                       const GlbBv *bvs, int bv_n,
+                       int elem, long maxIdx)
 {
+    if (a->vec != 1) return -1;
+    long idx = -1;
     int sz = comp_size(a->comp);
-    const unsigned char *p = bin + base + (long)elem * a->vec * sz + (long)comp * sz;
+    int bv_i = a->bufferView;
+    long stride = (bv_i >= 0 && bv_i < bv_n && bvs[bv_i].byteStride > 0)
+        ? bvs[bv_i].byteStride : sz;
+    const unsigned char *p = bin + base + (long)elem * stride;
     switch (a->comp) {
-        case C_FLOAT:  { float v; memcpy(&v, p, 4); return v; }
-        case C_UINT:   { unsigned int v; memcpy(&v, p, 4); return (float)v; }
-        case C_USHORT: { unsigned short v; memcpy(&v, p, 2); return (float)v; }
-        case C_SHORT:  { short v; memcpy(&v, p, 2); return (float)v; }
-        case C_UBYTE:  return (float)p[0];
-        case C_BYTE:   return (float)((signed char)p[0]);
+        case C_UINT:   { unsigned int v; memcpy(&v, p, 4); idx = (long)v; break; }
+        case C_USHORT: { unsigned short v; memcpy(&v, p, 2); idx = (long)v; break; }
+        case C_UBYTE:  { idx = (long)p[0]; break; }
+        default: return -1;   // FLOAT/SHORT/BYTE ненадёжны как индексы → отбросить
     }
-    return 0;
+    if (idx < 0) return -1;
+    if (maxIdx > 0 && idx >= maxIdx) return -1;   // вне диапазона вершин примитива
+    return idx;
 }
 static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
+                        const GlbBv *bvs, int bv_n,
                         int elem, float *out)
 {
-    long stride = (long)a->vec * comp_size(a->comp);
+    int sz = comp_size(a->comp);
+    int bv_i = a->bufferView;
+    long stride = (bv_i >= 0 && bv_i < bv_n && bvs[bv_i].byteStride > 0)
+        ? bvs[bv_i].byteStride : (long)a->vec * sz;
     const unsigned char *p = bin + base + (long)elem * stride;
     float f[4] = {0};
     for (int c = 0; c < a->vec; c++) {
@@ -193,7 +207,7 @@ static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
             case C_FLOAT:  { float v; memcpy(&v, p + (long)c * 4, 4); f[c] = v; break; }
             case C_USHORT: { unsigned short v; memcpy(&v, p + (long)c * 2, 2);
                              f[c] = a->normalized ? (float)v / 65535.0f : (float)v; break; }
-            case C_UBYTE:  { f[c] = a->normalized ? (float)p[c] / 255.0f : (float)p[c]; break; }
+            case C_UBYTE:  { f[c] = a->normalized ? (float)p[(long)c * sz] / 255.0f : (float)p[(long)c * sz]; break; }
             default: f[c] = 0; break;
         }
     }
@@ -217,7 +231,9 @@ static int acc_fits(const GlbAcc *a, const GlbBv *bvs, int bv_n, long bin_len)
     long sz = (long)comp_size(a->comp) * a->vec;
     if (sz <= 0) return 0;
     if (a->count > bin_len) return 0;
-    long need = a->count * sz;
+    // Интерливинг: реальный размер = (count-1)*stride + sz (stride > sz)
+    long stride = (bv->byteStride > 0) ? (long)bv->byteStride : sz;
+    long need = (a->count - 1) * stride + sz;
     long base = bv->byteOffset + a->byteOffset;
     return base >= 0 && bv->byteLength >= 0 && need <= bv->byteLength &&
            base + need <= bin_len;
@@ -255,14 +271,14 @@ static int load_albedo(GlbItem *o, int mi,
                                               (int)bvs[iv].byteLength, &w, &h, &ch, 4);
     if (!px) return 0;
     o->img = px; o->iw = w; o->ih = h;
-    o->wrap = MAT_WRAP_REPEAT; o->filter = MAT_FILTER_MIPMAP;
+    o->wrap = MAT_WRAP_CLAMP; o->filter = MAT_FILTER_MIPMAP;
     if (smp >= 0 && samplers && samplers->type == JSON_ARRAY && smp < json_array_len(samplers)) {
         const JsonNode *sa = json_array_get(samplers, smp);
         int wS = (int)json_num(json_find(sa, "wrapS"), 33071);
-        o->wrap = (wS == 33072) ? MAT_WRAP_CLAMP
-                 : (wS == 33648) ? MAT_WRAP_MIRROR : MAT_WRAP_REPEAT;
         int wT = (int)json_num(json_find(sa, "wrapT"), 33071);
-        if (wT == 33648) o->wrap = MAT_WRAP_MIRROR;
+        // UV этих Sketchfab-моделей местами выходят за [0,1]; REPEAT из семплера
+        // (10497) тянул 2-й тайл -> «рваная» текстура. Используем CLAMP (по краю).
+        o->wrap = (wS == 33648 || wT == 33648) ? MAT_WRAP_MIRROR : MAT_WRAP_CLAMP;
         int mag = (int)json_num(json_find(sa, "magFilter"), 9729);
         o->filter = (mag == 9728) ? MAT_FILTER_NEAREST : MAT_FILTER_MIPMAP;
     }
@@ -408,17 +424,19 @@ GlbModel *glb_parse_file(const char *path)
                     long uv_base = au && au->bufferView >= 0 ? bvs[au->bufferView].byteOffset + au->byteOffset : 0;
                     for (long v = 0; v < nv; v++) {
                         float p[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
-                        read_vertex(bin, pos_base, ap, (int)v, p);
+                        read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, p);
                         mat4_transform_point(world, p, p);
-                        if (an) { read_vertex(bin, nrm_base, an, (int)v, n); mat4_transform_nrm(world, n, n); }
-                        if (au) read_vertex(bin, uv_base, au, (int)v, u);
-                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1]);
+                        if (an) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
+                        if (au) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
+                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], 1.0f - u[1]);
                     }
                     if (ai) {
                         long idx_base = ai->bufferView >= 0 && ai->bufferView < bv_n
                                         ? bvs[ai->bufferView].byteOffset + ai->byteOffset : 0;
-                        for (long i = 0; i < ai->count; i++)
-                            b_push_i(bk, base + (unsigned int)read_comp(bin, idx_base, ai, (int)i, 0));
+                        for (long i = 0; i < ai->count; i++) {
+                            long ii = read_index(bin, idx_base, ai, bvs, bv_n, (int)i, nv);
+                            if (ii >= 0) b_push_i(bk, base + (unsigned int)ii);
+                        }
                     } else {
                         for (long i = 0; i < nv; i++) b_push_i(bk, base + (unsigned int)i);
                     }
@@ -460,9 +478,9 @@ GlbModel *glb_parse_file(const char *path)
         o->verts = bk->verts; o->normals = bk->nrm; o->uvs = bk->uv;
         o->vcount = bk->vn; o->indices = bk->idx; o->index_count = bk->idxn;
         o->tint[0] = o->tint[1] = o->tint[2] = 1.0f;
-        o->alpha = 1.0f; o->blend = MAT_BLEND_OPAQUE; o->cull = MAT_CULL_BACK;
+        o->alpha = 1.0f; o->blend = MAT_BLEND_OPAQUE; o->cull = MAT_CULL_NONE;
         o->tile[0] = o->tile[1] = 1.0f;
-        o->specular = 0.2f; o->wrap = MAT_WRAP_REPEAT; o->filter = MAT_FILTER_MIPMAP;
+        o->specular = 0.2f; o->wrap = MAT_WRAP_CLAMP; o->filter = MAT_FILTER_MIPMAP;
 
         int mi = bk->mat;
         if (mi >= 0 && materials && mi < json_array_len(materials)) {
@@ -485,7 +503,9 @@ GlbModel *glb_parse_file(const char *path)
             if (strcmp(am, "BLEND") == 0) o->blend = MAT_BLEND_ALPHA;
             else if (strcmp(am, "MASK") == 0) o->blend = MAT_BLEND_ALPHATEST;
             else o->blend = MAT_BLEND_OPAQUE;
-            o->cull = json_bool(json_find(mt, "doubleSided"), 0) ? MAT_CULL_NONE : MAT_CULL_BACK;
+            // glTF-пропсы рендерим двусторонними (MAT_CULL_NONE): иначе тонкие
+            // односторонние панели и салон (видимый через стёкла извне) пропадают.
+            o->cull = MAT_CULL_NONE;
             const JsonNode *em = json_find(mt, "emissiveFactor");
             if (em && em->type == JSON_ARRAY && json_array_len(em) >= 3) {
                 o->tint[0] += (float)json_num(json_array_get(em, 0), 0);
@@ -496,6 +516,19 @@ GlbModel *glb_parse_file(const char *path)
                 SDL_Log("glb: %s — normalTexture игнор (псевдо-PBR 2004)", path);
             load_albedo(o, mi, materials, textures, images, samplers, bvs, bv_n,
                         bin, (long)bin_len);
+            // «Стекло» в gltf-моделях часто нарисовано НЕпрозрачной текстурой
+            // (alpha=255). У BLEND-материала нет реальной альфы, с чем смешивать —
+            // панель остаётся сплошной и закрывает салон/внутренности. Если в
+            // текстуре нет ни одного полупрозрачного пикселя, считаем материал
+            // стеклом и снижаем общую прозрачность.
+            if (o->blend == MAT_BLEND_ALPHA && o->img && o->alpha >= 0.95f) {
+                int has_trans = 0;
+                int npix = (int)((size_t)o->iw * o->ih);
+                const unsigned char *pa = o->img + 3;
+                for (int k = 0; k < npix; k++, pa += 4)
+                    if (*pa < 250) { has_trans = 1; break; }
+                if (!has_trans) o->alpha = 0.35f;
+            }
         }
         // Данные переданы GlbItem'у — не освобождать повторно в b_free
         bk->verts = bk->nrm = bk->uv = (float *)NULL;
@@ -514,6 +547,7 @@ GlbModel *glb_parse_file(const char *path)
 // --- Узел-инстанс (GL) ---------------------------------------------------------
 typedef struct {
     GLuint vao, vbo, ebo;
+    GLuint snow_vbo;         // per-vertex "открыто небу сверху" (для снега), 0 если нет
     int index_count;
     GLenum index_type;
     GLuint tex;
@@ -530,9 +564,10 @@ typedef struct {
     SceneUniforms su;
     GLint u_model, u_tex, u_specular;
     float scale;
+    float radius;                  // огранич. сфера модели (в мировом масштабе)
 } GlbParams;
 
-static DrawItem *build_item(const GlbItem *gi, GLuint prog)
+static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
 {
     DrawItem *d = calloc(1, sizeof *d);
     glGenVertexArrays(1, &d->vao);
@@ -542,6 +577,8 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog)
     const size_t elem = 8 * sizeof(float);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->vcount * elem), NULL, GL_STATIC_DRAW);
     float *cpu = malloc((size_t)gi->vcount * 8 * sizeof(float));
+    if (!cpu) { SDL_Log("glb: нехватка памяти на CPU-буфер вершин"); glDeleteVertexArrays(1, &d->vao);
+                glDeleteBuffers(1, &d->vbo); free(d); return NULL; }
     for (int i = 0; i < gi->vcount; i++) {
         cpu[8 * i + 0] = gi->verts[3 * i + 0];
         cpu[8 * i + 1] = gi->verts[3 * i + 1];
@@ -561,6 +598,16 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog)
     glEnableVertexAttribArray(a_pos);
     if (a_nrm >= 0) { glVertexAttribPointer(a_nrm, 3, GL_FLOAT, GL_FALSE, (GLsizei)elem, (void *)(3 * sizeof(float))); glEnableVertexAttribArray(a_nrm); }
     if (a_uv >= 0) { glVertexAttribPointer(a_uv, 2, GL_FLOAT, GL_FALSE, (GLsizei)elem, (void *)(6 * sizeof(float))); glEnableVertexAttribArray(a_uv); }
+    if (snow) {
+        glGenBuffers(1, &d->snow_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, d->snow_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->vcount * sizeof(float)), snow, GL_STATIC_DRAW);
+        GLint a_snow = glGetAttribLocation(prog, "aSnow");
+        if (a_snow >= 0) {
+            glVertexAttribPointer(a_snow, 1, GL_FLOAT, GL_FALSE, 0, NULL);
+            glEnableVertexAttribArray(a_snow);
+        }
+    }
     glGenBuffers(1, &d->ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, d->ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->index_count * sizeof(unsigned int)),
@@ -626,11 +673,46 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     p->u_specular = glGetUniformLocation(prog, "uSpecular");
 
     p->items = calloc((size_t)gm->count, sizeof *p->items);
-    p->count = gm->count;
+    p->count = 0;
+    p->radius = 0.0f;
+    // Per-vertex "открыто небу сверху": снег ляжет на крышу/капот/багажник,
+    // но не внутрь салона (под собственной крышей). Считается по всей модели.
+    const float **vp = malloc((size_t)gm->count * sizeof *vp);
+    int *vc = malloc((size_t)gm->count * sizeof *vc);
+    const unsigned **ip = malloc((size_t)gm->count * sizeof *ip);
+    int *ic = malloc((size_t)gm->count * sizeof *ic);
     for (int i = 0; i < gm->count; i++) {
-        DrawItem *bi = build_item(&gm->items[i], prog);
-        p->items[i] = *bi; free(bi);   // структура скопирована — обёртку освободить
+        vp[i] = gm->items[i].verts; vc[i] = gm->items[i].vcount;
+        ip[i] = gm->items[i].indices; ic[i] = gm->items[i].index_count;
     }
+    int snow_total = 0;
+    float *snow_mask = snow_mask_compute(vp, vc, ip, ic, gm->count, &snow_total);
+    free(vp); free(vc); free(ip); free(ic);
+    static int s_dump_glb = 1;
+    int snow_off = 0;
+    for (int i = 0; i < gm->count; i++) {
+        DrawItem *bi = build_item(&gm->items[i], prog, snow_mask ? snow_mask + snow_off : NULL);
+        snow_off += gm->items[i].vcount;
+        if (!bi) continue;                 // OOM-пропуск, p->items[i] остаётся нулевой
+        DrawItem *d = &p->items[p->count++];
+        *d = *bi; free(bi);                // структура скопирована — обёртку освободить
+        // огранич. сфера из геометрии бакета (вершины уже в мировых коорд. GLB)
+        float mn[3] = {1e30f,1e30f,1e30f}, mx[3] = {-1e30f,-1e30f,-1e30f};
+        for (int v = 0; v < gm->items[i].vcount; v++) {
+            float dx = gm->items[i].verts[3*v+0], dy = gm->items[i].verts[3*v+1],
+                  dz = gm->items[i].verts[3*v+2];
+            float r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 > p->radius) p->radius = r2;
+            if (dx<mn[0])mn[0]=dx; if(dy<mn[1])mn[1]=dy; if(dz<mn[2])mn[2]=dz;
+            if (dx>mx[0])mx[0]=dx; if(dy>mx[1])mx[1]=dy; if(dz>mx[2])mx[2]=dz;
+        }
+        if (s_dump_glb)
+            SDL_Log("glb bkt %d: nv=%d x[%.2f..%.2f] y[%.2f..%.2f] z[%.2f..%.2f]",
+                i, gm->items[i].vcount, mn[0],mx[0], mn[1],mx[1], mn[2],mx[2]);
+    }
+    if (s_dump_glb) s_dump_glb = 0;
+    free(snow_mask);
+    p->radius = sqrtf(p->radius) * p->scale;
     glb_model_free(gm);
 
     glUseProgram(prog);
@@ -642,21 +724,79 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     glUseProgram(0);
 
     float size[3] = {scale, scale, scale};
-    return node_new("GlbInstance", "GlbInstance3D", pos, size, p, NULL, glb_node_render);
+    SceneNode *n = node_new("GlbInstance", "GlbInstance3D", pos, size, p, NULL, glb_node_render);
+    // Масштаб — в трансформ узла: мировую матрицу собирает scene.c, поэтому
+    // модель можно вращать (n->rot) и цеплять к костям других моделей.
+    n->scl[0] = n->scl[1] = n->scl[2] = p->scale;
+    node_update_transforms(n);
+    return n;
+}
+
+// --- Тени: GLB-модели отбрасывают тень ----------------------------------------
+// Глубинный проход (mesh_shadow.vs/fs): позиция × мировая матрица узла ×
+// VP от солнца, alpha-test по текстуре багета (листья/травяные квады glTF
+// не затеняют всем квадом). Программа одна на все glb-узлы (модульный
+// статик, hot-reload через reshade-хук).
+static GLuint s_glb_shadow_prog = 0;
+static GLint s_glb_sh_model = -1, s_glb_sh_vp = -1, s_glb_sh_tex = -1,
+             s_glb_sh_at = -1;
+
+static void glb_shadow_prog_init(void)
+{
+    s_glb_sh_model = glGetUniformLocation(s_glb_shadow_prog, "uModel");
+    s_glb_sh_vp    = glGetUniformLocation(s_glb_shadow_prog, "uViewProj");
+    s_glb_sh_tex   = glGetUniformLocation(s_glb_shadow_prog, "uTex");
+    s_glb_sh_at    = glGetUniformLocation(s_glb_shadow_prog, "uAlphaTest");
+}
+
+static void glb_shadow_reshade(void)
+{
+    GLuint p = resources_program_replace(s_glb_shadow_prog,
+                                         "shaders/mesh_shadow.vs",
+                                         "shaders/mesh_shadow.fs");
+    if (p) s_glb_shadow_prog = p;
+    glb_shadow_prog_init();
 }
 
 void glb_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     GlbParams *p = n->params;
-    if (!p || p->rc->pass == RP_SHADOW) return;
+    if (!p) return;
+    if (p->rc->pass == RP_SHADOW) {
+        // Теневой проход: глубина модели с точки зрения солнца. Frustum не
+        // проверяем — отсечение по боксу каскада делает вызывающий код.
+        if (!s_glb_shadow_prog) {
+            s_glb_shadow_prog = resources_program_replace(
+                0, "shaders/mesh_shadow.vs", "shaders/mesh_shadow.fs");
+            glb_shadow_prog_init();
+            shader_on_reshade(glb_shadow_reshade);
+        }
+        glEnable(GL_DEPTH_TEST);
+        glUseProgram(s_glb_shadow_prog);
+        glUniformMatrix4fv(s_glb_sh_model, 1, GL_FALSE, n->world);
+        glUniformMatrix4fv(s_glb_sh_vp, 1, GL_FALSE, p->rc->shadow_vp);
+        glUniform1i(s_glb_sh_at, 1);
+        glActiveTexture(GL_TEXTURE0);
+        if (s_glb_sh_tex >= 0) glUniform1i(s_glb_sh_tex, 0);
+        for (int i = 0; i < p->count; i++) {
+            DrawItem *d = &p->items[i];
+            glBindTexture(GL_TEXTURE_2D, d->tex);
+            glBindVertexArray(d->vao);
+            glDrawElements(GL_TRIANGLES, d->index_count, d->index_type, NULL);
+        }
+        glBindVertexArray(0);
+        return;
+    }
+    if (!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13],
+                             n->world[14], p->radius))
+        return;
 
-    float model[16] = {
-        p->scale, 0, 0, 0,
-        0, p->scale, 0, 0,
-        0, 0, p->scale, 0,
-        n->pos[0], n->pos[1], n->pos[2], 1
-    };
+    // Модельная матрица = МИРОВАЯ матрица узла (scene.c): позиция, поворот,
+    // масштаб и — если узел прицеплен к костям/другому узлу — вся цепочка
+    // родителей. Раньше собиралась вручную из pos и скаляра scale, поэтому
+    // модель нельзя было ни повернуть, ни прицепить.
+    const float *model = n->world;
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, p->rc);
@@ -686,6 +826,7 @@ static void glb_free_resources(GlbParams *p)
             DrawItem *d = &p->items[i];
             if (d->vao) glDeleteVertexArrays(1, &d->vao);
             if (d->vbo) glDeleteBuffers(1, &d->vbo);
+            if (d->snow_vbo) glDeleteBuffers(1, &d->snow_vbo);
             if (d->ebo) glDeleteBuffers(1, &d->ebo);
             if (d->tex_owned) glDeleteTextures(1, &d->tex);
             else if (d->tex) resources_texture_release(d->tex);

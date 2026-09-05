@@ -105,6 +105,25 @@ static MapShadows s_shadows = {
     .size = 2048,
 };
 
+// Поверхности рельефа (surfaces = { ... }) — слои splat-карты.
+// Порядок фиксирован индексами SPLAT_*: dirt, sand, gravel, asphalt.
+static MapSurfaces s_surfaces = {
+    .tex = { "img/dirt.png", "img/sand.png", "img/gravel.png",
+             "img/asphalt.png" },
+    .scale = { 3.0f, 2.5f, 2.0f, 4.0f },
+    // На грунте трава редкая, на песке/щебне/асфальте её нет вовсе.
+    .grass = { 0.25f, 0.0f, 0.0f, 0.0f },
+    .resolution = 1.0f,      // 1 тексель splat-карты на метр
+    .slope_rock = 42.0f,     // круче 42° — камень проступает сам
+    .set = 0,
+};
+
+// Покраска поверхности (paints[]) и дороги (roads[])
+static MapPaint s_paints[MAP_MAX_PAINTS];
+static int s_paint_count;
+static MapRoad s_roads[MAP_MAX_ROADS];
+static int s_road_count;
+
 // Читает map.json через менеджер ресурсов (диск -> ../диск -> вшитые данные).
 // Возвращает malloc'нутый текст или NULL.
 static char *read_map_json(const char *path)
@@ -410,6 +429,176 @@ static int parse_light_type(const char *s)
     return -1;
 }
 
+// --- Поверхности рельефа: имя материала -> индекс слоя splat ------------------
+// Имена совпадают с ключами блока surfaces (dirt/sand/gravel/asphalt).
+// -1 — неизвестное имя (вызывающий ругается в лог и пропускает запись).
+static int parse_splat_material(const char *s)
+{
+    if (!s || !s[0]) return -1;
+    if (strcmp(s, "dirt") == 0 || strcmp(s, "soil") == 0)    return SPLAT_DIRT;
+    if (strcmp(s, "sand") == 0)                              return SPLAT_SAND;
+    if (strcmp(s, "gravel") == 0 || strcmp(s, "rock") == 0)   return SPLAT_GRAVEL;
+    if (strcmp(s, "asphalt") == 0 || strcmp(s, "road") == 0)  return SPLAT_ASPHALT;
+    return -1;
+}
+
+// Читает список точек [[x,z], ...] в out (не больше max). Возвращает сколько.
+static int parse_points2(const JsonNode *pts, float out[][2], int max)
+{
+    if (!pts) return 0;
+    int n = json_array_len(pts), k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        const JsonNode *p = json_array_get(pts, i);
+        if (!p || json_array_len(p) < 2) continue;
+        out[k][0] = (float)json_num(json_array_get(p, 0), 0);
+        out[k][1] = (float)json_num(json_array_get(p, 1), 0);
+        k++;
+    }
+    return k;
+}
+
+// Блок surfaces = { dirt: { tex, scale, grass }, ..., resolution, slope_rock }.
+// Каждый слой можно настроить отдельно; чего нет — остаётся дефолт.
+static void parse_surfaces(const JsonNode *obj)
+{
+    if (!obj) return;
+    static const char *const keys[SPLAT_LAYERS] = {
+        "dirt", "sand", "gravel", "asphalt"
+    };
+    for (int i = 0; i < SPLAT_LAYERS; i++) {
+        const JsonNode *L = json_find(obj, keys[i]);
+        if (!L) continue;
+        const char *tex = json_str(json_find(L, "tex"), "");
+        if (tex[0]) snprintf(s_surfaces.tex[i], sizeof s_surfaces.tex[i],
+                             "%s", tex);
+        s_surfaces.scale[i] = (float)json_num(json_find(L, "scale"),
+                                              s_surfaces.scale[i]);
+        s_surfaces.grass[i] = (float)json_num(json_find(L, "grass"),
+                                              s_surfaces.grass[i]);
+    }
+    s_surfaces.resolution = (float)json_num(json_find(obj, "resolution"),
+                                            s_surfaces.resolution);
+    s_surfaces.slope_rock = (float)json_num(json_find(obj, "slope_rock"),
+                                            s_surfaces.slope_rock);
+    s_surfaces.set = 1;
+}
+
+// Элемент paints[]: { material, shape, ... }. shape по умолчанию выводится
+// из заданных полей (есть points -> path, есть size -> rect, иначе circle).
+static void parse_paint(const JsonNode *obj)
+{
+    if (s_paint_count >= MAP_MAX_PAINTS) return;
+    MapPaint *p = &s_paints[s_paint_count];
+    memset(p, 0, sizeof *p);
+    const char *mat = json_str(json_find(obj, "material"), "");
+    int m = parse_splat_material(mat);
+    if (m < 0) {
+        SDL_Log("Map: paint with unknown material '%s', skipped", mat);
+        return;
+    }
+    p->material = m;
+    const JsonNode *pos = json_find(obj, "pos");
+    if (pos && json_array_len(pos) >= 2) {
+        p->pos[0] = (float)json_num(json_array_get(pos, 0), 0);
+        p->pos[1] = (float)json_num(json_array_get(pos, 1), 0);
+    }
+    const JsonNode *sz = json_find(obj, "size");
+    if (sz && json_array_len(sz) >= 2) {
+        p->size[0] = (float)json_num(json_array_get(sz, 0), 0);
+        p->size[1] = (float)json_num(json_array_get(sz, 1), 0);
+    }
+    p->radius = (float)json_num(json_find(obj, "radius"), 0.0f);
+    p->width = (float)json_num(json_find(obj, "width"), 4.0f);
+    p->point_n = parse_points2(json_find(obj, "points"), p->points,
+                               MAP_PAINT_MAX_POINTS);
+    const char *shape = json_str(json_find(obj, "shape"), "");
+    if (strcmp(shape, "circle") == 0)     p->shape = PAINT_CIRCLE;
+    else if (strcmp(shape, "rect") == 0)  p->shape = PAINT_RECT;
+    else if (strcmp(shape, "path") == 0)  p->shape = PAINT_PATH;
+    else if (p->point_n >= 2)             p->shape = PAINT_PATH;
+    else if (p->size[0] > 0.01f)          p->shape = PAINT_RECT;
+    else                                  p->shape = PAINT_CIRCLE;
+    if (p->shape == PAINT_PATH && p->point_n < 2) {
+        SDL_Log("Map: paint path needs >= 2 points, skipped");
+        return;
+    }
+    if (p->shape == PAINT_CIRCLE && p->radius <= 0.01f) p->radius = 8.0f;
+    p->edge = (float)json_num(json_find(obj, "edge"), 2.0f);
+    p->strength = (float)json_num(json_find(obj, "strength"), 1.0f);
+    s_paint_count++;
+}
+
+// Элемент roads[]: осевая линия + пресет по типу. Пресеты подобраны так,
+// чтобы «дорога из коробки» выглядела правильно: асфальт ровный с щебневой
+// обочиной, грунтовка с колеями, тропинка узкая и почти не режет рельеф.
+static void parse_road(const JsonNode *obj)
+{
+    if (s_road_count >= MAP_MAX_ROADS) return;
+    MapRoad *r = &s_roads[s_road_count];
+    memset(r, 0, sizeof *r);
+    snprintf(r->name, sizeof r->name, "%s",
+             json_str(json_find(obj, "name"), ""));
+    const char *type = json_str(json_find(obj, "type"), "dirt");
+    if (strcmp(type, "auto") == 0 || strcmp(type, "asphalt") == 0)
+        r->type = ROAD_AUTO;
+    else if (strcmp(type, "dirt") == 0 || strcmp(type, "ground") == 0)
+        r->type = ROAD_DIRT;
+    else if (strcmp(type, "gravel") == 0)
+        r->type = ROAD_GRAVEL;
+    else if (strcmp(type, "path") == 0 || strcmp(type, "trail") == 0)
+        r->type = ROAD_PATH;
+    else {
+        SDL_Log("Map: unknown road type '%s', skipped", type);
+        return;
+    }
+    switch (r->type) {
+    case ROAD_AUTO:
+        r->material = SPLAT_ASPHALT;  r->shoulder_material = SPLAT_GRAVEL;
+        r->width = 7.0f;  r->shoulder = 1.6f;  r->edge = 0.5f;
+        r->flatten = 1.0f;  r->flatten_extra = 6.0f;  r->ruts = 0.0f;
+        break;
+    case ROAD_GRAVEL:
+        r->material = SPLAT_GRAVEL;   r->shoulder_material = SPLAT_DIRT;
+        r->width = 5.0f;  r->shoulder = 1.2f;  r->edge = 0.9f;
+        r->flatten = 0.85f;  r->flatten_extra = 4.0f;  r->ruts = 0.25f;
+        break;
+    case ROAD_DIRT:
+        r->material = SPLAT_DIRT;     r->shoulder_material = SPLAT_DIRT;
+        r->width = 4.0f;  r->shoulder = 1.0f;  r->edge = 1.2f;
+        r->flatten = 0.65f;  r->flatten_extra = 3.0f;  r->ruts = 0.6f;
+        break;
+    case ROAD_PATH:
+        r->material = SPLAT_DIRT;     r->shoulder_material = SPLAT_DIRT;
+        r->width = 1.3f;  r->shoulder = 0.4f;  r->edge = 0.6f;
+        r->flatten = 0.30f;  r->flatten_extra = 1.5f;  r->ruts = 0.15f;
+        break;
+    }
+    r->veg_clear = 1;
+    // Переопределения из JSON (любое поле пресета)
+    const char *mat = json_str(json_find(obj, "material"), "");
+    int m = parse_splat_material(mat);
+    if (m >= 0) r->material = m;
+    const char *smat = json_str(json_find(obj, "shoulder_material"), "");
+    int sm = parse_splat_material(smat);
+    if (sm >= 0) r->shoulder_material = sm;
+    r->width = (float)json_num(json_find(obj, "width"), r->width);
+    r->shoulder = (float)json_num(json_find(obj, "shoulder"), r->shoulder);
+    r->edge = (float)json_num(json_find(obj, "edge"), r->edge);
+    r->flatten = (float)json_num(json_find(obj, "flatten"), r->flatten);
+    r->flatten_extra = (float)json_num(json_find(obj, "flatten_extra"),
+                                        r->flatten_extra);
+    r->ruts = (float)json_num(json_find(obj, "ruts"), r->ruts);
+    r->veg_clear = json_bool(json_find(obj, "veg_clear"), r->veg_clear);
+    r->point_n = parse_points2(json_find(obj, "points"), r->points,
+                               MAP_ROAD_MAX_POINTS);
+    if (r->point_n < 2) {
+        SDL_Log("Map: road '%s' needs at least 2 points, skipped",
+                r->name[0] ? r->name : "?");
+        return;
+    }
+    s_road_count++;
+}
+
 static void parse_light(const JsonNode *obj)
 {
     if (s_light_count >= MAP_MAX_LIGHTS) return;
@@ -700,6 +889,25 @@ int mapdata_load(const char *path)
     if (shd)
         s_shadows.size = (int)json_num(json_find(shd, "size"), s_shadows.size);
 
+    // --- Поверхности рельефа: surfaces = { ... } -----------------------------
+    parse_surfaces(json_find(root, "surfaces"));
+
+    // --- Покраска поверхности: paints[] --------------------------------------
+    s_paint_count = 0;
+    const JsonNode *pnt = json_find(root, "paints");
+    if (pnt) {
+        int n = json_array_len(pnt);
+        for (int i = 0; i < n; i++) parse_paint(json_array_get(pnt, i));
+    }
+
+    // --- Дороги: roads[] -----------------------------------------------------
+    s_road_count = 0;
+    const JsonNode *rds = json_find(root, "roads");
+    if (rds) {
+        int n = json_array_len(rds);
+        for (int i = 0; i < n; i++) parse_road(json_array_get(rds, i));
+    }
+
     // --- Информация о карте: info = { name, author, description } --------------
     memset(&s_info, 0, sizeof s_info);
     const JsonNode *inf = json_find(root, "info");
@@ -829,6 +1037,10 @@ int mapdata_load(const char *path)
         SDL_Log("Map data: %d command(s) from map", s_command_count);
     if (s_cvar_count)
         SDL_Log("Map data: %d cvar(s) from map", s_cvar_count);
+    if (s_paint_count || s_road_count || s_surfaces.set)
+        SDL_Log("Map data: surfaces %s, %d paint(s), %d road(s)",
+                s_surfaces.set ? "custom" : "default",
+                s_paint_count, s_road_count);
     return 0;
 }
 
@@ -884,6 +1096,21 @@ void mapdata_veg(MapVeg *v)         { if (v) *v = s_veg; }
 void mapdata_sky(MapSky *s)         { if (s) *s = s_sky; }
 void mapdata_bloom(MapBloom *b)     { if (b) *b = s_bloom; }
 void mapdata_shadows(MapShadows *s) { if (s) *s = s_shadows; }
+void mapdata_surfaces(MapSurfaces *s) { if (s) *s = s_surfaces; }
+
+int mapdata_paint_count(void) { return s_paint_count; }
+
+const MapPaint *mapdata_paint(int i)
+{
+    return (i >= 0 && i < s_paint_count) ? &s_paints[i] : NULL;
+}
+
+int mapdata_road_count(void) { return s_road_count; }
+
+const MapRoad *mapdata_road(int i)
+{
+    return (i >= 0 && i < s_road_count) ? &s_roads[i] : NULL;
+}
 
 int mapdata_object_count(void)
 {
@@ -1029,4 +1256,6 @@ void mapdata_free(void)
     s_trigger_count = 0;
     s_fauna_count = 0;
     s_water_count = 0;
+    s_paint_count = 0;
+    s_road_count = 0;
 }

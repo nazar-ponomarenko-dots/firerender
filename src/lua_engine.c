@@ -199,12 +199,14 @@ static LuaCls *lua_cls_find(const char *name)
     return NULL;
 }
 
-// Вызывает Lua-колбэк класса с (entity, dt)
+// Вызывает Lua-колбэк класса с (entity, dt). Сущность передаётся ХЕНДЛОМ
+// (int), не указателем — так Lua не держит сырой Entity* и не может случайно
+// обратиться к убитой сущности. При вызове колбэка сущность заведомо жива.
 static void lua_cls_call(int ref, Entity *e, float dt)
 {
     if (ref == LUA_NOREF) return;
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
-    lua_pushlightuserdata(L, e);
+    lua_pushnumber(L, entity_handle(e));
     lua_pushnumber(L, dt);
     if (lua_pcall(L, 2, 0, 0) != 0) {
         lua_engine_print(lua_tostring(L, -1));
@@ -267,7 +269,14 @@ static int l_entity_class(lua_State *ls)
     return 0;
 }
 
-// engine.entity_spawn("класс", x, y, z) -> Entity (lightuserdata)
+// Сущность из аргумента-хендла (int) или NULL. Против висячих ссылок:
+// entity_get проверяет серию слота и вернёт NULL, если сущность убита.
+static Entity *lua_ent_get(lua_State *ls, int idx)
+{
+    return entity_get((int)luaL_optinteger(ls, idx, 0));
+}
+
+// engine.entity_spawn("класс", x, y, z) -> int (хендл) или nil
 static int l_entity_spawn(lua_State *ls)
 {
     const char *cls = luaL_checkstring(ls, 1);
@@ -275,33 +284,34 @@ static int l_entity_spawn(lua_State *ls)
                      (float)luaL_optnumber(ls,3,0),
                      (float)luaL_optnumber(ls,4,0) };
     Entity *e = entity_spawn(cls, pos, NULL, NULL);
-    lua_pushlightuserdata(ls, e);
+    if (e) lua_pushnumber(ls, entity_handle(e));
+    else lua_pushnil(ls);
     return 1;
 }
 
 // engine.entity_kill(entity)
 static int l_entity_kill(lua_State *ls)
 {
-    Entity *e = lua_touserdata(ls, 1);
+    Entity *e = lua_ent_get(ls, 1);
     if (e) entity_kill(e);
     return 0;
 }
 
-// engine.entity_find("класс", n) -> Entity (n-я с нуля) или nil
+// engine.entity_find("класс", n) -> int (хендл) или nil
 static int l_entity_find(lua_State *ls)
 {
     const char *cls = luaL_checkstring(ls, 1);
     int n = (int)luaL_optinteger(ls, 2, 0);
     Entity *e = entity_find_class(cls, n);
-    if (e) lua_pushlightuserdata(ls, e);
+    if (e) lua_pushnumber(ls, entity_handle(e));
     else lua_pushnil(ls);
     return 1;
 }
 
-// engine.entity_pos(e) -> x, y, z (позиция узла сущности)
+// engine.entity_pos(e) -> x, y, z (позиция узла сущности); мёртвая — нули
 static int l_entity_pos(lua_State *ls)
 {
-    Entity *e = lua_touserdata(ls, 1);
+    Entity *e = lua_ent_get(ls, 1);
     float x = 0, y = 0, z = 0;
     if (e && e->node) {
         x = e->node->pos[0]; y = e->node->pos[1]; z = e->node->pos[2];
@@ -315,7 +325,7 @@ static int l_entity_pos(lua_State *ls)
 // engine.entity_set_pos(e, x, y, z)
 static int l_entity_set_pos(lua_State *ls)
 {
-    Entity *e = lua_touserdata(ls, 1);
+    Entity *e = lua_ent_get(ls, 1);
     if (e && e->node) {
         e->node->pos[0] = (float)luaL_optnumber(ls, 2, 0);
         e->node->pos[1] = (float)luaL_optnumber(ls, 3, 0);
@@ -327,7 +337,7 @@ static int l_entity_set_pos(lua_State *ls)
 // engine.entity_classname(e) -> строка
 static int l_entity_classname(lua_State *ls)
 {
-    Entity *e = lua_touserdata(ls, 1);
+    Entity *e = lua_ent_get(ls, 1);
     lua_pushstring(ls, (e && e->classname) ? e->classname : "");
     return 1;
 }
@@ -700,17 +710,30 @@ static int l_after(lua_State *ls)
 
 static void lua_timers_tick(float dt)
 {
-    for (int i = 0; i < s_timers_n; ) {
+    int end = s_timers_n;
+    int kept = 0;
+    for (int i = 0; i < end; i++) {
         s_timers[i].remaining -= dt;
-        if (s_timers[i].remaining > 0.0f) { i++; continue; }
+        if (s_timers[i].remaining > 0.0f) {
+            // Уплотнение со сдвигом (не swap-with-last): таймеры, добавленные
+            // колбэком в ЭТОТ тик, не должны подставляться на место i.
+            if (kept != i) s_timers[kept] = s_timers[i];
+            kept++;
+            continue;
+        }
         lua_rawgeti(L, LUA_REGISTRYINDEX, s_timers[i].ref);
         if (lua_pcall(L, 0, 0, 0) != 0) {
             lua_engine_print(lua_tostring(L, -1));
             lua_pop(L, 1);
         }
         luaL_unref(L, LUA_REGISTRYINDEX, s_timers[i].ref);
-        s_timers[i] = s_timers[--s_timers_n];   // порядок не важен
     }
+    // Хвост [end, s_timers_n) — таймеры, добавленные во время тика:
+    // сдвигаем их на уплотнённые места, ждут следующего тика.
+    int tail = s_timers_n - end;
+    if (tail > 0 && kept != end)
+        memmove(&s_timers[kept], &s_timers[end], (size_t)tail * sizeof s_timers[0]);
+    s_timers_n = kept + tail;
 }
 
 // --- engine.update: список per-frame колбэков (движок + карта) ------------------
@@ -739,7 +762,9 @@ void lua_engine_update(float dt)
 {
     if (!L) return;
     lua_timers_tick(dt);
-    for (int i = 0; i < s_update_n; i++) {
+    // Снимок конца: колбэки, добавленные во время обновления, вызовутся со след. кадра
+    int end = s_update_n;
+    for (int i = 0; i < end; i++) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, s_update_refs[i]);
         lua_pushnumber(L, dt);
         if (lua_pcall(L, 1, 0, 0) != 0) {
