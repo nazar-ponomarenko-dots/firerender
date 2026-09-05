@@ -197,18 +197,10 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'w')) fx_force_wetness(1.0f);
     // D — демо-полёт (headless-скриншоты красивой точки обзора, FR_TEST=SD)
     if (strchr(fr_test, 'D')) game_demo_toggle(g);
-    // g — glb-модель (машина) рядом с игроком: тест теней моделей (FR_TEST=Sg)
+    // g — glb-машина в 6 м перед камерой НА ЗЕМЛЕ (тест автопостановки
+    // cmd_glb без координат и теней моделей): FR_TEST=Sg
     if (strchr(fr_test, 'g')) {
-        const float *cp = g->cam->cam.pos;
-        float fwd[3], right[3];
-        camera_dirs(&g->cam->cam, fwd, right);
-        float gx = cp[0] + fwd[0] * 7.0f + right[0] * 1.5f;
-        float gz = cp[2] + fwd[2] * 7.0f + right[2] * 1.5f;
-        float gy = sample_height(&g->world, gx, gz) + 0.4f;
-        char args[256];
-        snprintf(args, sizeof args, "models/vaz-2105.glb %.2f %.2f %.2f 1",
-                 gx, gy, gz);
-        cmd_glb(args);
+        cmd_glb("models/vaz-2105.glb");
     }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };

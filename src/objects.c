@@ -502,10 +502,12 @@ void objects_node_render(SceneNode *n, float dt)
         float sdx = ll > 0.001f ? ld[0] / ll : 0.0f;   // горизонталь к солнцу
         float sdz = ll > 0.001f ? ld[2] / ll : 0.0f;
         const float col[4] = { 0.05f, 0.05f, 0.06f, 0.5f };
-        glDisable(GL_BLEND);
+        // БЕЗ записи глубины: пятна полупрозрачные, а запись глубины
+        // отсекала биллборды, нарисованные позже ЗА пятном (дырки в траве
+        // вокруг теней деревьев). Блендинг поверх рельефа, глубина читается.
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_TRUE);
+        glDepthMask(GL_FALSE);
         glUseProgram(p->blob_prog);
         glUniformMatrix4fv(p->b_viewproj, 1, GL_FALSE, p->rc->viewproj);
         glUniform4f(p->b_color, col[0], col[1], col[2], col[3]);
@@ -525,6 +527,7 @@ void objects_node_render(SceneNode *n, float dt)
             glUniform3f(p->b_objfwd, 0.0f, 0.0f, 1.0f);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
         }
+        glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
         glUseProgram(0);
     }

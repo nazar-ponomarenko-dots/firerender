@@ -96,7 +96,7 @@ SceneNode *sky_make_node(const RendererContext *rc)
     // img/noise.png — белое зерно, облака из него получились бы в спеклу.
     p->noise_tex  = resources_texture("img/cloud_noise.png", 3, GL_REPEAT, 1);
     // Покрытие облаков — cvar (меню/консоль), применяется каждый кадр
-    cvar_register_ex("r_clouds", 0.45f, 0.0f, 1.0f, CVAR_ARCHIVE,
+    cvar_register_ex("r_clouds", 0.25f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "процедурные облака: покрытие 0..1");
 
     glUseProgram(prog);
