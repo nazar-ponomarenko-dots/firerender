@@ -53,6 +53,20 @@ typedef struct { long byteOffset, byteLength; int byteStride; } GB;
 
 static void m4id(float m[16]){ memset(m,0,16*sizeof(float)); m[0]=m[5]=m[10]=m[15]=1; }
 
+// Какой набор TEXCOORD использует baseColorTexture материала (0 по умолчанию).
+// glTF разрешает до двух развёрток на примитив: лица/глаза персонажей часто
+// живут в TEXCOORD_1 — читать всегда только нулевой набор = сломанные текстуры.
+static int base_uv_set(const JsonNode*mt_a,const JsonNode*tx_a,int mat){
+    if(mat<0||!mt_a||mt_a->type!=JSON_ARRAY)return 0;
+    const JsonNode*m=json_array_get(mt_a,mat);
+    const JsonNode*pbr=m?json_find(m,"pbrMetallicRoughness"):NULL;
+    const JsonNode*tex=pbr?json_find(pbr,"baseColorTexture"):NULL;
+    int ti=(int)json_num(tex,-1);
+    if(ti<0||!tx_a||tx_a->type!=JSON_ARRAY)return 0;
+    const JsonNode*t=json_array_get(tx_a,ti);
+    return (int)json_num(t?json_find(t,"texCoord"):NULL,0);
+}
+
 // --- Тени скиннед-моделей -----------------------------------------------------
 // Глубинный проход (skinned_shadow.vs + mesh_shadow.fs): та же кожа, что в
 // цветном проходе — модель отбрасывает тень В ПОЗЕ ТЕКУЩЕГО КАДРА. Программа
@@ -256,11 +270,17 @@ AnimGlb *glb_anim_parse(const char *path)
             const JsonNode*attrs=json_find(pr,"attributes");
             int ipos=(int)json_num(attrs?json_find(attrs,"POSITION"):NULL,-1);
             int inrm=(int)json_num(attrs?json_find(attrs,"NORMAL"):NULL,-1);
-            int iuv=(int)json_num(attrs?json_find(attrs,"TEXCOORD_0"):NULL,-1);
+            // UV-набор — тот, на который ссылается baseColorTexture материала
+            // (глTF позволяет до 2 развёрток: у модели лица лица/глаза могут
+            // жить в TEXCOORD_1). Фолбэк — TEXCOORD_0.
+            int mat_idx=(int)json_num(json_find(pr,"material"),-1);
+            int uvset=base_uv_set(mt_a,tx_a,mat_idx);
+            char uvkey[24]; snprintf(uvkey,sizeof uvkey,"TEXCOORD_%d",uvset);
+            int iuv=(int)json_num(attrs?json_find(attrs,uvkey):NULL,-1);
+            if(iuv<0) iuv=(int)json_num(attrs?json_find(attrs,"TEXCOORD_0"):NULL,-1);
             int ijo=(int)json_num(attrs?json_find(attrs,"JOINTS_0"):NULL,-1);
             int iwe=(int)json_num(attrs?json_find(attrs,"WEIGHTS_0"):NULL,-1);
             int iidx=(int)json_num(json_find(pr,"indices"),-1);
-            int mat_idx=(int)json_num(json_find(pr,"material"),-1);
             if(ipos<0||ipos>=acc_n)continue;
             GA*ap=&accs[ipos];
             // Защита от OOB: акцессор обязан укладываться в bin-чанк файла.
