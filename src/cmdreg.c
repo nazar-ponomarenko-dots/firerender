@@ -100,6 +100,7 @@ static const ConCmdDesc s_cmds[] = {
     { "phys_rope",     "phys_rope [звеньев] — верёвка (Verlet-физика)", cmd_phys_rope },
     { "phys_push",     "phys_push [сила] — толкнуть конец верёвки",   cmd_phys_push },
     { "phys_clear",    "phys_clear — убрать физический мир",          cmd_phys_clear },
+    { "phys_ragdoll",  "phys_ragdoll [hang] [kick] — рэгдолл на аним-модели", cmd_phys_ragdoll },
     { "glb",           "glb <glb> [x y z] [scale] — меш (.glb), скиннинг если есть", cmd_glb },
     { "glbanim",       "glbanim <glb> [x y z] [scale] — анимир. меш (skinning)", cmd_glbanim },
     { "glbclips",      "glbclips [имя-узла] — список клипов анимации", cmd_glbclips },

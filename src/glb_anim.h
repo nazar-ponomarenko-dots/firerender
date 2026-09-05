@@ -80,6 +80,7 @@ typedef struct {
     float tile[2]; float specular;
     unsigned char *img; int iw, ih;
     int wrap, filter;
+    char matname[64];              // имя материала (фильтр GROUND в рэгдолле)
 } AnimPrim;
 
 // Экземпляр (node, prim): каждый узел с мешем создаёт по draw-примитиву.
@@ -112,6 +113,19 @@ SceneNode *glb_anim_make_node(const char *path, const float pos[3], float scale,
 // Есть ли в модели скин+анимация (для команд, чтобы выбрать путь загрузки)?
 // Быстрый peek в заголовок JSON, без полного парсинга.
 int glb_anim_has_anim(const char *path);
+
+// --- Рэгдолл (Verlet): частицы = кости скелета -----------------------------------
+// Включает физику на анимированной модели: кости становятся частицами,
+// анимация вытесняется физикой (кость = кратчайший доворот за частицей).
+// hang=1 — точка origin прибита (модель висит и обвисает), 0 — падает.
+// 0 — успех. Шаг физики всех рэгдоллов — glb_anim_ragdoll_step_all из
+// фикс-тика (main.c), ДО обновления сцены.
+int glb_anim_ragdoll_enable(SceneNode *n, int hang);
+void glb_anim_ragdoll_step_all(float dt);
+void glb_anim_ragdoll_kick(SceneNode *n, const float vel[3]); // толчок всех частиц
+void glb_anim_ragdoll_disable(SceneNode *n);
+// Отладка: мировые позиции частиц всех рэгдоллов (для рендера точками).
+int glb_anim_ragdoll_debug_particles(float *out_xyz, int max_parts);
 
 // --- Клипы анимации (в GLB может быть несколько) --------------------------------
 int glb_anim_clip_count(SceneNode *n);            // сколько клипов у узла

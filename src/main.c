@@ -52,6 +52,7 @@
 #include "sun.h"             // (SunParams*)g->sun_node->params
 #include "material.h"        // материал: реестр по имени
 #include "physics.h"         // мини-физика (Verlet): шаг в фикс-тике
+#include "glb_anim.h"        // рэгдолл: шаг физики скелетов
 
 #include <stdio.h>           // printf (FPS)
 #include <stdlib.h>          // getenv
@@ -219,6 +220,20 @@ static int fr_test_apply(Game *g)
     }
     // R — Verlet-верёвка перед камерой (тест мини-физики): FR_TEST=SR
     if (strchr(fr_test, 'R')) cmd_phys_rope("16");
+    // H — женщина + рэгдолл с толчком (тест физики скелета): FR_TEST=SH
+    if (strchr(fr_test, 'H')) {
+        const float *cp = g->cam->cam.pos;
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        char args[300];
+        snprintf(args, sizeof args,
+                 "models/handpaint_-_girl_01.glb %.2f 0 %.2f 1",
+                 cp[0] + fwd[0] * 5.0f, cp[2] + fwd[2] * 5.0f);
+        cmd_glbanim(args);
+        g->cam->cam.pitch = -0.25f;
+        camera_sync_look(&g->cam->cam);
+        cmd_phys_ragdoll("0 0");   // без толчка: обмякнуть и упасть
+    }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);
@@ -415,6 +430,7 @@ int main(int argc, char *argv[])
                 game_update(&game, step);   // мир: узлы, триггеры/use, туман
                 physics_set_ground(phys_ground);
                 physics_step(physics_world(), step);   // мини-физика (Verlet)
+                glb_anim_ragdoll_step_all(step);       // рэгдоллы аним-моделей
                 audio_update();             // фоновые петли и 3D-источники
                 lua_engine_update(step);    // per-frame колбэк скрипта
                 s_sim_acc -= step;
@@ -439,9 +455,13 @@ int main(int argc, char *argv[])
         // headless-проверка картинки + стабильный прогрев для профайлера
         // (SDL_VIDEODRIVER=offscreen FR_TEST=S).
         if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'S')) {
-            static int s_frames = 0;
-            if (++s_frames == 450) cmd_screenshot(NULL);
-            if (s_frames >= 480) running = false;
+            static int s_frames = 0, s_shot_at = -1;
+            if (s_shot_at < 0) {
+                const char *fs = getenv("FR_SHOT");
+                s_shot_at = fs ? atoi(fs) : 450;   // кадр скриншота настраивается
+            }
+            if (++s_frames == s_shot_at) cmd_screenshot(NULL);
+            if (s_frames >= s_shot_at + 30) running = false;
         }
 
         // Меню (главное/пауза/настройки) — поверх замороженной сцены

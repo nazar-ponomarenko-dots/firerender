@@ -26,6 +26,7 @@
 #include "sky.h"
 #include "ssr.h"
 #include "physics.h"
+#include "glb_anim.h"       // отладка частиц рэгдолла
 #include "terrain.h"
 #include "voxfog.h"
 #include "water.h"
@@ -862,7 +863,9 @@ void renderer_end(Game *g, float dt)
     // точками. Приближается к рэгдоллу: потом вместо точек будут кости.
     {
         PhysWorld *w = physics_world();
-        if (w->np > 0 && g->world_loaded) {
+        float dbg[512 * 3];
+        int ndbg = glb_anim_ragdoll_debug_particles(dbg, 512);
+        if ((w->np > 0 || ndbg > 0) && g->world_loaded) {
             const float *vp = s_rc.viewproj;
             gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
             gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
@@ -884,6 +887,21 @@ void renderer_end(Game *g, float dt)
                     col[0] = 1.0f; col[1] = 0.6f; col[2] = 0.2f;   // прибитая
                 }
                 hud_rect_draw(s_vw, s_vh, sx - 3.0f, sy - 3.0f, 6.0f, 6.0f, col);
+            }
+            // Частицы рэгдоллов — жёлтые
+            for (int i = 0; i < ndbg; i++) {
+                const float *p = &dbg[i * 3];
+                float clip[4] = {
+                    vp[0]*p[0] + vp[4]*p[1] + vp[8]*p[2]  + vp[12],
+                    vp[1]*p[0] + vp[5]*p[1] + vp[9]*p[2]  + vp[13],
+                    vp[2]*p[0] + vp[6]*p[1] + vp[10]*p[2] + vp[14],
+                    vp[3]*p[0] + vp[7]*p[1] + vp[11]*p[2] + vp[15],
+                };
+                if (clip[3] <= 0.01f) continue;
+                float sx = (clip[0] / clip[3] * 0.5f + 0.5f) * (float)s_vw;
+                float sy = (0.5f - clip[1] / clip[3] * 0.5f) * (float)s_vh;
+                const float col[4] = { 1.0f, 0.9f, 0.2f, 0.9f };
+                hud_rect_draw(s_vw, s_vh, sx - 2.0f, sy - 2.0f, 4.0f, 4.0f, col);
             }
         }
     }

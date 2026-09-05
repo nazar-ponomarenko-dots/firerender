@@ -72,10 +72,13 @@ void physics_impulse(PhysWorld *w, int idx, const float vel[3])
     if (idx < 0 || idx >= w->np) return;
     PhysPart *p = &w->part[idx];
     if (p->inv_mass <= 0.0f) return;
-    // Верле: скорость = pos - prev, поэтому импульс = сдвиг prev назад
-    p->prev[0] -= vel[0];
-    p->prev[1] -= vel[1];
-    p->prev[2] -= vel[2];
+    // Верле: скорость = pos - prev (СМЕЩЕНИЕ ЗА ШАГ). Импульс задан в м/с —
+    // переводим в смещение за шаг: dprev = vel * dt. Без этого толчок 6 м/с
+    // превращался в 6 м/ШАГ = 600 м/с, и модель улетала в стратосферу.
+    float s = w->dt > 1e-6f ? w->dt : (1.0f / 100.0f);
+    p->prev[0] -= vel[0] * s;
+    p->prev[1] -= vel[1] * s;
+    p->prev[2] -= vel[2] * s;
 }
 
 // Релаксация одной связи: частицы съезжаются/разъезжаются к длине покоя,
@@ -103,6 +106,7 @@ static void link_relax(PhysWorld *w, const PhysLink *l)
 void physics_step(PhysWorld *w, float dt)
 {
     if (w->np <= 0) return;
+    w->dt = dt;
     float g = w->gravity * dt * dt;
 
     // 1) Интеграция Верле: pos += (pos - prev) * (1 - damping) + g

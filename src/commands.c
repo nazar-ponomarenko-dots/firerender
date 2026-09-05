@@ -690,6 +690,33 @@ void cmd_phys_clear(const char *args)
     console_print("phys: очищено");
 }
 
+// phys_ragdoll [hang] [kick] — рэгдолл на последней анимированной модели:
+// кости становятся Verlet-частицами, анимация вытесняется физикой.
+// hang=1 (по умолчанию) — origin прибит, модель обвисает в воздухе;
+// kick — импульс всем частицам (м/с) — толчок, модель падает.
+void cmd_phys_ragdoll(const char *args)
+{
+    int hang = 1, kick = 0;
+    sscanf(args, "%d %d", &hang, &kick);
+    if (!s_last_anim) {
+        console_print("phys_ragdoll: нет аним-модели (сначала glbanim ...)");
+        return;
+    }
+    if (glb_anim_ragdoll_enable(s_last_anim, hang) != 0) {
+        console_print("phys_ragdoll: не удалось (слишком много костей?)");
+        return;
+    }
+    Game *g = game_instance();
+    if (kick > 0 && g && g->cam) {
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        float vel[3] = { fwd[0] * kick, kick * 0.4f, fwd[2] * kick };
+        glb_anim_ragdoll_kick(s_last_anim, vel);
+    }
+    console_print("phys_ragdoll: включён (%s%s)", hang ? "висит" : "падает",
+                  kick > 0 ? " + толчок" : "");
+}
+
 // Список клипов анимации узла: glbclips [имя-узла]
 void cmd_glbclips(const char *args)
 {

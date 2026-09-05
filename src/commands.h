@@ -58,6 +58,8 @@ void cmd_glbanim(const char *args);
 void cmd_phys_rope(const char *args);
 void cmd_phys_push(const char *args);
 void cmd_phys_clear(const char *args);
+// Рэгдолл на последней анимированной модели: phys_ragdoll [hang] [kick]
+void cmd_phys_ragdoll(const char *args);
 // Список клипов анимации анимик-узла: glbclips [имя-узла]
 void cmd_glbclips(const char *args);
 // Переключить клип: glbclip <индекс|имя> [имя-узла]
