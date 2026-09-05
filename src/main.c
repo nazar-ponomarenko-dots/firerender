@@ -202,6 +202,11 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'g')) {
         cmd_glb("models/vaz-2105.glb");
     }
+    // l — анимированная модель в 4 м перед камерой (тест автопостановки
+    // glbanim и теней скиннинга): FR_TEST=Sl
+    if (strchr(fr_test, 'l')) {
+        cmd_glbanim("models/handpaint_-_girl_01.glb");
+    }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);

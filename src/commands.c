@@ -608,6 +608,19 @@ void cmd_glbanim(const char *args)
     float x = 0, y = 0, z = 0, scale = 1.0f;
     int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
     if (n < 1) { console_print("usage: glbanim <glb> [x y z] [scale]"); return; }
+    // Автопостановка НА ЗЕМЛЮ — как у cmd_glb: без координат — в 6 м
+    // впереди игрока по взгляду, при y <= 0 — высота рельефа в точке XZ.
+    if (n < 4 && g->cam) {
+        const float *cp = g->cam->cam.pos;
+        float fwd[3] = { 0, 0, 1 };
+        camera_dirs(&g->cam->cam, fwd, NULL);
+        float d = (n >= 2) ? x : 6.0f;
+        x = cp[0] + fwd[0] * d;
+        z = cp[2] + fwd[2] * d;
+        y = sample_height(&g->world, x, z) + 0.3f;
+    } else if (y <= 0.0f) {
+        y = sample_height(&g->world, x, z) + 0.3f;
+    }
     float pos[3] = { x, y, z };
     SceneNode *nd = glb_anim_make_node(path, pos, scale, renderer_context());
     if (!nd) { console_print("glbanim: не удалось загрузить %s", path); return; }
