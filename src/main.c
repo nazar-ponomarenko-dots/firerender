@@ -51,6 +51,7 @@
 #include "terrain.h"         // sync_cvars: terrain_shadows_bake
 #include "sun.h"             // (SunParams*)g->sun_node->params
 #include "material.h"        // материал: реестр по имени
+#include "physics.h"         // мини-физика (Verlet): шаг в фикс-тике
 
 #include <stdio.h>           // printf (FPS)
 #include <stdlib.h>          // getenv
@@ -216,6 +217,8 @@ static int fr_test_apply(Game *g)
         g->cam->cam.pitch = -0.26f;      // вниз — лицо крупным планом
         camera_sync_look(&g->cam->cam);
     }
+    // R — Verlet-верёвка перед камерой (тест мини-физики): FR_TEST=SR
+    if (strchr(fr_test, 'R')) cmd_phys_rope("16");
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
         fx_weather_start("snow", 12.0f, ext, 40.0f, 0.0f);
@@ -229,6 +232,14 @@ static int fr_test_apply(Game *g)
     app_set_state(APP_PLAY);
     SDL_Log("FR_TEST=[%s]", fr_test);
     return 0;
+}
+
+// Колбэк высоты рельефа для мини-физики (physics.c):Verlet-частицы
+// сталкиваются с той же землёй, по которой ходит игрок.
+static float phys_ground(float x, float z)
+{
+    Game *g = game_instance();
+    return (g && g->world_loaded) ? sample_height(&g->world, x, z) : 0.0f;
 }
 
 int main(int argc, char *argv[])
@@ -402,6 +413,8 @@ int main(int argc, char *argv[])
             if (s_sim_acc >= 0.25f) s_sim_acc = 0.25f;   // лаг >250 мс — не крутим вперёд
             for (int ticks = 0; s_sim_acc >= step && ticks < 8; ticks++) {
                 game_update(&game, step);   // мир: узлы, триггеры/use, туман
+                physics_set_ground(phys_ground);
+                physics_step(physics_world(), step);   // мини-физика (Verlet)
                 audio_update();             // фоновые петли и 3D-источники
                 lua_engine_update(step);    // per-frame колбэк скрипта
                 s_sim_acc -= step;

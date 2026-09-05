@@ -45,6 +45,12 @@ typedef struct {
 // Сброс мира к пустому с настройками по умолчанию.
 void physics_reset(PhysWorld *w);
 
+// Глобальный тестовый мир (верёвка/цепь из консоли; фундамент рэгдолла).
+PhysWorld *physics_world(void);
+
+// Колбэк высоты рельефа (main.c: sample_height мира игры).
+void physics_set_ground(float (*fn)(float x, float z));
+
 // Шаг симуляции (вызывать с фиксированным dt, 1/100 с — как логика игры).
 void physics_step(PhysWorld *w, float dt);
 
