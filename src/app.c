@@ -334,7 +334,7 @@ static int menu_audio(void)
 // тоже дороги (все проходы фуллскрин — цена растёт от пикселей).
 //                 msaa gi  shadow wheat grass dand  ssr  bloom clouds fog  gi_sc gi_rays gi_steps rscale vegvis minpix terrLOD
 static const float GFX_PRESETS[][17] = {
-    { 0,    0,   3,     12,   0.5f, 0.0f, 0,   0,    0,     0,   0.25f, 4,  6,  0.6f,  0.45f, 3,     60    }, // КАРТОШКА
+    { 0,    0,   3,     45,   2.5f, 0.0f, 0,   0,    0,     0,   0.25f, 4,  6,  0.6f,  0.45f, 3,     60    }, // КАРТОШКА
     { 4,    1,   1,     45,   3.1f, 0.05f, 0,  1,    0.15f, 1,   0.5f,  6,  10, 1.0f,  1.0f,  1,     0     }, // СРЕДНИЕ
     { 16,   1,   1,     80,   5.0f, 0.10f, 1,  1,    0.30f, 1,   1.0f,  12, 16, 1.0f,  1.0f,  1,     0     }, // УЛЬТРА
 };
