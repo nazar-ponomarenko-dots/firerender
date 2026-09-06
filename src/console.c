@@ -942,6 +942,8 @@ void console_init(void)
     cvar_register_ex("r_gi_steps", 10.0f, 4.0f, 32.0f, CVAR_ARCHIVE, "GI: шагов марша");
     cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
                      "масштаб рендера сцены (1 = полное разрешение окна)");
+    cvar_register_ex("r_simple_render", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "упрощённый рендер: пакет фпс-ухищрений для слабых GPU");
     cvar_register_ex("r_fog_mode", 1.0f, 0, 2, CVAR_ARCHIVE, "туман: 0=выкл, 1=объёмный, 2=простой");
     cvar_register_ex("r_bloom", 1.0f, 0, 1, CVAR_ARCHIVE, "свечение (bloom)");
     cvar_register_ex("r_crosshair", 1.0f, 0, 1, CVAR_ARCHIVE, "прицел (точка в центре)");
