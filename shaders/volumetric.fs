@@ -57,6 +57,7 @@ uniform float uShadowBias[4];
 uniform float uShadowOn;
 
 out vec4 FragColor;
+uniform float uFogOnly;          // 1 = вывести только туман (цвет+trans), без сцены
 
 #define FOG_MAX 96.0f         // дальше тумана нет (самый дальний каскад до 80 м)
 #define C0_HALF 8.0f          // половины боксов каскадов
@@ -232,6 +233,12 @@ void main() {
         if (trans < 0.01) break;                   // дальше не видно — хватит
     }
 
+    if (uFogOnly > 0.5) {
+        // Полупроходной режим: марш в текстуру полразмера, композит на
+        // экране отдельно (fog_comp.fs) — марш в 4 раза дешевле
+        FragColor = vec4(inscat, trans);
+        return;
+    }
     vec3 col = scene * trans + inscat;
     FragColor = vec4(col, 1.0);
 }

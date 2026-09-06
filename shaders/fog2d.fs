@@ -39,6 +39,7 @@ uniform vec4 uFogP;              // x: ρ0 (плотность у земли, 1/
                                  // спада, м), z: множитель силы, w: дальность, м
 
 out vec4 FragColor;
+uniform float uFogOnly;          // 1 = вывести только туман (цвет+trans)
 
 float linz(float ndc_z) {
     return (2.0 * uZ.x * uZ.y) / (uZ.y + uZ.x - ndc_z * (uZ.y - uZ.x));
@@ -104,6 +105,10 @@ void main() {
     // Ореол у самого солнца (Mie-пик)
     float glare = pow(sunHit, 8.0) * uGlare * rainDim;
 
+    if (uFogOnly > 0.5) {
+        FragColor = vec4(fcol * (1.0 - trans) * (lit + glare * trans), trans);
+        return;
+    }
     vec3 col = scene * trans + fcol * (1.0 - trans) * (lit + glare * trans);
     FragColor = vec4(col, 1.0);
 }

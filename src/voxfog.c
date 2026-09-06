@@ -37,6 +37,10 @@ static const WorldState *s_world;   // рельеф и поле (плотнос�
 static float  s_wcol[3] = { 0.05f, 0.15f, 0.22f };   // тон тумана над водой
 
 static GLuint s_fbo = 0, s_tex = 0;   // приёмник композита bloom (полный экран)
+static GLuint s_fbo_half = 0, s_tex_half = 0;  // марш тумана в полразмера
+static GLuint s_prog_comp = 0;         // композит тумана на экране
+static GLint u_comp_scene = -1, u_comp_fog = -1;
+static GLint u_fogonly = -1, u_fogonly2d = -1;
 static GLuint s_prog = 0, s_vao = 0, s_vbo = 0;
 // Аналитический туман режима «Простой» (shaders/fog2d.fs): без 3D-текстур
 // и марша — высота рельефа из карты высот в 4 точках луча, замкнутые
@@ -191,6 +195,7 @@ static void voxfog_prog_init(void)
         u_shadowgrad[c] = glGetUniformLocation(s_prog, name);
     }
     u_shadowon   = glGetUniformLocation(s_prog, "uShadowOn");
+    u_fogonly    = glGetUniformLocation(s_prog, "uFogOnly");
     glUseProgram(s_prog);
     glUniform1i(u_scene, 0);
     glUniform1i(u_scenedepth, 1);
@@ -215,6 +220,19 @@ static void voxfog_reshade(void)
     GLuint p2 = resources_program_replace(s_prog2d, "shaders/postfx.vs",
                                           "shaders/fog2d.fs");
     if (p2) s_prog2d = p2;
+    GLuint pc = resources_program_replace(s_prog_comp, "shaders/postfx.vs",
+                                          "shaders/fog_comp.fs");
+    if (pc) {
+        s_prog_comp = pc;
+        u_comp_scene = glGetUniformLocation(s_prog_comp, "uScene");
+        u_comp_fog   = glGetUniformLocation(s_prog_comp, "uFog");
+        if (s_prog_comp) {
+            glUseProgram(s_prog_comp);
+            glUniform1i(u_comp_scene, 0);
+            glUniform1i(u_comp_fog, 1);
+            glUseProgram(0);
+        }
+    }
     voxfog_prog_init();
 }
 
@@ -288,11 +306,25 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         u2d_hmin      = glGetUniformLocation(s_prog2d, "uHeightMin");
         u2d_hmax      = glGetUniformLocation(s_prog2d, "uHeightMax");
         u2d_fogp      = glGetUniformLocation(s_prog2d, "uFogP");
+        u_fogonly2d   = glGetUniformLocation(s_prog2d, "uFogOnly");
         glUseProgram(s_prog2d);
         glUniform1i(glGetUniformLocation(s_prog2d, "uScene"), 0);
         glUniform1i(glGetUniformLocation(s_prog2d, "uSceneDepth"), 1);
         glUniform1i(u2d_heightmap, 10);
         glUseProgram(0);
+    }
+    // Композит тумана на экран (после полразмерного марша)
+    if (!s_prog_comp) {
+        s_prog_comp = resources_program("shaders/postfx.vs",
+                                        "shaders/fog_comp.fs");
+        if (s_prog_comp) {
+            u_comp_scene = glGetUniformLocation(s_prog_comp, "uScene");
+            u_comp_fog   = glGetUniformLocation(s_prog_comp, "uFog");
+            glUseProgram(s_prog_comp);
+            glUniform1i(u_comp_scene, 0);
+            glUniform1i(u_comp_fog, 1);
+            glUseProgram(0);
+        }
     }
     voxfog_prog_init();    // uniform'ы (для hot-reload)
     if (!s_prog) return;
@@ -341,6 +373,7 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         u_shadowgrad[c] = glGetUniformLocation(s_prog, name);
     }
     u_shadowon   = glGetUniformLocation(s_prog, "uShadowOn");
+    u_fogonly    = glGetUniformLocation(s_prog, "uFogOnly");
     glUseProgram(s_prog);
     glUniform1i(u_scene, 0);
     glUniform1i(u_scenedepth, 1);
@@ -383,6 +416,34 @@ void voxfog_resize(int vw, int vh)
         glDeleteFramebuffers(1, &s_fbo);
         glDeleteTextures(1, &s_tex);
     }
+    if (s_fbo_half) {
+        glDeleteFramebuffers(1, &s_fbo_half);
+        glDeleteTextures(1, &s_tex_half);
+        s_fbo_half = s_tex_half = 0;
+    }
+    if (s_prog_comp) {
+        resources_program_release(s_prog_comp);
+        s_prog_comp = 0;
+    }
+    if (s_fbo_half) {
+        glDeleteFramebuffers(1, &s_fbo_half);
+        glDeleteTextures(1, &s_tex_half);
+    }
+    // Марш тумана в ПОЛРАЗМЕРЕ: RGBA8 (цвет тумана + trans в альфе).
+    // Гладкий туман билинейный апскейл не выдаёт, а фрагментов вчетверо меньше.
+    glGenTextures(1, &s_tex_half);
+    glBindTexture(GL_TEXTURE_2D, s_tex_half);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (vw + 1) / 2, (vh + 1) / 2, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &s_fbo_half);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo_half);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, s_tex_half, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // Полный экран: сюда bloom пишет композит, туман ложится поверх
     glGenTextures(1, &s_tex);
     glBindTexture(GL_TEXTURE_2D, s_tex);
@@ -465,7 +526,8 @@ static void mat4_invert(const float *m, float *o)
 // проходят в полном разрешении экрана.
 static void render_volumetric(int vw, int vh, GLuint target_fbo,
                               const RendererContext *rc,
-                              GLuint scene_tex, GLuint scene_depth)
+                              GLuint scene_tex, GLuint scene_depth,
+                              int fogonly)
 {
     float invvp[16];
     mat4_invert(rc->viewproj, invvp);
@@ -481,6 +543,7 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     // 3D-текстур, марша и теневых запросов.
     if (s_mode == 2 && s_prog2d) {
         glUseProgram(s_prog2d);
+        if (u_fogonly2d >= 0) glUniform1f(u_fogonly2d, fogonly ? 1.0f : 0.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, scene_tex);
         glActiveTexture(GL_TEXTURE1);
@@ -516,6 +579,7 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     }
 
     glUseProgram(s_prog);
+    if (u_fogonly >= 0) glUniform1f(u_fogonly, fogonly ? 1.0f : 0.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_tex);
     glActiveTexture(GL_TEXTURE1);
@@ -590,9 +654,34 @@ void voxfog_render(int vw, int vh, const RendererContext *rc,
 {
     if (!s_on) return;
     if (!s_prog || !s_fbo) return;
+    // Марш тумана в ПОЛРАЗМЕРЕ (цвет тумана + trans в альфе RGBA8),
+    // композит на экране — один сэмпл тумана и один сцены. Картинка та же
+    // (гладкий туман), фрагментов марша вчетверо меньше.
+    if (s_fbo_half && s_prog_comp) {
+        GLint prev_fbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+        render_volumetric((vw + 1) / 2, (vh + 1) / 2, s_fbo_half,
+                          rc, scene_tex, scene_depth, 1);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, vw, vh);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glUseProgram(s_prog_comp);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, scene_tex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, s_tex_half);
+        glBindVertexArray(s_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glEnable(GL_DEPTH_TEST);
+        glActiveTexture(GL_TEXTURE0);
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+        return;
+    }
     // Один и тот же проход в ПОЛНОМ разрешении экрана. Режим 2 отличается
     // только выборкой каскада (uFogMode): марш по одному грубому каскаду.
-    render_volumetric(vw, vh, 0, rc, scene_tex, scene_depth);
+    render_volumetric(vw, vh, 0, rc, scene_tex, scene_depth, 0);
 }
 
 void voxfog_cleanup(void)
@@ -602,6 +691,15 @@ void voxfog_cleanup(void)
     if (s_fbo) {
         glDeleteFramebuffers(1, &s_fbo);
         glDeleteTextures(1, &s_tex);
+    }
+    if (s_fbo_half) {
+        glDeleteFramebuffers(1, &s_fbo_half);
+        glDeleteTextures(1, &s_tex_half);
+        s_fbo_half = s_tex_half = 0;
+    }
+    if (s_prog_comp) {
+        resources_program_release(s_prog_comp);
+        s_prog_comp = 0;
     }
     if (s_prog) resources_program_release(s_prog);
     if (s_prog2d) resources_program_release(s_prog2d);
