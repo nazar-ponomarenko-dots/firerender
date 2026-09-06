@@ -181,6 +181,10 @@ void gi_resize(GiParams *g, int vw, int vh)
     g->vw = vw;
     g->vh = vh;
     int gw = (int)(vw * sc), gh = (int)(vh * sc);
+    // Абсолютный кэп: GI после билатерального денойза мягкий, трассировать
+    // больше 960x540 (даже на 4К-экране) — выбрасывание фпс на ветер
+    if (gw > 960) { gh = gh * 960 / gw; gw = 960; }
+    if (gh > 540) { gw = gw * 540 / gh; gh = 540; }
     if (gw < 8) gw = 8;
     if (gh < 8) gh = 8;
     if (g->fbo_gi[0]) {

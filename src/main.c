@@ -333,7 +333,13 @@ int main(int argc, char *argv[])
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
     // 3) Окно и контекст -------------------------------------------------------
-    g_win = SDL_CreateWindow("firerender", WIN_W, WIN_H,
+    // FR_W/FR_H — headless-тест высоких разрешений (4К и т.п.)
+    int ww = WIN_W, wh = WIN_H;
+    {
+        const char *ew = getenv("FR_W"), *eh = getenv("FR_H");
+        if (ew && eh) { ww = atoi(ew); wh = atoi(eh); }
+    }
+    g_win = SDL_CreateWindow("firerender", ww, wh,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
     SDL_GLContext ctx = SDL_GL_CreateContext(g_win);
@@ -359,7 +365,7 @@ int main(int argc, char *argv[])
     SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
     // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------
-    int vw = WIN_W, vh = WIN_H;
+    int vw = ww, vh = wh;
     SDL_GetWindowSizeInPixels(g_win, &vw, &vh);
     glViewport(0, 0, vw, vh);
     renderer_set_viewport(vw, vh);

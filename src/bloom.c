@@ -179,6 +179,14 @@ static int msaa_wanted(void)
         int maxs = 0;
         glGetIntegerv(GL_MAX_SAMPLES, &maxs);
         if (best > maxs) best = (maxs >= 16) ? 16 : 0;   // 4x не влез — выкл
+        // Кэп по разрешению окна: на 4К 8-16 сэмплов — это десятки мс
+        // чистого bandwidth, а разница с 4x на такой плотности пикселей
+        // на глаз отсутствует
+        extern int renderer_vw(void);
+        extern int renderer_vh(void);
+        long px = (long)renderer_vw() * renderer_vh();
+        if (px > 6500000 && best > 4) best = 4;    // ~4К и выше
+        else if (px > 3300000 && best > 8) best = 8; // ~1440p
     }
     return best;
 }
