@@ -532,8 +532,9 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     if (!s_gpu) s_gpu = gpu_create();   // RHI-бэкенд (GL): один на процесс
     cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
                      "масштаб рендера сцены (1 = полное разрешение окна)");
-    cvar_register_ex("r_present_blit", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
-                     "present: blit-апскейл LDR-копии (1) / шейдерный композит (0)");
+    cvar_register_ex("r_present_blit", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "present: grade+blit двумя проходами (1) / один композит "
+                     "натив (0, быстрее)");
     // Сцена сразу в масштабе: таргеты (MSAA/GI/SSR/туман) меньше окна
     float sc = cvar_get("r_render_scale");
     if (sc < 0.4f) sc = 0.4f;
