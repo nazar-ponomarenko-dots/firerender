@@ -944,6 +944,14 @@ void console_init(void)
                      "масштаб рендера сцены (1 = полное разрешение окна)");
     cvar_register_ex("r_simple_render", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "упрощённый рендер: пакет фпс-ухищрений для слабых GPU");
+    cvar_register_ex("r_veg_falloff_mult", 1.0f, 0.3f, 1.0f, CVAR_ARCHIVE,
+                     "спад плотности поля: <1 — реже уже к среднему кольцу");
+    cvar_register_ex("r_veg_regen_budget", 4096.0f, 1.0f, 4096.0f,
+                     CVAR_ARCHIVE, "чанков регенерации за кадр");
+    cvar_register_ex("r_cheap_fog", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "туман только в шейдерах (без voxfog-проходов)");
+    cvar_register_ex("r_scene_ldr", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "сцена в RGBA8 без HDR (картошка: быстрее на слабых GPU)");
     cvar_register_ex("r_fog_mode", 1.0f, 0, 2, CVAR_ARCHIVE, "туман: 0=выкл, 1=объёмный, 2=простой");
     cvar_register_ex("r_bloom", 1.0f, 0, 1, CVAR_ARCHIVE, "свечение (bloom)");
     cvar_register_ex("r_crosshair", 1.0f, 0, 1, CVAR_ARCHIVE, "прицел (точка в центре)");

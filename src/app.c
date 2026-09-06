@@ -332,11 +332,11 @@ static int menu_audio(void)
 // под слабые ноутбуки (iGPU): трава — главный жрец (fill-bound), поэтому
 // пресет в первую очередь режет её плотность; MSAA/bloom/облака на iGPU
 // тоже дороги (все проходы фуллскрин — цена растёт от пикселей).
-//                 msaa gi  shadow wheat grass dand  ssr  bloom clouds fog  gi_sc gi_rays gi_steps rscale vegvis minpix terrLOD simple
-static const float GFX_PRESETS[][18] = {
-    { 0,    0,   3,     45,   2.5f, 0.0f, 0,   0,    0,     0,   0.25f, 4,  6,  0.6f,  0.45f, 3,     60,   1 }, // КАРТОШКА
-    { 4,    1,   1,     80,   5.0f, 0.05f, 0,  1,    0.15f, 1,   0.5f,  6,  10, 1.0f,  1.0f,  1,     0,    0 }, // СРЕДНИЕ
-    { 8,    1,   1,     140,  10.0f, 0.10f, 1,  1,    0.30f, 1,   0.5f,  8,  12, 1.0f,  1.0f,  1,     0,    0 }, // УЛЬТРА
+//                 msaa gi  shadow wheat grass dand  ssr  bloom clouds fog  gi_sc gi_rays gi_steps rscale vegvis minpix terrLOD simple falloff cheapfog ldr
+static const float GFX_PRESETS[][21] = {
+    { 0,    0,   3,     15,   1.0f, 0.0f, 0,   0,    0,     2,   0.25f, 4,  6,  1.0f,  0.45f, 3,     60,   1, 0.5f,  1, 1 }, // КАРТОШКА
+    { 4,    1,   1,     80,   5.0f, 0.05f, 0,  1,    0.15f, 1,   0.5f,  6,  10, 1.0f,  1.0f,  1,     0,    0, 1.0f,  0, 0 }, // СРЕДНИЕ
+    { 8,    1,   1,     140,  10.0f, 0.10f, 1,  1,    0.30f, 1,   0.5f,  8,  12, 1.0f,  1.0f,  1,     0,    0, 1.0f,  0, 0 }, // УЛЬТРА
 };
 static const char *const GFX_PRESET_NAMES[] = { "КАРТОШКА", "СРЕДНИЕ", "УЛЬТРА" };
 
@@ -346,16 +346,20 @@ static const char *const GFX_PRESET_NAMES[] = { "КАРТОШКА", "СРЕДН�
 static void simple_render_apply(int on)
 {
     cvar_set("r_simple_render", on ? 1.0f : 0.0f);
+    cvar_set("r_render_scale", 1.0f);        // масштаб всегда полный
+    cvar_set("r_scene_ldr", on ? 1.0f : 0.0f);  // RGBA8-сцена: дешёвый present
     if (on) {
-        cvar_set("r_render_scale", 0.6f);
         cvar_set("r_veg_vis_mult", 0.45f);
         cvar_set("r_veg_minpix", 3.0f);
         cvar_set("r_terr_detail_dist", 60.0f);
+        cvar_set("r_veg_falloff_mult", 0.5f);
+        cvar_set("r_veg_regen_budget", 6.0f);
     } else {
-        cvar_set("r_render_scale", 1.0f);
         cvar_set("r_veg_vis_mult", 1.0f);
         cvar_set("r_veg_minpix", 1.0f);
         cvar_set("r_terr_detail_dist", 0.0f);
+        cvar_set("r_veg_falloff_mult", 1.0f);
+        cvar_set("r_veg_regen_budget", 4096.0f);
     }
 }
 
@@ -369,9 +373,10 @@ static void gfx_preset_apply(int level)
         "r_bloom", "r_clouds", "r_fog_mode",
         "r_gi_scale", "r_gi_rays", "r_gi_steps", "r_render_scale",
         "r_veg_vis_mult", "r_veg_minpix", "r_terr_detail_dist",
-        "r_simple_render"
+        "r_simple_render", "r_veg_falloff_mult", "r_cheap_fog",
+        "r_scene_ldr"
     };
-    for (int k = 0; k < 18; k++)
+    for (int k = 0; k < 21; k++)
         cvar_set(order[k], GFX_PRESETS[level][k]);
     simple_render_apply(GFX_PRESETS[level][17] > 0.5f);
     console_save_config();   // сразу в config.cfg — переживёт перезапуск
@@ -388,11 +393,12 @@ static int gfx_preset_current(void)
         "r_bloom", "r_clouds", "r_fog_mode",
         "r_gi_scale", "r_gi_rays", "r_gi_steps", "r_render_scale",
         "r_veg_vis_mult", "r_veg_minpix", "r_terr_detail_dist",
-        "r_simple_render"
+        "r_simple_render", "r_veg_falloff_mult", "r_cheap_fog",
+        "r_scene_ldr"
     };
     for (int p = 0; p < 3; p++) {
         int match = 1;
-        for (int k = 0; k < 18 && match; k++)
+        for (int k = 0; k < 21 && match; k++)
             if (cvar_get(cvars[k]) < GFX_PRESETS[p][k] - 0.01f ||
                 cvar_get(cvars[k]) > GFX_PRESETS[p][k] + 0.01f) match = 0;
         if (match) return p;

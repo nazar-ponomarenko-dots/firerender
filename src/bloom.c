@@ -42,6 +42,27 @@ void bloom_set_underwater(float amount, const float tint[3], float time)
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 
+static GLuint make_scene_tex(int w, int h, int ldr)
+{
+    // ldr (r_scene_ldr): RGBA8 вместо RGBA16F — на картошке нет bloom/GI/
+    // тумана, HDR не нужен, а запись филов и чтение композита — главный
+    // bandwidth на слабых iGPU
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (ldr)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0,
+                     GL_RGBA, GL_HALF_FLOAT, NULL);
+    return id;
+}
+
 static GLuint make_ldr_tex(int w, int h)
 {
     // LDR-копия сцены для present-пути картошки: полбанды на запись/чтение
@@ -166,6 +187,7 @@ static void msaa_free(BloomParams *b)
 // разница 2x/4x и 8x/16x на экране слабая, а цена заметная).
 static int msaa_wanted(void)
 {
+    if (s_bloom_p && s_bloom_p->scene_ldr) return 0;  // RGBA8-сцена: без MSAA
     static const int allowed[] = { 0, 4, 16 };
     float v = cvar_get("r_msaa");
     int s = (int)(v + 0.5f);
@@ -323,7 +345,26 @@ void bloom_resize(BloomParams *b, int vw, int vh)
         glDeleteFramebuffers(1, &b->fbo_ldr);
         glDeleteTextures(1, &b->tex_ldr);
     }
-    make_fbo(&b->fbo, &b->tex, &b->depth, vw, vh, 1);
+    b->scene_ldr = cvar_get("r_scene_ldr") > 0.5f;
+    // Цвет сцены: RGBA16F (HDR) или RGBA8 (картошка — HDR некому)
+    b->tex = make_scene_tex(vw, vh, b->scene_ldr);
+    glGenFramebuffers(1, &b->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, b->fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, b->tex, 0);
+    glGenTextures(1, &b->depth);
+    glBindTexture(GL_TEXTURE_2D, b->depth);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, vw, vh, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, b->depth, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        SDL_Log("Bloom FBO incomplete (%dx%d)!", vw, vh);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // LDR-копия для present: композит (grade) рисуется в масштабе сцены,
     // на экран — аппаратный blit (дешевле шейдерного фуллскрина)
     glGenFramebuffers(1, &b->fbo_ldr);

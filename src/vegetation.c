@@ -155,6 +155,10 @@ static int g_dyn_gc, g_dyn_wc, g_dyn_cap;
 // INT_MAX: первый veg_update должен ОБЯЗАТЕЛЬНО сработать (иначе при старте
 // камеры в чанке (0,0) динамический слой никогда не сгенерируется)
 static int g_chunk_cam[2] = { INT_MAX, INT_MAX };
+// Бюджет регенерации (r_veg_regen_budget): не больше N чанков за вызов
+// veg_update, остальные — в следующих кадрах. На 2-ядерных CPU пачка
+// пересозданий за один кадр = фриз; добор убирает рывки. >0 = есть хвост.
+static int g_regen_pending = 0;
 // VAO растительности и массив спрайтов — нужны теневому проходу (shadow.c)
 static GLuint g_veg_vao[4];
 static GLuint g_veg_tex = 0;
@@ -311,7 +315,10 @@ static int frustum_box(const WorldState *w, float x0, float z0, float x1, float 
 // динамика/статика нет скачка, переход от игрока к "концу" без рывков.
 static float veg_density(float r, float d0, float floor)
 {
-    float t = r / s_dyn_r;
+    // r_veg_falloff_mult сжимает кривую спада: при 0.5 плотность доходит
+    // до floor вдвое ближе к камере (картошка: среднее кольцо реже, у ног
+    // без изменений)
+    float t = r / (s_dyn_r * cvar_get("r_veg_falloff_mult"));
     if (t >= 1.0f) return floor;
     t = t * t * (3.0f - 2.0f * t);   // smoothstep: медленное начало, плавный конец
     return d0 + (floor - d0) * t;
@@ -590,7 +597,8 @@ static void veg_update(const float cam_pos[3], VegParams *p)
     unsigned int occ_now = splat_occupancy_version();
     int occ_dirty = (occ_now != s_occ_seen);
     if (occ_dirty) s_occ_seen = occ_now;
-    if (!occ_dirty && cx == g_chunk_cam[0] && cy == g_chunk_cam[1]) return;
+    if (!occ_dirty && g_regen_pending <= 0 &&
+        cx == g_chunk_cam[0] && cy == g_chunk_cam[1]) return;
     g_chunk_cam[0] = cx;
     g_chunk_cam[1] = cy;
 
@@ -615,8 +623,30 @@ static void veg_update(const float cam_pos[3], VegParams *p)
             c->g = NULL; c->w = NULL; c->gn = c->wn = 0;
         }
     }
+    // Ближние чанки — первыми (бюджет может срезать дальние до следующего
+    // кадра; у ног растительность должна появляться сразу)
+    for (int a = 1; a < nn; a++) {
+        int bi = need[a][0], bj = need[a][1];
+        float bd = (float)(bi * 16 + 8) - cam_pos[0];
+        float bz = (float)(bj * 16 + 8) - cam_pos[2];
+        float br2 = bd * bd + bz * bz;
+        int b2 = a - 1;
+        while (b2 >= 0) {
+            float ddx = (float)(need[b2][0] * 16 + 8) - cam_pos[0];
+            float ddz = (float)(need[b2][1] * 16 + 8) - cam_pos[2];
+            if (ddx * ddx + ddz * ddz <= br2) break;
+            need[b2 + 1][0] = need[b2][0];
+            need[b2 + 1][1] = need[b2][1];
+            b2--;
+        }
+        need[b2 + 1][0] = bi;
+        need[b2 + 1][1] = bj;
+    }
     // пересоздаём чанки, чья плотность заметно изменилась
     int changed = 0;
+    int budget = (int)cvar_get("r_veg_regen_budget");
+    if (budget <= 0) budget = 4096;
+    g_regen_pending = 0;
     for (int k = 0; k < nn; k++) {
         int i = need[k][0], j = need[k][1];
         VegChunk *c = &g_veg_chunks[j * g_map_w + i];
@@ -637,6 +667,10 @@ static void veg_update(const float cam_pos[3], VegParams *p)
                         fabsf(c->dg_d - tgd) > VEG_REGEN_TOL ||
                         fabsf(c->dw_d - twd) > VEG_REGEN_TOL;
         if (need_gen) {
+            if (changed >= budget) {   // хвост — в следующих кадрах
+                g_regen_pending = 1;
+                continue;
+            }
             free(c->g); free(c->w);
             float *gb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
             float *wb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
@@ -862,12 +896,15 @@ void veg_node_render(SceneNode *n, float dt)
     // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
     // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
     {
-        static float s_prev_w = -1.0f, s_prev_g = -1.0f, s_prev_d = -1.0f;
+        static float s_prev_w = -1.0f, s_prev_g = -1.0f, s_prev_d = -1.0f,
+                     s_prev_fo = -1.0f;
         float w = cvar_get("r_wheat_density");
         float g = cvar_get("r_grass_density");
         float d = cvar_get("r_dandelion_density");
-        if (w != s_prev_w || g != s_prev_g || d != s_prev_d) {
-            s_prev_w = w; s_prev_g = g; s_prev_d = d;
+        float fo = cvar_get("r_veg_falloff_mult");
+        if (w != s_prev_w || g != s_prev_g || d != s_prev_d ||
+            fo != s_prev_fo) {
+            s_prev_w = w; s_prev_g = g; s_prev_d = d; s_prev_fo = fo;
             g_chunk_cam[0] = g_chunk_cam[1] = INT_MAX;
             SDL_Log("Veg density changed: wheat %.0f, grass %.1f, dandelion %.2f",
                     w, g, d);
@@ -1179,6 +1216,11 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
         // только в текстуре земли (режим «КАРТОШКА», минус овердров)
         cvar_register_ex("r_veg_vis_mult", 1.0f, 0.25f, 1.0f, CVAR_ARCHIVE,
                          "множитель радиуса прорисовки пшеницы (1 = карта)");
+        cvar_register_ex("r_veg_falloff_mult", 1.0f, 0.3f, 1.0f, CVAR_ARCHIVE,
+                         "спад плотности поля: <1 — реже уже к среднему кольцу");
+        cvar_register_ex("r_veg_regen_budget", 4096.0f, 1.0f, 4096.0f,
+                         CVAR_ARCHIVE, "чанков регенерации за кадр (меньше = "
+                         "меньше рывков CPU, дорисовывается в следующих)");
         SDL_Log("Veg cfg: wheat %.0f/m2, grass %.1f/m2, dandelion %.2f/m2, "
                 "dyn %.0fm, vis %.0fm",
                 s_wheat_density, s_grass_density, s_dandelion_density,

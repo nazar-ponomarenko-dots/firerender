@@ -63,7 +63,11 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
 
 void minimap_node_render(SceneNode *n, float dt)
 {
-    (void)dt;
+    // Обновление раз в 3 кадра: маркер игрока и карта почти статичны,
+    // а каждый квад — перезаливка VBO. На глаз — uninterrupted motion.
+    static int s_frame = 0;
+    if (++s_frame < 3) return;
+    s_frame = 0;
     MinimapParams *p = n->params;
     if (!p->visible) return;        // клавиша G — карта скрыта
     const RendererContext *rc = p->rc;

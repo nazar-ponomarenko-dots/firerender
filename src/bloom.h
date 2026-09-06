@@ -18,6 +18,7 @@ typedef struct {
     GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
     int msaa;                  // активные сэмплы (0 = MSAA выключен)
     GLuint fbo_ldr, tex_ldr;   // LDR-копия сцены для present (bloom_present)
+    int scene_ldr;             // сцена сразу в RGBA8 (картошка: HDR некому)
     GLuint fbo_glow[2];        // ping-pong буферы glow (половинный размер)
     GLuint tex_glow[2];
     GLuint vao, vbo;           // полноэкранный треугольник
