@@ -429,7 +429,7 @@ static int menu_graphics(void)
     // Компактная двухколоночная панель: пресеты сверху, слева — экран и
     // детализация, справа — эффекты, внизу — сброс и назад в один ряд.
     const float pw = 780.0f;
-    menu_start("ГРАФИКА", 10, pw);   // пресет-ряд + 8 строк левой колонки + низ
+    menu_start("ГРАФИКА", cvar_get("r_bloom") > 0.5f ? 11 : 10, pw);
     const float px = 90.0f;
     const float half = pw * 0.5f;
     const float ih = s_ui.font_h + 10.0f;
@@ -439,13 +439,6 @@ static int menu_graphics(void)
     const float top = s_ui.cy;
     // ЛЕВАЯ колонка: экран + детализация
     ui_col(&s_ui, px, top, half - 14.0f);
-    // Упрощённый рендер: пакет фпс-ухищрений одним флагом (масштаб сцены,
-    // дальность пшеницы, минпиксель, LOD деталей террейна)
-    {
-        int sr = cvar_get("r_simple_render") > 0.5f;
-        if (ui_checkbox(&s_ui, "Упрощённый рендер (слабый GPU)", &sr))
-            simple_render_apply(sr);
-    }
     cvar_checkbox(&s_ui, "r_fullscreen", "Полноэкранный режим");
     cvar_checkbox(&s_ui, "r_vsync", "Вертикальная синхронизация");
     cvar_slider(&s_ui, "fov", "Угол обзора", 5.0f, 120.0f, "%.0f");
@@ -496,6 +489,13 @@ static int menu_graphics(void)
     cvar_checkbox(&s_ui, "r_bloom", "Свечение (bloom)");
     if (cvar_get("r_bloom") > 0.5f)   // сила не нужна при выключенном bloom
         cvar_slider(&s_ui, "r_bloom_strength", "Сила свечения", 0.0f, 1.5f, "%.2f");
+    // Упрощённый рендер: пакет фпс-ухищрений одним флагом (масштаб сцены,
+    // дальность пшеницы, минпиксель, LOD деталей террейна) — в самом конце
+    {
+        int sr = cvar_get("r_simple_render") > 0.5f;
+        if (ui_checkbox(&s_ui, "Упрощённый рендер (слабый GPU)", &sr))
+            simple_render_apply(sr);
+    }
     if (s_ui.cy > bottom) bottom = s_ui.cy;
 
     // Низ: сброс и назад — в один ряд
