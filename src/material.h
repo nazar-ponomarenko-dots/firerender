@@ -93,4 +93,9 @@ void material_locs_init(MaterialLocs *ml, GLuint prog);
 // биндинга программы. time — время (для scroll-анимации).
 void material_bind(const Material *m, const MaterialLocs *ml, float time);
 
+// То же, но пропускает полностью идентичный материал в той же программе.
+// cache хранит копию последнего Material; valid сбрасывается при смене program.
+void material_bind_cached(const Material *m, const MaterialLocs *ml, float time,
+                          Material *cache, int *valid);
+
 #endif

@@ -84,6 +84,7 @@ static Ui s_ui;
 #define MAPS_MAX 32
 static char s_maps[MAPS_MAX][64];
 static int s_maps_n = 0;
+static int s_maps_page = 0;
 
 static void maps_scan(void)
 {
@@ -246,12 +247,25 @@ static void menu_panel(float x, float y, float w, float h)
 static float menu_start(const char *title, int items, float pw)
 {
     ui_title_big(&s_ui, title);
-    float ih = s_ui.font_h + 14.0f;   // высота одного пункта
+#ifdef __ANDROID__
+    // На телефоне панель шире и ниже — пальцем удобнее, текст крупнее (скейл в hud.c 1.3-2.2)
+    pw *= 1.6f;
+    if (pw > s_ui.vw * 0.85f) pw = s_ui.vw * 0.85f;
+#endif
+    float scale = ui_layout_scale(&s_ui);
+    float ih = ui_layout_item_h(&s_ui);
+    float gap = 4.0f * scale;
     float px = 90.0f;
-    float gaps = (float)(items + 1) * 4.0f;
-    float py = s_ui.vh - 26.0f - items * ih - gaps;
-    if (py < 12.0f) py = 12.0f;       // маленькое окно: панель не за экран
-    menu_panel(px - 16.0f, py - 12.0f, pw + 32.0f, items * ih + gaps + 24.0f);
+#ifdef __ANDROID__
+    px = s_ui.vw * 0.05f; // 5% от ширины, на узком экране не прижат к краю
+#endif
+    float gaps = (float)(items + 1) * gap;
+    float panel_h = items * ih + gaps + 24.0f;
+    float max_h = s_ui.vh - 24.0f;
+    if (panel_h > max_h) panel_h = max_h;
+    float py = s_ui.vh - 14.0f - panel_h + 12.0f;
+    if (py < 12.0f) py = 12.0f;
+    menu_panel(px - 16.0f, py - 12.0f, pw + 32.0f, panel_h);
     ui_col(&s_ui, px, py, pw);
     return ih;
 }
@@ -346,24 +360,44 @@ static const char *const GFX_PRESET_NAMES[] = { "КАРТОШКА", "СРЕДН�
 static void simple_render_apply(int on)
 {
     cvar_set("r_simple_render", on ? 1.0f : 0.0f);
-    cvar_set("r_render_scale", 1.0f);        // масштаб всегда полный
-    cvar_set("r_scene_ldr", on ? 1.0f : 0.0f);  // RGBA8-сцена: дешёвый present
+#ifdef __ANDROID__
+    cvar_set("r_render_scale", on ? 0.60f : 1.0f); // дико — 60% (эконом 64% пикс), но не мыло
+#else
+    cvar_set("r_render_scale", 1.0f);
+#endif
+    cvar_set("r_scene_ldr", on ? 1.0f : 0.0f);
     if (on) {
+#ifdef __ANDROID__
+        // Дико упрощённо, но не пусто: поле редкое, но кусты шире раньше (lod_shift)
+        cvar_set("r_veg_vis_mult", 0.28f);
+        cvar_set("r_veg_minpix", 6.0f);
+        cvar_set("r_terr_detail_dist", 30.0f);
+        cvar_set("r_veg_falloff_mult", 0.32f);
+        cvar_set("r_veg_regen_budget", 3.0f);
+        cvar_set("r_veg_lod_shift", 1.5f);
+        cvar_set("r_wheat_density", 6.0f);
+        cvar_set("r_grass_density", 0.6f);
+#else
         cvar_set("r_veg_vis_mult", 0.45f);
         cvar_set("r_veg_minpix", 3.0f);
         cvar_set("r_terr_detail_dist", 60.0f);
         cvar_set("r_veg_falloff_mult", 0.5f);
         cvar_set("r_veg_regen_budget", 6.0f);
+        cvar_set("r_veg_lod_shift", 0.0f);
+#endif
     } else {
         cvar_set("r_veg_vis_mult", 1.0f);
         cvar_set("r_veg_minpix", 1.0f);
         cvar_set("r_terr_detail_dist", 0.0f);
         cvar_set("r_veg_falloff_mult", 1.0f);
-        cvar_set("r_veg_regen_budget", 4096.0f);
+        // Плотные чанки Ultra генерируются постепенно: прежние 4096 разрешали
+        // всю очередь в одном кадре и давали регулярные стоп-кадры при полёте.
+        cvar_set("r_veg_regen_budget", 2.0f);
+        cvar_set("r_veg_lod_shift", 0.0f);
     }
 }
 
-static void gfx_preset_apply(int level)
+static void gfx_preset_apply_values(int level)
 {
     if (level < 0) level = 0;
     if (level > 2) level = 2;
@@ -379,7 +413,46 @@ static void gfx_preset_apply(int level)
     for (int k = 0; k < 21; k++)
         cvar_set(order[k], GFX_PRESETS[level][k]);
     simple_render_apply(GFX_PRESETS[level][17] > 0.5f);
-    console_save_config();   // сразу в config.cfg — переживёт перезапуск
+#ifdef __ANDROID__
+    if (level == 0) {
+        // Дико упрощённо, но не лысо: оставляем редкое поле (6/0.6) с ранним LOD — шире кусты заполняют пустоту
+        cvar_set("r_wheat_density", 6.0f);
+        cvar_set("r_grass_density", 0.6f);
+        cvar_set("r_dandelion_density", 0.0f);
+        cvar_set("r_render_scale", 0.60f);
+        cvar_set("r_veg_vis_mult", 0.28f);
+        cvar_set("r_veg_minpix", 6.0f);
+        cvar_set("r_veg_lod_shift", 1.5f);
+        cvar_set("r_shadows_mode", 3.0f); // blob-пятна — дёшево и не лысо
+        cvar_set("r_fog_mode", 2.0f); // простой туман — 1 mix, без 3D
+        cvar_set("r_bloom", 0.0f);
+        cvar_set("r_gi", 0.0f);
+        cvar_set("r_ssr", 0.0f);
+        cvar_set("r_clouds", 0.0f);
+    }
+#endif
+}
+
+void app_apply_benchmark_preset(int level)
+{
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;
+    gfx_preset_apply_values(level);
+    cvar_set("r_render_scale", 1.0f);
+    cvar_set("r_dynamic_resolution", 0.0f);
+    cvar_set("r_lowend_profile", 0.0f);
+    cvar_set("r_vsync", 0.0f);
+    cvar_set("host_framerate", 0.0f);
+    cvar_set("profiler", 0.0f);
+    SDL_Log("BENCH preset: %s, native scale", GFX_PRESET_NAMES[level]);
+}
+
+static void gfx_preset_apply(int level)
+{
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;
+    gfx_preset_apply_values(level);
+    console_save_config();
     console_print("пресет графики: %s", GFX_PRESET_NAMES[level]);
 }
 
@@ -617,18 +690,36 @@ int app_bind_key(SDL_Scancode sc)
 static int menu_maps(void)
 {
     maps_scan();
-    menu_start("ВЫБОР КАРТЫ", s_maps_n + 2, 420.0f);
+    float row = ui_layout_item_h(&s_ui) + 4.0f * ui_layout_scale(&s_ui);
+    int per_page = (int)(((float)s_ui.vh - 150.0f) / row) - 3;
+    if (per_page < 3) per_page = 3;
+    if (per_page > 12) per_page = 12;
+    int pages = (s_maps_n + per_page - 1) / per_page;
+    if (pages < 1) pages = 1;
+    if (s_maps_page >= pages) s_maps_page = pages - 1;
+    int first = s_maps_page * per_page;
+    int last = first + per_page;
+    if (last > s_maps_n) last = s_maps_n;
+    int nav = pages > 1 ? 2 : 0;
+    menu_start("ВЫБОР КАРТЫ", (last - first) + nav + 2, 420.0f);
     const char *cur = maps_current();
-    for (int i = 0; i < s_maps_n; i++) {
+    for (int i = first; i < last; i++) {
         char label[96];
         snprintf(label, sizeof label, "%s%s", s_maps[i],
                  strcmp(s_maps[i], cur) == 0 ? "  *" : "");
         if (ui_button(&s_ui, label)) {
             snprintf(game_instance()->map_name, 64, "%s", s_maps[i]);
-            console_save_config();      // выбор карты в config.cfg
+            console_save_config();
             SDL_Log("Map selected: %s", s_maps[i]);
             return SCR_ACT_BACK;
         }
+    }
+    if (pages > 1) {
+        char page[64];
+        snprintf(page, sizeof page, "<  СТРАНИЦА %d/%d  >", s_maps_page + 1, pages);
+        if (ui_button(&s_ui, page)) s_maps_page = (s_maps_page + 1) % pages;
+        if (ui_button(&s_ui, "ПРЕДЫДУЩАЯ СТРАНИЦА"))
+            s_maps_page = (s_maps_page + pages - 1) % pages;
     }
     ui_sep(&s_ui);
     if (ui_button(&s_ui, "НАЗАД")) return SCR_ACT_BACK;

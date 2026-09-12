@@ -17,6 +17,8 @@ typedef struct {
     GLuint fbo_ms;             // MSAA-сцена: мультисэмпл-FBO (r_msaa > 0)
     GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
     int msaa;                  // активные сэмплы (0 = MSAA выключен)
+    int msaa_failed;           // неподдерживаемый запрос (не повторять каждый кадр)
+    int msaa_failed_ldr;
     GLuint fbo_ldr, tex_ldr;   // LDR-копия сцены для present (bloom_present)
     int scene_ldr;             // сцена сразу в RGBA8 (картошка: HDR некому)
     GLuint fbo_glow[2];        // ping-pong буферы glow (половинный размер)

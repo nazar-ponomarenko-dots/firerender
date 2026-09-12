@@ -20,9 +20,11 @@
 #include "glb_anim.h"    // cmd_glbanim + auto-выбор в cmd_glb
 
 // --- +/- команды действия (ставят флаг g_act) ---------------------------------
-#define DEF_ACTION(id, name)                                             \
-    static void a_##name##_on(const char *a) { (void)a; g_act[id] = 1; } \
-    static void a_##name##_off(const char *a) { (void)a; g_act[id] = 0; }
+#define DEF_ACTION(id, name)                                                    \
+    static void a_##name##_on(const char *a)                                    \
+    { (void)a; action_set(ACTION_SRC_BIND, id, true); }                         \
+    static void a_##name##_off(const char *a)                                   \
+    { (void)a; action_set(ACTION_SRC_BIND, id, false); }
 
 DEF_ACTION(A_FORWARD, forward)
 DEF_ACTION(A_BACK,    back)

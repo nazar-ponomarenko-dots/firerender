@@ -35,10 +35,17 @@ int load_gl_funcs(void)
     p_##name = (ret (APIENTRY *) args)SDL_GL_GetProcAddress(#name);
     GL_FUNCS_OPT(F)
 #undef F
-    g_gl_gpu_driven = (p_glDispatchCompute && p_glMemoryBarrier &&
+    GLint major = 0, minor = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &major);
+    glGetIntegerv(GL_MINOR_VERSION, &minor);
+#ifdef USE_GLES_PATH
+    int compute_version = major > 3 || (major == 3 && minor >= 1);
+#else
+    int compute_version = major > 4 || (major == 4 && minor >= 3);
+#endif
+    g_gl_gpu_driven = (compute_version && p_glDispatchCompute && p_glMemoryBarrier &&
                        p_glBindBufferBase && p_glBindBufferRange &&
-                       p_glShaderStorageBlockBinding &&
-                       p_glDrawElementsIndirect && p_glMultiDrawElementsIndirect)
+                       p_glShaderStorageBlockBinding && p_glDrawElementsIndirect)
                       ? 1 : 0;
     return 0;
 }
@@ -100,6 +107,11 @@ void fr_glDrawElementsInstancedBaseInstance(GLenum mode, GLsizei count,
     g_prof_draws++;
     g_prof_verts += count * primcount;
     g_prof_tris += prim_tris(mode, count) * primcount;
-    p_glDrawElementsInstancedBaseInstance(mode, count, type, indices,
-                                          primcount, baseinstance);
+    if (p_glDrawElementsInstancedBaseInstance)
+        p_glDrawElementsInstancedBaseInstance(mode, count, type, indices,
+                                              primcount, baseinstance);
+    else if (baseinstance == 0 && p_glDrawElementsInstanced)
+        p_glDrawElementsInstanced(mode, count, type, indices, primcount);
+    else
+        SDL_Log("glDrawElementsInstancedBaseInstance not available (base=%u)", baseinstance);
 }

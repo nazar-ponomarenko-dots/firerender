@@ -118,6 +118,38 @@ static MapSurfaces s_surfaces = {
     .set = 0,
 };
 
+// Снимок встроенных defaults. Каждая карта разбирается с чистого состояния:
+// отсутствующая секция не должна наследовать параметры предыдущей карты.
+static MapFog s_fog_default;
+static MapTerrain s_terrain_default;
+static MapVeg s_veg_default;
+static MapSky s_sky_default;
+static MapBloom s_bloom_default;
+static MapShadows s_shadows_default;
+static MapSurfaces s_surfaces_default;
+static int s_defaults_saved;
+
+static void mapdata_reset_defaults(void)
+{
+    if (!s_defaults_saved) {
+        s_fog_default = s_fog;
+        s_terrain_default = s_terrain;
+        s_veg_default = s_veg;
+        s_sky_default = s_sky;
+        s_bloom_default = s_bloom;
+        s_shadows_default = s_shadows;
+        s_surfaces_default = s_surfaces;
+        s_defaults_saved = 1;
+    }
+    s_fog = s_fog_default;
+    s_terrain = s_terrain_default;
+    s_veg = s_veg_default;
+    s_sky = s_sky_default;
+    s_bloom = s_bloom_default;
+    s_shadows = s_shadows_default;
+    s_surfaces = s_surfaces_default;
+}
+
 // Покраска поверхности (paints[]) и дороги (roads[])
 static MapPaint s_paints[MAP_MAX_PAINTS];
 static int s_paint_count;
@@ -720,6 +752,7 @@ static void parse_sound(const JsonNode *obj)
 }
 int mapdata_load(const char *path)
 {
+    mapdata_reset_defaults();
     char *text = read_map_json(path);
     if (!text) {
         SDL_Log("Map data: cannot read %s", path);

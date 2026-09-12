@@ -140,8 +140,8 @@ void main() {
     // Френель с ПОЛОМ 0.35 — мокрая поверхность заметно отражает даже под
     // прямым углом, а не только у горизонта (старый pow5 давал ~9%).
     float fres = mix(0.35, 1.0, pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0));
-    float ef = smoothstep(0.0, 0.05, vUV.x) * smoothstep(1.0, 0.95, vUV.x)
-             * smoothstep(0.0, 0.05, vUV.y) * smoothstep(1.0, 0.95, vUV.y);
+    float ef = smoothstep(0.0, 0.05, vUV.x) * (1.0 - smoothstep(0.95, 1.0, vUV.x))
+             * smoothstep(0.0, 0.05, vUV.y) * (1.0 - smoothstep(0.95, 1.0, vUV.y));
     float gate = up * outS * ef * wet * uStrength;
     bool live = wet > 0.02 && gate > 0.003;
     if (!live) {

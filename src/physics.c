@@ -103,6 +103,13 @@ static void link_relax(PhysWorld *w, const PhysLink *l)
     b->pos[2] -= dz * diff * kb;
 }
 
+void physics_relax(PhysWorld *w, int iterations)
+{
+    for (int it = 0; it < iterations; it++)
+        for (int i = 0; i < w->nl; i++)
+            link_relax(w, &w->link[i]);
+}
+
 void physics_step(PhysWorld *w, float dt)
 {
     if (w->np <= 0) return;

@@ -1,337 +1,203 @@
 // ============================================================================
-//  gpu_gl.c — реализация RHI на OpenGL 3.3 (единственный пока бэкенд)
+//  gpu_gl.c — тонкие обёртки старого RHI-интерфейса (gpu.h) над SIMPLE RENDER
 // ----------------------------------------------------------------------------
-//  Маппинг абстракций gpu.h на настоящие GL-вызовы. Все GL-точки входа
-//  подгружены через gl_loader.h (SDL_GL_GetProcAddress) до gpu_create().
+//  Исторически gpu.h был первым сеамом оркестратора кадра (renderer.c,
+//  selection.c). Теперь вся реализация живёт в srender_gl.c (sr_*), а этот
+//  файл только транслирует gpu_* в sr_* — чтобы существующие вызывающие не
+//  трогать. Новый код должен звать sr_* напрямую.
 // ============================================================================
 #include "gpu.h"
 
-#include "gl_loader.h"
+#include "srender.h"
 #include "resources.h"
 #include "shader.h"
 
-#include <stdlib.h>
+static SrDevice *s_sr = NULL;
 
-// Бэкенд-девайс: непрозрачный тип завершаем здесь (в реализации). Для GL
-// никакого внутреннего состояния не нужно — просто маркер "GL-бэкенд".
+// Непрозрачный в gpu.h тип завершаем здесь: маркер «GL-бэкенд через sr».
 struct GpuDevice { int backend; };
-static const GpuDevice s_dev = { 0 };
 
 const GpuDevice *gpu_create(void)
 {
+    if (!s_sr) s_sr = sr_create();
+    static const GpuDevice s_dev = { 0 };
     return &s_dev;
 }
 
 // --- Пресет кадра ---
 void gpu_bind_framebuffer(const GpuDevice *d, GpuFbo fbo)
-{
-    (void)d;
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-}
+{ (void)d; sr_bind_fbo(s_sr, fbo); }
 
 void gpu_viewport(const GpuDevice *d, int x, int y, int w, int h)
-{
-    (void)d;
-    glViewport(x, y, w, h);
-}
+{ (void)d; sr_viewport(s_sr, x, y, w, h); }
 
 void gpu_clear(const GpuDevice *d, float r, float g, float b, float a)
-{
-    (void)d;
-    glClearColor(r, g, b, a);
-    glDepthMask(GL_TRUE);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-}
+{ (void)d; sr_clear(s_sr, r, g, b, a, 1, 1); }
 
 // --- Состояние ---
 void gpu_depth_mask(const GpuDevice *d, int write_enabled)
-{
-    (void)d;
-    glDepthMask(write_enabled ? GL_TRUE : GL_FALSE);
-}
+{ (void)d; sr_depth_mask(s_sr, write_enabled); }
 
 void gpu_cap(const GpuDevice *d, GpuCap cap, int on)
 {
     (void)d;
-    GLenum glcap;
-    switch (cap) {
-        case GPU_CAP_DEPTH_TEST: glcap = GL_DEPTH_TEST; break;
-        case GPU_CAP_CULL_FACE:  glcap = GL_CULL_FACE;  break;
-        case GPU_CAP_BLEND:      glcap = GL_BLEND;      break;
-        default: return;
-    }
-    if (on) glEnable(glcap); else glDisable(glcap);
-}
-
-static GLenum blend_fac(GpuBlendFac f)
-{
-    switch (f) {
-        case GPU_BLEND_SRC_ALPHA: return GL_SRC_ALPHA;
-        case GPU_BLEND_ONE_MINUS_SRC_ALPHA: return GL_ONE_MINUS_SRC_ALPHA;
-        case GPU_BLEND_ZERO: return GL_ZERO;
-        case GPU_BLEND_ONE: return GL_ONE;
-        default: return GL_SRC_ALPHA;
-    }
+    static const SrStateCap map[] = {
+        [GPU_CAP_DEPTH_TEST] = SR_CAP_DEPTH_TEST,
+        [GPU_CAP_CULL_FACE]  = SR_CAP_CULL_FACE,
+        [GPU_CAP_BLEND]      = SR_CAP_BLEND,
+    };
+    sr_cap(s_sr, map[cap], on);
 }
 
 void gpu_blend_func(const GpuDevice *d, GpuBlendFac src, GpuBlendFac dst)
 {
     (void)d;
-    glBlendFunc(blend_fac(src), blend_fac(dst));
+    static const SrBlendFac map[] = {
+        [GPU_BLEND_SRC_ALPHA] = SR_BLEND_SRC_ALPHA,
+        [GPU_BLEND_ONE_MINUS_SRC_ALPHA] = SR_BLEND_ONE_MINUS_SRC_ALPHA,
+        [GPU_BLEND_ZERO] = SR_BLEND_ZERO,
+        [GPU_BLEND_ONE] = SR_BLEND_ONE,
+    };
+    sr_blend_func(s_sr, map[src], map[dst]);
 }
 
 void gpu_wireframe(const GpuDevice *d, int on)
-{
-    (void)d;
-#ifndef USE_GLES_PATH
-    glPolygonMode(GL_FRONT_AND_BACK, on ? GL_LINE : GL_FILL);
-#endif
-}
+{ (void)d; sr_wireframe(s_sr, on); }
 
 // --- Текстуры ---
 GpuTex gpu_tex_gen(const GpuDevice *d)
-{
-    (void)d;
-    GLuint id = 0;
-    glGenTextures(1, &id);
-    return id;
-}
+{ (void)d; return sr_tex_gen(s_sr); }
 
 void gpu_tex_delete(const GpuDevice *d, GpuTex *t)
-{
-    (void)d;
-    if (!t || !*t) return;
-    glDeleteTextures(1, t);
-    *t = 0;
-}
+{ (void)d; sr_tex_delete(s_sr, t); }
 
 void gpu_bind_cubemap(const GpuDevice *d, GpuTex t)
-{
-    (void)d;
-    glBindTexture(GL_TEXTURE_CUBE_MAP, t);
-}
+{ (void)d; sr_tex_bind(s_sr, SR_TEX_CUBE, t); }
 
 void gpu_bind_2d(const GpuDevice *d, GpuTex t)
-{
-    (void)d;
-    glBindTexture(GL_TEXTURE_2D, t);
-}
+{ (void)d; sr_tex_bind(s_sr, SR_TEX_2D, t); }
 
 void gpu_cubemap_rgba8(const GpuDevice *d, GpuTex t, int size)
 {
     (void)d;
-    glBindTexture(GL_TEXTURE_CUBE_MAP, t);
-    for (int face = 0; face < 6; face++) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8,
-                     size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    }
+    for (int face = 0; face < 6; face++)
+        sr_tex_image_2d(s_sr, t, face, SR_FMT_RGBA8, size, size,
+                        SR_PIX_RGBA, NULL);
 }
 
 void gpu_cubemap_face_rgba8(const GpuDevice *d, GpuTex t, int face,
                             int w, int h, const void *pixels)
-{
-    (void)d;
-    glBindTexture(GL_TEXTURE_CUBE_MAP, t);
-    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8,
-                 w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-}
+{ (void)d; sr_tex_image_2d(s_sr, t, face, SR_FMT_RGBA8, w, h,
+                           SR_PIX_RGBA, pixels); }
 
 void gpu_cubemap_face_rgb8(const GpuDevice *d, GpuTex t, int face,
                            int w, int h, const void *pixels)
-{
-    (void)d;
-    glBindTexture(GL_TEXTURE_CUBE_MAP, t);
-    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB8,
-                 w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
-}
+{ (void)d; sr_tex_image_2d(s_sr, t, face, SR_FMT_RGB8, w, h,
+                           SR_PIX_RGB, pixels); }
 
 void gpu_cubemap_face_depth24(const GpuDevice *d, GpuTex t, int face, int size)
-{
-    (void)d;
-    glBindTexture(GL_TEXTURE_CUBE_MAP, t);
-    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24,
-                 size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
-}
+{ (void)d; sr_tex_image_2d(s_sr, t, face, SR_FMT_DEPTH24, size, size,
+                           SR_PIX_DEPTH_UINT, NULL); }
 
 void gpu_tex_params_cubemap(const GpuDevice *d, GpuTex t, int linear_min)
 {
     (void)d;
-    glBindTexture(GL_TEXTURE_CUBE_MAP, t);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER,
-                    linear_min ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER,
-                    linear_min ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    sr_tex_params(s_sr, t, SR_TEX_CUBE,
+                  linear_min ? SR_FILTER_LINEAR : SR_FILTER_NEAREST,
+                  linear_min ? SR_FILTER_LINEAR : SR_FILTER_NEAREST,
+                  SR_WRAP_CLAMP, SR_WRAP_CLAMP, SR_WRAP_CLAMP);
 }
 
 void gpu_active_texture(const GpuDevice *d, int unit)
-{
-    (void)d;
-    glActiveTexture((GLenum)(GL_TEXTURE0 + unit));
-}
+{ (void)d; sr_tex_active(s_sr, unit); }
 
 // --- Фреймбуферы ---
 GpuFbo gpu_fbo_gen(const GpuDevice *d)
-{
-    (void)d;
-    GLuint id = 0;
-    glGenFramebuffers(1, &id);
-    return id;
-}
+{ (void)d; return sr_fbo_gen(s_sr); }
 
 void gpu_fbo_delete(const GpuDevice *d, GpuFbo *fbo)
-{
-    (void)d;
-    if (!fbo || !*fbo) return;
-    glDeleteFramebuffers(1, fbo);
-    *fbo = 0;
-}
+{ (void)d; sr_fbo_delete(s_sr, fbo); }
 
 void gpu_fbo_attach_cubemap_color(const GpuDevice *d, GpuFbo fbo,
                                   GpuTex t, int face)
 {
     (void)d;
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, t, 0);
+    sr_fbo_attach_tex(s_sr, fbo, 0, SR_TEX_CUBE, t, face);
 }
 
 void gpu_fbo_attach_cubemap_depth(const GpuDevice *d, GpuFbo fbo,
                                   GpuTex t, int face)
 {
     (void)d;
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                           GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, t, 0);
+    sr_fbo_attach_tex(s_sr, fbo, -1, SR_TEX_CUBE, t, face);
 }
 
 int gpu_fbo_complete(const GpuDevice *d)
-{
-    (void)d;
-    return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-}
+{ (void)d; return sr_fbo_complete(s_sr); }
 
 int gpu_fbo_current(const GpuDevice *d)
-{
-    (void)d;
-    GLint id = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &id);
-    return (int)id;
-}
+{ (void)d; return sr_fbo_current(s_sr); }
 
 // --- Чтение обратно ---
 void gpu_read_rgb(const GpuDevice *d, int x, int y, int w, int h, void *out)
-{
-    (void)d;
-    glReadPixels(x, y, w, h, GL_RGB, GL_UNSIGNED_BYTE, out);
-}
+{ (void)d; sr_read_pixels(s_sr, x, y, w, h, SR_PIX_RGB, out); }
 
 // --- Программы/шейдеры ---
 GpuProg gpu_program_new(const GpuDevice *d, const char *vs_path, const char *fs_path)
-{
-    (void)d;
-    return make_program(vs_path, fs_path);
-}
+{ (void)d; return sr_prog_new(s_sr, vs_path, fs_path); }
 
 void gpu_program_delete(const GpuDevice *d, GpuProg *prog)
-{
-    (void)d;
-    if (!prog || !*prog) return;
-    resources_program_release(*prog);
-    *prog = 0;
-}
+{ (void)d; sr_prog_delete(s_sr, prog); }
 
 void gpu_use_program(const GpuDevice *d, GpuProg prog)
-{
-    (void)d;
-    glUseProgram(prog);
-}
+{ (void)d; sr_prog_use(s_sr, prog); }
 
 GpuLoc gpu_program_loc(const GpuDevice *d, GpuProg prog, const char *name)
-{
-    (void)d;
-    return (GpuLoc)glGetUniformLocation(prog, name);
-}
+{ (void)d; return (GpuLoc)sr_prog_loc(s_sr, prog, name); }
 
 // --- Вершинные массивы и буферы ---
 GpuVao gpu_vao_gen(const GpuDevice *d)
-{
-    (void)d;
-    GLuint id = 0;
-    glGenVertexArrays(1, &id);
-    return id;
-}
+{ (void)d; return sr_vao_gen(s_sr); }
 
 void gpu_vao_delete(const GpuDevice *d, GpuVao *vao)
-{
-    (void)d;
-    if (!vao || !*vao) return;
-    glDeleteVertexArrays(1, vao);
-    *vao = 0;
-}
+{ (void)d; sr_vao_delete(s_sr, vao); }
 
 void gpu_vao_bind(const GpuDevice *d, GpuVao vao)
-{
-    (void)d;
-    glBindVertexArray(vao);
-}
+{ (void)d; sr_vao_bind(s_sr, vao); }
 
 GpuBuf gpu_buf_gen(const GpuDevice *d)
-{
-    (void)d;
-    GLuint id = 0;
-    glGenBuffers(1, &id);
-    return id;
-}
+{ (void)d; return sr_buf_gen(s_sr); }
 
 void gpu_buf_delete(const GpuDevice *d, GpuBuf *buf)
-{
-    (void)d;
-    if (!buf || !*buf) return;
-    glDeleteBuffers(1, buf);
-    *buf = 0;
-}
+{ (void)d; sr_buf_delete(s_sr, buf); }
 
 void gpu_buf_bind_array(const GpuDevice *d, GpuBuf buf)
-{
-    (void)d;
-    glBindBuffer(GL_ARRAY_BUFFER, buf);
-}
+{ (void)d; sr_buf_bind(s_sr, SR_BUF_ARRAY, buf); }
 
 void gpu_buf_upload_array(const GpuDevice *d, const void *data,
                           unsigned int bytes, int stream)
-{
-    (void)d;
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)bytes, data,
-                 stream ? GL_STREAM_DRAW : GL_STATIC_DRAW);
-}
+{ (void)d; sr_buf_upload(s_sr, SR_BUF_ARRAY, data, bytes, !stream); }
 
 void gpu_vertex_attr_3f(const GpuDevice *d, GpuLoc loc,
                         int stride_bytes, const void *offset)
 {
     (void)d;
-    glVertexAttribPointer(loc, 3, GL_FLOAT, GL_FALSE, stride_bytes, offset);
-    glEnableVertexAttribArray(loc);
+    sr_attrib_float(s_sr, loc, 3, stride_bytes,
+                    (unsigned int)(size_t)offset, 0);
 }
 
 // --- Юниформы ---
 void gpu_uniform_mat4(const GpuDevice *d, GpuLoc loc, const float *m)
-{
-    (void)d;
-    glUniformMatrix4fv(loc, 1, GL_FALSE, m);
-}
+{ (void)d; sr_uniform_mat4(s_sr, loc, m); }
 
 void gpu_uniform_float3(const GpuDevice *d, GpuLoc loc, float x, float y, float z)
-{
-    (void)d;
-    glUniform3f(loc, x, y, z);
-}
+{ (void)d; sr_uniform_float3(s_sr, loc, x, y, z); }
 
 // --- Рисование ---
 void gpu_draw_arrays(const GpuDevice *d, GpuPrim prim, int vertex_count)
 {
     (void)d;
-    glDrawArrays(prim == GPU_PRIM_LINES ? GL_LINES : GL_TRIANGLES, 0, vertex_count);
+    sr_draw_arrays(s_sr, prim == GPU_PRIM_LINES ? SR_PRIM_LINES
+                                                : SR_PRIM_TRIANGLES,
+                   0, vertex_count);
 }

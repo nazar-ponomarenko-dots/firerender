@@ -41,8 +41,9 @@ GLuint voxfog_texture(void);        // этот композит (текстур
 
 // Полноэкранный проход: композит bloom'а (цвет) + глубина сцены + марш
 // по каскадам -> экран. ПОЛНОЕ разрешение. Камера/солнце/тени — из rc.
-void voxfog_render(int vw, int vh, const RendererContext *rc,
-                   GLuint bloomed_tex, GLuint scene_depth);
+void voxfog_render(int scene_w, int scene_h, int out_w, int out_h,
+                   const RendererContext *rc, GLuint bloomed_tex,
+                   GLuint scene_depth);
 
 int  voxfog_is_on(void);
 void voxfog_toggle(void);

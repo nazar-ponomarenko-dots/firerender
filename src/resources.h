@@ -61,7 +61,7 @@ void resources_shutdown(void);
 
 // --- Hot-reload шейдеров (см. shader.h) ---------------------------------------
 // Хук пересборки: вызывается после перекомпиляции изменённых программ
-// (модуль повторно ищет uniform'ы и статичные uniform'ы). До 8 хуков.
+// (модуль повторно ищет uniform'ы и статичные uniform'ы).
 typedef void (*ReshadeFn)(void);
 void resources_on_reshade(ReshadeFn fn);
 

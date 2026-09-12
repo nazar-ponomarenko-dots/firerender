@@ -19,9 +19,9 @@
 static const char *shader_version(GLenum type)
 {
 #ifdef USE_GLES_PATH
-    if (type == GL_FRAGMENT_SHADER)
-        return "#version 300 es\nprecision highp float;\n";  // GLES: точность обязательна
-    return "#version 300 es\n";
+    if (type == GL_COMPUTE_SHADER)
+        return "#version 310 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
+    return "#version 300 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
 #else
     if (type == GL_COMPUTE_SHADER)
         return "#version 430 core\n";   // compute-шейдеры требуют GLSL 4.30+

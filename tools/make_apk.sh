@@ -1,0 +1,124 @@
+#!/bin/sh
+# ============================================================================
+#  make_apk.sh — сборка firerender.apk ОДНОЙ командой (make apk)
+# ----------------------------------------------------------------------------
+#  Полностью локально, без gradle: NDK-кросс-компиляция движка -> aapt2 ->
+#  javac+d8 (SDLActivity) -> zipalign -> apksigner (debug-ключ).
+#  ABI: arm64-v8a (телефоны/планшеты) + x86_64 (эмулятор).
+#  Ресурсы (map/, img/, shaders/, lua/, audio/, cubemaps/, maps/)
+#  пакуются в APK как assets и распаковываются на устройстве при первом
+#  запуске (src/android.c, манифест списка — assets/assets.txt).
+#  models/ временно исключены (тяжёлый vaz-2105.glb 47М тянет ANR).
+# ============================================================================
+set -e
+cd "$(dirname "$0")/.."
+
+SDK=${ANDROID_SDK:-/opt/android-sdk}
+NDK=${NDK:-$SDK/ndk/28.2.13676358}
+BT=$SDK/build-tools/36.0.0
+PLATFORM=$SDK/platforms/android-36/android.jar
+CMAKE="$SDK/cmake/3.22.1/bin/cmake"
+ENV_CLEAN="env -u LD_PRELOAD -u LD_LIBRARY_PATH"   # AppImage-окружение ломает cmake
+
+ABIS=${FR_ABIS:-"arm64-v8a x86_64"}
+VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+# versionCode берём из buildnum.txt чтобы совпадало с ENGINE_BUILD_NUM
+if [ -f buildnum.txt ]; then BUILD_NUM=$(cat buildnum.txt); else BUILD_NUM=1; fi
+BUILD=build/android
+PKG=ru.zaworg.firerender
+
+rm -rf "$BUILD"
+mkdir -p "$BUILD"/{lib,assets,gen,classes,filtered}
+
+echo "== 1/6 SDL3 (вендорена, third_party/SDL) =="
+for ABI in $ABIS; do
+    SDLB=build/and-sdl-$ABI
+    if [ ! -f "$SDLB/libSDL3.so" ]; then
+        $ENV_CLEAN $CMAKE -S third_party/SDL -B "$SDLB" \
+            -DBUILD_SHARED_LIBS=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=$ABI -DANDROID_PLATFORM=android-24 \
+            > /tmp/apk-sdl-conf-$ABI.log 2>&1
+        $ENV_CLEAN $CMAKE --build "$SDLB" -j$(nproc) > /tmp/apk-sdl-build-$ABI.log 2>&1
+    fi
+    mkdir -p "$BUILD/lib/$ABI"
+    cp "$SDLB/libSDL3.so" "$BUILD/lib/$ABI/"
+done
+
+echo "== 2/6 движок (libmain.so) =="
+# GLES-путь: __ANDROID__ включает его сам (gl_loader.h)
+SRC="src/*.c third_party/lua/lua.c third_party/miniz/miniz.c third_party/miniz/miniz_zip.c third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_tdef.c"
+for ABI in $ABIS; do
+    case $ABI in
+        arm64-v8a) TRIPLE24=aarch64-linux-android24 ;;
+        x86_64)    TRIPLE24=x86_64-linux-android24 ;;
+        *) echo "неизвестный ABI $ABI"; exit 1 ;;
+    esac
+    # NDK r28: только враперы с уровнем API в имени (android-24 = наш минимум)
+    CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/$TRIPLE24-clang
+    $CC -O2 -Wall -Wextra -shared -fPIC \
+        -Isrc -Ithird_party -Ithird_party/lua -Ithird_party/miniz \
+        -Ithird_party/SDL/include \
+        $SRC -o "$BUILD/lib/$ABI/libmain.so" \
+        -L"$BUILD/lib/$ABI" -lSDL3 -lm -landroid -llog \
+        -Wl,--no-undefined > /tmp/apk-main-$ABI.log 2>&1 \
+        || { echo "ошибка компиляции $ABI:"; grep -E "error|ошибка" /tmp/apk-main-$ABI.log | head -20; exit 1; }
+done
+
+echo "== 3/6 ресурсы в assets =="
+# assets.txt — манифест для распаковки (src/android.c); иконки не нужны
+# models/ исключены — см. коммент в шапке
+printf '%s\n' "$VERSION" > "$BUILD/assets/assets.version"
+: > "$BUILD/assets/assets.txt"
+for d in map img shaders lua audio cubemaps maps; do
+    [ -d "$d" ] || continue
+    mkdir -p "$BUILD/assets/$d"
+    cp -r "$d"/. "$BUILD/assets/$d/"
+done
+find map img shaders lua audio cubemaps maps -type f ! -name '.*' 2>/dev/null | sort > "$BUILD/assets/assets.txt"
+cp "$BUILD/assets/assets.txt" /tmp/apk-assets-list.txt
+
+echo "== 4/6 java (SDLActivity) =="
+mkdir -p "$BUILD/gen"
+cp -r third_party/SDL/android-project/app/src/main/java/org "$BUILD/gen/"
+mkdir -p "$BUILD/gen/ru/zaworg/firerender"
+cp android/app/src/main/java/ru/zaworg/firerender/MainActivity.java "$BUILD/gen/ru/zaworg/firerender/"
+find "$BUILD/gen" -name '*.java' > "$BUILD/java-list.txt"
+$SDK/../android-studio/jbr/bin/javac --release 11 -cp "$PLATFORM" \
+    -d "$BUILD/classes" @"$BUILD/java-list.txt" > /tmp/apk-javac.log 2>&1 \
+    || { echo "javac:"; tail -10 /tmp/apk-javac.log; exit 1; }
+$BT/d8 --release --min-api 24 --lib "$PLATFORM" \
+    $(find "$BUILD/classes" -name '*.class') \
+    --output "$BUILD" > /tmp/apk-d8.log 2>&1 || { echo "d8:"; tail -5 /tmp/apk-d8.log; exit 1; }
+
+echo "== 5/6 упаковка (aapt2) =="
+# Передаём sdk/version явно — без этого aapt2 ставит sdkVersion=1 и versionCode='' (см. aapt2 dump badging)
+$BT/aapt2 link -I "$PLATFORM" \
+    --manifest android/app/src/main/AndroidManifest.xml \
+    --java "$BUILD/gen" --auto-add-overlay \
+    --min-sdk-version 24 --target-sdk-version 36 \
+    --version-code "$BUILD_NUM" --version-name "$VERSION" \
+    -A "$BUILD/assets" \
+    -o "$BUILD/base.apk"
+
+cd "$BUILD"
+zip -q -j base.apk classes.dex   # dex в корень APK
+for ABI in $ABIS; do
+    zip -q base.apk "lib/$ABI/libSDL3.so" "lib/$ABI/libmain.so"
+done
+# Важно: путь внутри APK ДОЛЖЕН быть lib/<ABI>/ — только его видит PackageManager.
+# extractNativeLibs="true" в манифесте, поэтому сжатие не критично, но можно
+# хранить без сжатия (-0) для extractNativeLibs=false.
+
+echo "== 6/6 подпись (debug) =="
+$BT/zipalign -f 4 base.apk aligned.apk
+KS=~/.android/debug.keystore
+if [ ! -f "$KS" ]; then
+    keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
+        -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+        -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+fi
+$BT/apksigner sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+    --out firerender.apk aligned.apk
+$BT/apksigner verify firerender.apk && echo "APK OK: $(pwd)/firerender.apk ($(du -h firerender.apk | cut -f1))"

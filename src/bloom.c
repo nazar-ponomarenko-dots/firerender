@@ -87,10 +87,14 @@ static GLuint make_color_tex(int w, int h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    // HDR: сцена и glow — полуfloat (RGBA16F), чтобы яркие участки не
-    // срезались при накоплении; тонмаппинг происходит в композите.
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0,
-                 GL_RGBA, GL_HALF_FLOAT, NULL);
+    // На LDR/GLES glow тоже RGBA8: bloom в low-end профиле выключен, но
+    // валидный таргет нужен для мгновенного переключения без unsupported RT.
+    if (cvar_get("r_scene_ldr") > 0.5f)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0,
+                     GL_RGBA, GL_HALF_FLOAT, NULL);
     return id;
 }
 
@@ -198,9 +202,14 @@ static int msaa_wanted(void)
     for (unsigned i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
         if (allowed[i] <= s) best = allowed[i];
     if (best > 0) {
-        int maxs = 0;
-        glGetIntegerv(GL_MAX_SAMPLES, &maxs);
-        if (best > maxs) best = (maxs >= 16) ? 16 : 0;   // 4x не влез — выкл
+        static int maxs_cached = -1;
+        if (maxs_cached < 0) glGetIntegerv(GL_MAX_SAMPLES, &maxs_cached);
+        int maxs = maxs_cached;
+        if (best > maxs) {
+            best = 0;
+            for (unsigned i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
+                if (allowed[i] <= s && allowed[i] <= maxs) best = allowed[i];
+        }
         // Кэп по разрешению окна: на 4К 8-16 сэмплов — это десятки мс
         // чистого bandwidth, а разница с 4x на такой плотности пикселей
         // на глаз отсутствует
@@ -233,11 +242,15 @@ static void msaa_create(BloomParams *b, int samples)
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                               GL_RENDERBUFFER, b->rbo_depth);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        // Драйвер не даёт мультисэмпл-RGBA16F — честный фолбэк без MSAA
+        // Драйвер не даёт мультисэмпл-RGBA16F — честный фолбэк без MSAA.
+        // Запоминаем комбинацию, иначе sync пересоздавал этот FBO каждый кадр.
         SDL_Log("MSAA %dx: FBO incomplete, выключаю (без сглаживания)", samples);
+        b->msaa_failed = samples;
+        b->msaa_failed_ldr = b->scene_ldr;
         msaa_free(b);
     } else {
         b->msaa = samples;
+        b->msaa_failed = 0;
         SDL_Log("MSAA: %dx", samples);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -246,6 +259,7 @@ static void msaa_create(BloomParams *b, int samples)
 void bloom_msaa_sync(BloomParams *b)
 {
     int want = msaa_wanted();
+    if (want == b->msaa_failed && b->scene_ldr == b->msaa_failed_ldr) return;
     if (want != b->msaa) msaa_create(b, want);
 }
 
@@ -328,6 +342,7 @@ void bloom_resize(BloomParams *b, int vw, int vh)
     if (vw <= 0 || vh <= 0) return;
     b->vw = vw;
     b->vh = vh;
+    b->msaa_failed = 0;
     int gw = vw / 2, gh = vh / 2;
     if (gw < 1) gw = 1;
     if (gh < 1) gh = 1;

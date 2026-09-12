@@ -28,6 +28,7 @@
 #include "mesh.h"
 #include "png.h"
 #include "renderer.h"
+#include "resources.h"
 #include "selection.h"
 #include "shader.h"
 #include "splat.h"
@@ -123,13 +124,57 @@ void cmd_pause(const char *args)
 // Выбор карты: map <имя> — "map" (папка) или имя из maps/*.zip.
 // Если мир загружен — перезапускает игру на новой карте прямо сейчас.
 static int s_map_switching = 0;   // рекурсия: скрипт/команда грузит карту внутри game_load_world
+static int map_reload(Game *g, const char *name, int force)
+{
+    if (!g || g->world_loading || s_map_switching) {
+        console_print("map: вложенный вызов игнорируется (карта уже грузится)");
+        return -1;
+    }
+    if (!force && g->world_loaded && strcmp(name, g->map_name) == 0) {
+        console_print("map \"%s\" уже загружена", name);
+        return 0;
+    }
+    // Проверяем пакет до разрушения текущего мира. Полноценная загрузка всё ещё
+    // может упасть позднее, но простая опечатка больше не выбрасывает игрока.
+    if (strcmp(name, "map") != 0) {
+        char path[160], resolved[512];
+        snprintf(path, sizeof path, "maps/%s.zip", name);
+        if (!resources_resolve_path(path, resolved, sizeof resolved)) {
+            console_print("map: нет %s", path);
+            return -1;
+        }
+    }
+    snprintf(g->map_name, sizeof g->map_name, "%s", name);
+    if (!g->world_loaded) {
+        SDL_Log("Map selected: %s (загрузится при НОВОЙ ИГРЕ)", g->map_name);
+        return 0;
+    }
+    s_map_switching = 1;
+    game_unload_world(g);
+    int rc = game_load_world(g);
+    s_map_switching = 0;
+    if (rc != 0) {
+        SDL_Log("Map %s load failed", g->map_name);
+        snprintf(g->map_name, sizeof g->map_name, "map1");
+        app_set_state(APP_MENU);
+        return -1;
+    }
+    game_demo_stop(g);
+    bool was_load = g->player.pending_spawn != 0;
+    if (g->player.pending_spawn) {
+        game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
+                         g->player.save_pitch);
+        g->player.pending_spawn = 0;
+    }
+    if (was_load) commands_apply_saved_world_state();
+    app_set_state(APP_PLAY);
+    SDL_Log("Map loaded: %s", g->map_name);
+    return 0;
+}
+
 void cmd_map_select(const char *args)
 {
     Game *g = game_instance();
-    if (s_map_switching) {
-        console_print("map: вложенный вызов игнорируется (карта уже грузится)");
-        return;
-    }
     char name[64];
     if (sscanf(args, "%63s", name) != 1 || !name[0]) {
         console_print("current map: %s", g->map_name);
@@ -137,39 +182,7 @@ void cmd_map_select(const char *args)
         console_print("maps — список карт");
         return;
     }
-    if (g->world_loaded && strcmp(name, g->map_name) == 0) {
-        console_print("map \"%s\" уже загружена", name);
-        return;
-    }
-    snprintf(g->map_name, sizeof g->map_name, "%s", name);
-    if (g->world_loaded) {
-        // Перезагрузка мира на новой карте: выгрузить -> загрузить -> в игру.
-        // Флаг рекурсии: game_load_world -> map_apply/скрипт карты может сам
-        // выполнить "map X" — вложенный cmd_map_select мы отбрасываем, иначе
-        // мир выгрузится внутри собственной загрузки (UAF/double free сцены).
-        s_map_switching = 1;
-        game_unload_world(g);
-        int rc = game_load_world(g);
-        s_map_switching = 0;
-        if (rc != 0) {
-            SDL_Log("Map %s load failed", g->map_name);
-            snprintf(g->map_name, sizeof g->map_name, "map1");
-            app_set_state(APP_MENU);
-            return;
-        }
-        game_demo_stop(g);
-        bool was_load = g->player.pending_spawn != 0;
-        if (g->player.pending_spawn) { // load: телепорт в сохранённую точку
-            game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
-                             g->player.save_pitch);
-            g->player.pending_spawn = 0;
-        }
-        if (was_load) commands_apply_saved_world_state(); // восстановить мир при load
-        app_set_state(APP_PLAY);
-        SDL_Log("Map loaded: %s", g->map_name);
-    } else {
-        SDL_Log("Map selected: %s (загрузится при НОВОЙ ИГРЕ)", g->map_name);
-    }
+    map_reload(g, name, 0);
 }
 
 // Список доступных карт (команда maps)
@@ -184,7 +197,8 @@ void cmd_maps_list(const char *args)
 void cmd_restart(const char *args)
 {
     (void)args;
-    cmd_map_select(game_instance()->map_name);   // перезапустить текущую карту
+    Game *g = game_instance();
+    map_reload(g, g->map_name, 1);
 }
 
 void cmd_changelevel(const char *args)

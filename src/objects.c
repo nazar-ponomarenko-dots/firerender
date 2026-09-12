@@ -539,7 +539,9 @@ void objects_node_render(SceneNode *n, float dt)
         glUseProgram(0);
     }
 
-    GLuint cur = 0;
+    GLuint cur = 0, cur_tex = 0;
+    Material mat_cache;
+    int mat_valid = 0;
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
         // Отсечение фрустумом: сфера (позиция + максимальный размер)
@@ -553,15 +555,17 @@ void objects_node_render(SceneNode *n, float dt)
             const ObjLocs *l = it->prog ? &it->locs : &p->locs;
             glUseProgram(prog);
             set_per_frame(l, p);
+            mat_valid = 0;
         }
         const ObjLocs *l = it->prog ? &it->locs : &p->locs;
 
-        // Материал: состояние GL (блендинг/отсечение/глубина) + uniform'ы
-        // (tint/alpha/blend/UV-анимация) — см. material.h
-        material_bind(&it->r, &l->mat, s_time);
+        material_bind_cached(&it->r, &l->mat, s_time, &mat_cache, &mat_valid);
 
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, it->tex);
+        if (it->tex != cur_tex) {
+            cur_tex = it->tex;
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, it->tex);
+        }
         glUniform3f(l->u_objpos, it->pos[0], it->pos[1], it->pos[2]);
         glUniform2f(l->u_objsize, it->width, it->height);
         if (l->u_objslope >= 0)

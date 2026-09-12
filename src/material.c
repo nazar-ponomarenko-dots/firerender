@@ -92,7 +92,6 @@ void material_locs_init(MaterialLocs *ml, GLuint prog)
 // предыдущего инстанса не «протекают».
 void material_bind(const Material *m, const MaterialLocs *ml, float time)
 {
-    // --- Состояние GL ---
     if (m->set) {
         if (m->blend == MAT_BLEND_ALPHA) {
             glEnable(GL_BLEND);
@@ -115,7 +114,6 @@ void material_bind(const Material *m, const MaterialLocs *ml, float time)
         glDisable(GL_CULL_FACE);
         glDepthMask(GL_TRUE);
     }
-    // --- Uniform'ы (необязательные = -1) ---
     if (ml->u_tint >= 0)
         glUniform3f(ml->u_tint, m->tint[0], m->tint[1], m->tint[2]);
     if (ml->u_blend >= 0) glUniform1i(ml->u_blend, m->blend);
@@ -127,4 +125,17 @@ void material_bind(const Material *m, const MaterialLocs *ml, float time)
     if (ml->u_uvscroll >= 0)
         glUniform2f(ml->u_uvscroll, m->scroll[0], m->scroll[1]);
     if (ml->u_time >= 0) glUniform1f(ml->u_time, time);
+}
+
+void material_bind_cached(const Material *m, const MaterialLocs *ml, float time,
+                          Material *cache, int *valid)
+{
+    if (*valid && memcmp(cache, m, sizeof *m) == 0) {
+        if (ml->u_time >= 0 && (m->scroll[0] != 0.0f || m->scroll[1] != 0.0f))
+            glUniform1f(ml->u_time, time);
+        return;
+    }
+    material_bind(m, ml, time);
+    *cache = *m;
+    *valid = 1;
 }

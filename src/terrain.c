@@ -606,15 +606,18 @@ void terrain_node_render(SceneNode *n, float dt)
     TerrainParams *p = n->params;
     const RendererContext *rc = p->rc;
 
-    // Регистрация LOD-дистанций как cvar'ов (no-op при повторе).
-    cvar_register_ex("r_terrain_lod1", s_lod1, 10.0f, 2000.0f, CVAR_ARCHIVE,
-                     "рельеф LOD1: дальность детальной сетки, м");
-    cvar_register_ex("r_terrain_lod2", s_lod2, 20.0f, 4000.0f, CVAR_ARCHIVE,
-                     "рельеф LOD2: дальность средней сетки, м");
-    cvar_register_ex("r_terrain_lod3", s_lod3, 30.0f, 8000.0f, CVAR_ARCHIVE,
-                     "рельеф LOD3: дальность грубой сетки, м");
-    cvar_register_ex("r_terr_detail_dist", 0.0f, 0.0f, 500.0f, CVAR_ARCHIVE,
-                     "LOD деталей террейна: дальше — базовая карта (0 = выкл)");
+    static int s_cvar_reg = 0;
+    if (!s_cvar_reg) {
+        cvar_register_ex("r_terrain_lod1", s_lod1, 10.0f, 2000.0f, CVAR_ARCHIVE,
+                         "рельеф LOD1: дальность детальной сетки, м");
+        cvar_register_ex("r_terrain_lod2", s_lod2, 20.0f, 4000.0f, CVAR_ARCHIVE,
+                         "рельеф LOD2: дальность средней сетки, м");
+        cvar_register_ex("r_terrain_lod3", s_lod3, 30.0f, 8000.0f, CVAR_ARCHIVE,
+                         "рельеф LOD3: дальность грубой сетки, м");
+        cvar_register_ex("r_terr_detail_dist", 0.0f, 0.0f, 500.0f, CVAR_ARCHIVE,
+                         "LOD деталей террейна: дальше — базовая карта (0 = выкл)");
+        s_cvar_reg = 1;
+    }
 
     // Теневой проход (RP_SHADOW): глубина рельефа в текущий каскад.
     // Оркестрацию делает shadow.c (см. shadow_render в renderer_frame).

@@ -51,9 +51,18 @@ vec3 wpos(vec2 uv, float depth) {
     return wp.xyz / wp.w;
 }
 
+float sample_height16(vec2 uv) {
+    vec2 h = texture(uHeightmap, uv).rg;
+#ifdef FR_HEIGHT_RG8
+    return (h.r * 65280.0 + h.g * 255.0) / 65535.0;
+#else
+    return h.r;
+#endif
+}
+
 // Высота рельефа в мировой точке (та же формула, что в volumetric.fs)
 float terrain_h(vec2 xz) {
-    return mix(uHeightMin, uHeightMax, texture(uHeightmap, xz / uWorldSize).r);
+    return mix(uHeightMin, uHeightMax, sample_height16(xz / uWorldSize));
 }
 
 void main() {

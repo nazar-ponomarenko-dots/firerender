@@ -22,7 +22,7 @@ void main()
         // Чистый диск: максимально белый и яркий, без текстуры.
         float d = length(vUV - 0.5);
         if (d > 0.5) discard;
-        float mask = smoothstep(0.5, 0.28, d);   // мягкая кромка
+        float mask = 1.0 - smoothstep(0.28, 0.5, d);   // мягкая кромка
         col = col * (1.25 + 0.5 * mask);         // слегка выжигаем в белое
         FragColor = vec4(col * a * mask, a * mask);
         return;
@@ -32,7 +32,8 @@ void main()
         float t = vUV.y;
         // Капля ярче у головы (t→1), плавно затухает к хвосту, чтобы стрик
         // читался как летящая капля, а не симметричный жёсткий стержень.
-        float dropMask = smoothstep(0.0, 0.15, t) * smoothstep(1.0, 0.55, t);
+        float dropMask = smoothstep(0.0, 0.15, t) *
+                         (1.0 - smoothstep(0.55, 1.0, t));
         // Вертикальный тайлинг: с REPEAT текстура реально повторяется вдоль
         vec2 texUV = vec2(vUV.x, t * 4.0);
         vec4 tTex = texture(uTex, texUV);

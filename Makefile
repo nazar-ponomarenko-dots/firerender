@@ -45,6 +45,7 @@ SRC := $(wildcard src/*.c) \
        third_party/miniz/miniz.c third_party/miniz/miniz_zip.c \
        third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_tdef.c
 BIN := build/firerender
+GLES_BIN := build/firerender-gles
 
 # Первая цель в файле — buildnum (phony); чтобы «make» собирал движок, а не
 # только счётчик, фиксируем цель по умолчанию.
@@ -76,6 +77,15 @@ $(BIN): $(SRC) buildnum
 # лучший бэкенд (на Wayland-сессии это будет родной Wayland + EGL).
 run: $(BIN)
 	./$(BIN)
+
+# Второй renderer-профиль: OpenGL ES 3.0 через SDL/EGL. Нужны системные
+# GLES3-заголовки; линковка остаётся через SDL, как у desktop GL.
+gles:
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DUSE_GLES $(SRC) -o $(GLES_BIN) $(LIBS)
+
+run-gles: gles
+	./$(GLES_BIN)
 
 # --- Портативный Linux-бинарник (все ресурсы вшиты, SDL3 статически) ----------
 # ./firerender — самодостаточный: map/, img/, shaders/ вшиты в exe (не нужны
@@ -156,5 +166,14 @@ clean:
 distclean:
 	rm -rf build
 
+# --- Android APK (одной командой; см. tools/make_apk.sh) ----------------------
+# Нужны: Android SDK (/opt/android-sdk по умолчанию или ANDROID_SDK=...), NDK
+# r28+, build-tools 36. Ресурсы пакуются в APK как assets и распаковываются
+# на устройстве при первом запуске. ABI: arm64-v8a + x86_64 (эмулятор);
+# сузить: FR_ABIS="arm64-v8a" make apk
+apk:
+	ANDROID_SDK=$(if $(ANDROID_SDK),$(ANDROID_SDK),/opt/android-sdk) tools/make_apk.sh
+	@echo "Готово: build/android/firerender.apk"
+
 # .PHONY — эти цели не являются файлами, их нужно выполнять всегда.
-.PHONY: run clean distclean linux win winpkg buildnum
+.PHONY: run gles run-gles clean distclean linux win winpkg apk buildnum

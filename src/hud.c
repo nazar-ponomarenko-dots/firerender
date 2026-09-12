@@ -24,6 +24,8 @@
 
 #include <SDL3/SDL.h>
 
+static float hud_mobile_scale(int vw, int vh);
+
 // TTF-шрифт Inter 18pt Black (img/Inter_18pt-Black.ttf): атлас растеризуется
 // один раз при старте через stb_truetype, глифы ставятся по метрикам шрифта
 // (advance/беринг) — строки не "летят", как с фиксированной сеткой 8x8.
@@ -314,6 +316,11 @@ float hud_text_width(const char *s)
         s += utf8_decode(s, &cp);
         w += hud_cp_width(cp);
     }
+#ifdef __ANDROID__
+    // Скейл текста уже применяется в hud_build_line, но ширина для layout тоже должна скейлиться
+    // Берём текущий viewport из g_hud если есть
+    if (g_hud && g_hud->vw) w *= hud_mobile_scale(g_hud->vw, g_hud->vh);
+#endif
     return w;
 }
 
@@ -325,6 +332,9 @@ float hud_text_width_small(const char *s)
         s += utf8_decode(s, &cp);
         w += hud_cp_width_small(cp);
     }
+#ifdef __ANDROID__
+    if (g_hud && g_hud->vw) w *= hud_mobile_scale(g_hud->vw, g_hud->vh);
+#endif
     return w;
 }
 
@@ -455,10 +465,24 @@ float hud_text_descent_big(void)
     return s_font_big.descent_px;
 }
 
+static float hud_mobile_scale(int vw, int vh)
+{
+#ifdef __ANDROID__
+    float s = fminf((float)vw / 1280.0f, (float)vh / 720.0f);
+    if (s < 1.3f) s = 1.3f;
+    if (s > 2.2f) s = 2.2f;
+    return s;
+#else
+    (void)vw; (void)vh; return 1.0f;
+#endif
+}
+
 void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
                    const float color[4])
 {
     if (!g_hud) return;
+    // Позиции панелей уже скейлятся вызывающими (app.c), глифы — в
+    // hud_build_line; здесь скейл не нужен.
     float nx0 = -1.0f + 2.0f * x / vw;
     float nx1 = -1.0f + 2.0f * (x + w) / vw;
     float ny0 =  1.0f - 2.0f * (y + h) / vh;
@@ -485,18 +509,21 @@ static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
                            float x_px, float y_base, const char *s)
 {
     float vw = p->vw, vh = p->vh;
+    float sc = hud_mobile_scale((int)vw, (int)vh);
     while (*s && *nv < HUD_MAX_GLYPHS - 6) {
         int cp = 0;
         int l = utf8_decode(s, &cp);
         int slot = font_slot(cp);
         if (slot < 0) slot = font_slot('?');
         const HudGlyph *g = &f->glyphs[slot];
-        float gx = x_px + g->xoff;                 // верхний левый угол глифа
-        float gy = y_base + g->yoff;
+        float gx = x_px + g->xoff * sc;
+        float gy = y_base + g->yoff * sc;
+        float gw = g->w * sc, gh = g->h * sc;
+        float adv = g->advance * sc;
         float nx0 = -1.0f + 2.0f * gx / vw;
-        float nx1 = -1.0f + 2.0f * (gx + g->w) / vw;
-        float ny0 =  1.0f - 2.0f * gy / vh;                    // верх (v0)
-        float ny1 =  1.0f - 2.0f * (gy + g->h) / vh;           // низ  (v1)
+        float nx1 = -1.0f + 2.0f * (gx + gw) / vw;
+        float ny0 =  1.0f - 2.0f * gy / vh;
+        float ny1 =  1.0f - 2.0f * (gy + gh) / vh;
         // CCW (как панель): TL-BL-BR, TL-BR-TR — иначе backface-cull
         // съедает глифы (в сцене GL_CULL_FACE включён).
         float quad[6][4] = {
@@ -507,7 +534,7 @@ static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
         };
         memcpy(vb + *nv * 4, quad, sizeof quad);
         *nv += 6;
-        x_px += g->advance;
+        x_px += adv;
         s += l;
     }
 }

@@ -46,5 +46,6 @@ float prof_ms(ProfSlot s);
 
 // Сумма времени всех 3D-слотов (для процентов).
 float prof_total_ms(void);
+float prof_gpu_total_ms(void);
 
 #endif

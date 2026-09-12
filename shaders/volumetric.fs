@@ -123,10 +123,18 @@ float fog_hash(vec2 p) {
 }
 
 // Высота рельефа из карты высот (в метрах) — та же формула, что в terrain.vs
+float sample_height16(vec2 uv) {
+    vec2 h = texture(uHeightmap, uv).rg;
+#ifdef FR_HEIGHT_RG8
+    return (h.r * 65280.0 + h.g * 255.0) / 65535.0;
+#else
+    return h.r;
+#endif
+}
+
 float terrain_height(vec3 p) {
     vec2 uv = clamp(p.xz / uWorldSize, 0.0, 1.0);
-    float t = texture(uHeightmap, uv).r;
-    return mix(uHeightMin, uHeightMax, t);
+    return mix(uHeightMin, uHeightMax, sample_height16(uv));
 }
 
 // Дымка над землёй (дождь): тонкий серый слой ~uHazeH на рельефе, с шумом.

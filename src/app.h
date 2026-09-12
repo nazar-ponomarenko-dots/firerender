@@ -50,6 +50,10 @@ int app_menu(int vw, int vh);
 // фоном служит замороженная сцена (главный цикл её рендерит).
 int app_bg_has(void);
 
+// Применить точный графический пресет без записи config.cfg.
+// Используется воспроизводимым benchmark до загрузки мира.
+void app_apply_benchmark_preset(int level);
+
 // Печатает список карт в консоль (команда maps)
 void app_maps_print(void);
 

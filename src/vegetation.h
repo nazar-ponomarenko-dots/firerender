@@ -35,6 +35,7 @@ typedef struct {
     GLint u_walk;                       // 1 = ходьба (малый ветер)
     GLint u_dyn;                        // 1 = динамический слой (только lod0/lod1)
     GLint u_windboost;                  // ветер: 1 = штиль, 2 = дождь (x2)
+    GLint u_lodshift;                   // сдвиг LOD пшеницы (мобильный картошка)
 } VegParams;
 
 // Создаёт узел Vegetation: компилирует шейдер, грузит спрайты в 2D-массив,

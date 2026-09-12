@@ -73,24 +73,43 @@ static int worker_main(void *p)
 void jobs_init(void)
 {
     if (s_inited) return;
-    s_inited = 1;
     int n = SDL_GetNumLogicalCPUCores() - 1;
     if (n < 1) n = 1;
     if (n > JOBS_MAX_WORKERS) n = JOBS_MAX_WORKERS;
     s_st.mx = SDL_CreateMutex();
     s_st.cv_work = SDL_CreateCondition();
     s_st.cv_done = SDL_CreateCondition();
+    if (!s_st.mx || !s_st.cv_work || !s_st.cv_done) {
+        if (s_st.cv_done) SDL_DestroyCondition(s_st.cv_done);
+        if (s_st.cv_work) SDL_DestroyCondition(s_st.cv_work);
+        if (s_st.mx) SDL_DestroyMutex(s_st.mx);
+        s_st.mx = NULL;
+        s_st.cv_work = s_st.cv_done = NULL;
+        s_workers_n = 0;
+        s_inited = 1;
+        SDL_Log("jobs: sync fallback (не удалось создать синхронизацию: %s)",
+                SDL_GetError());
+        return;
+    }
     s_st.quit = 0;
     s_st.epoch = 0;
-    s_workers_n = n;
+    s_workers_n = 0;
     char name[32];
     for (int i = 0; i < n; i++) {
-        snprintf(name, sizeof name, "fr-worker-%d", i);
-        s_workers[i].idx = i;
-        s_workers[i].done = 1;
-        s_workers[i].thread = SDL_CreateThread(worker_main, name, &s_workers[i]);
+        Worker *w = &s_workers[s_workers_n];
+        snprintf(name, sizeof name, "fr-worker-%d", s_workers_n);
+        w->idx = s_workers_n;
+        w->done = 1;
+        w->thread = SDL_CreateThread(worker_main, name, w);
+        if (!w->thread) {
+            SDL_Log("jobs: worker %d не создан: %s", i, SDL_GetError());
+            continue;
+        }
+        s_workers_n++;
     }
-    SDL_Log("jobs: пул из %d работников (ядер %d)", n, SDL_GetNumLogicalCPUCores());
+    s_inited = 1;
+    SDL_Log("jobs: пул из %d работников (ядер %d)", s_workers_n,
+            SDL_GetNumLogicalCPUCores());
 }
 
 int jobs_workers(void)

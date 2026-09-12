@@ -4,8 +4,10 @@
 #include "camera.h"
 
 #include "cvars.h"
+#include "gamepad.h"
 #include "linalg.h"
 #include "movement.h"
+#include "touch.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
@@ -171,10 +173,21 @@ void camera_node_update(SceneNode *n, float dt)
     // FOV — cvar (консоль: set fov 90, колесо мыши тоже пишет в cvar)
     float fov = cvar_get("fov");
     if (fov > 0.0f && fov <= 180.0f) p->fov_deg = fov;
-    if (!s_demo && !s_input_lock) {              // в демо/консоли камеру не трогаем
+    if (!s_demo && !s_input_lock) {
         float mx = 0, my = 0;
-        if (!getenv("FR_NOMOUSE"))                // детерминированные тесты
-            SDL_GetRelativeMouseState(&mx, &my);  // мышь — обзор
+        if (!getenv("FR_NOMOUSE")) {
+            SDL_GetRelativeMouseState(&mx, &my);
+            float gx = 0, gy = 0;
+            gamepad_look_take(&gx, &gy);
+            mx += gx;
+            my += gy;
+#ifdef __ANDROID__
+            float tx = 0, ty = 0;
+            touch_look_take(&tx, &ty);
+            mx += tx;
+            my += ty;
+#endif
+        }
         camera_update(&p->cam, p->world, mx, my, dt);
     }
 

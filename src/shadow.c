@@ -99,8 +99,8 @@ void shadow_init(void)
         glBindFramebuffer(GL_FRAMEBUFFER, g_shadow_fbo[c]);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
                                g_shadow_tex[c], 0);
-        glDrawBuffer(GL_NONE);
-        glReadBuffer(GL_NONE);
+        if (p_glDrawBuffer) glDrawBuffer(GL_NONE);
+        if (p_glReadBuffer) glReadBuffer(GL_NONE);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
             SDL_Log("Shadow FBO %d incomplete!", c);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);

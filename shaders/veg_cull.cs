@@ -47,9 +47,11 @@ uniform vec4  uPlanes[6];    // плоскости фрустума (мир, н�
 uniform vec3  uCamPos;       // камера (LOD пшеницы = как в wheat.vs)
 uniform float uViewH;        // высота вьюпорта в пикселях (для оценки px)
 uniform float uTanHalfFov;   // tan(fov/2): мировые метры -> пиксели
-uniform float uMinPix;       // мин. видимый след травинки (px), обычно 1.0
+uniform float uMinPix;
+uniform float uLodShift;      // сдвиг порогов LOD пшеницы (как wheat.vs)       // мин. видимый след травинки (px), обычно 1.0
 uniform int   uSrcCount;     // число инстансов В ЭТОМ вызове (поддиапазон)
 uniform int   uOffset;       // базовый индекс в Src (для поддиапазона супер-чанка)
+uniform int   uDstCapacity;   // вместимость Dst в инстансах
 
 void main()
 {
@@ -71,9 +73,13 @@ void main()
     float worldH = scale * (wheat ? 3.0 : 1.0) * 0.95;   // высота растения, м
     float wmul = 1.0;                                // растяжение ширины (LOD)
     if (wheat) {
+        // пороги как в wheat.vs (uLodShift: низкая плотность — LOD раньше)
+        float b1a = 4.6, b1b = 5.4, b2a = 24.5, b2b = 25.5;
+        if (uLodShift >= 0.5) { b1a = 0.0; b1b = 0.9; }
+        if (uLodShift >= 1.5) { b2a = 3.0; b2b = 5.0; }
         float dist = length(pos.xz - uCamPos.xz);
-        float ss1 = smoothstep(4.6, 5.4, dist);
-        float ss2 = smoothstep(24.5, 25.5, dist);
+        float ss1 = smoothstep(b1a, b1b, dist);
+        float ss2 = smoothstep(b2a, b2b, dist);
         float wx = mix(128.0, 152.0, ss1);
         wx = mix(wx, 1280.0, ss2);                   // lod2 растягивается x10
         wmul = wx / 128.0;
@@ -104,6 +110,10 @@ void main()
 
     // --- Выжил: компактно пишем и атомарно считаем ---------------------------
     uint idx = atomicAdd(cmd_instanceCount, 1u);
+    if (idx >= uint(uDstCapacity)) {
+        atomicMin(cmd_instanceCount, uint(uDstCapacity));
+        return;
+    }
     uint o = idx * 12u;
     for (uint k = 0u; k < 12u; k++)
         dst[o + k] = src[b + k];

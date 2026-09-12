@@ -229,6 +229,7 @@ int world_load(WorldState *w, WorldTextures *out)
     w->heights = malloc((size_t)mw * mh * sizeof(float));
     if (!lum || !color || !w->heights) {   // OOM — честный fail загрузки
         free(lum); free(color); free(w->heights);
+        stbi_image_free(img);
         w->heights = NULL;                 // world_free терпит NULL
         SDL_Log("World: no memory for %dx%d map", mw, mh);
         return -1;
@@ -243,6 +244,8 @@ int world_load(WorldState *w, WorldTextures *out)
     s_avg_lum = 0;
     for (int i = 0; i < mw * mh; i++) s_avg_lum += lum[i];
     s_avg_lum /= (float)(mw * mh);
+    stbi_image_free(img);
+    img = NULL;
 
     // --- Высоты: кривая с игровой полосой + сглаживание + нормали -------------
     // Высоты считаем в C (height_curve), поэтому normal map, положение пшеницы
@@ -315,8 +318,22 @@ int world_load(WorldState *w, WorldTextures *out)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+#ifdef USE_GLES_PATH
+    // GLES 3.0 не гарантирует EXT_texture_norm16. RG8 хранит те же 16 бит:
+    // старший байт в R, младший в G; шейдер восстанавливает значение.
+    unsigned char *h_rg = malloc((size_t)mw * mh * 2);
+    if (!h_rg) { free(hb); free(color); free(nm); return -1; }
+    for (int i = 0; i < mw * mh; i++) {
+        h_rg[i*2+0] = (unsigned char)(hb[i] >> 8);
+        h_rg[i*2+1] = (unsigned char)(hb[i] & 255);
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, mw, mh, 0, GL_RG,
+                 GL_UNSIGNED_BYTE, h_rg);
+    free(h_rg);
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R16, mw, mh, 0, GL_RED,
                  GL_UNSIGNED_SHORT, hb);
+#endif
     free(hb);
 
     s_tex_base = make_texture(mw, mh, color, GL_RGB, GL_CLAMP_TO_EDGE, 0); // мини-карта

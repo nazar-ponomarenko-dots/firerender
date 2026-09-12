@@ -16,6 +16,7 @@
 #include "cvars.h"
 #include "game.h"
 #include "gi.h"
+#include "lowend_profile.h"
 #include "gl_loader.h"
 #include "gpu.h"
 #include "hud.h"
@@ -23,6 +24,7 @@
 #include "mapdata.h"
 #include "profiler.h"
 #include "resources.h"
+#include "srender.h"
 #include "sky.h"
 #include "ssr.h"
 #include "physics.h"
@@ -81,6 +83,7 @@ void renderer_set_viewport(int vw, int vh)
 // Все фуллскрин-проходы стоят пропорционально пикселям — это главный
 // рычаг фпс на слабых iGPU (0.6 = ~2.8x меньше пикселей).
 static int s_rsw = 1280, s_rsh = 720;  // размер сцены с масштабом
+static int s_scene_ldr = -1;
 
 static void scene_size_update(void)
 {
@@ -91,13 +94,18 @@ static void scene_size_update(void)
     int h = (int)((float)s_vh * sc + 0.5f);
     if (w < 1) w = 1;
     if (h < 1) h = 1;
-    if (w == s_rsw && h == s_rsh) return;
+    int ldr = cvar_get("r_scene_ldr") > 0.5f;
+    int format_changed = ldr != s_scene_ldr;
+    if (w == s_rsw && h == s_rsh && !format_changed) return;
     s_rsw = w;
     s_rsh = h;
+    s_scene_ldr = ldr;
     bloom_resize(&s_bloom, s_rsw, s_rsh);
+#ifndef USE_GLES_PATH
     ssr_resize(&s_ssr, s_rsw, s_rsh);
     gi_resize(&s_gi, s_rsw, s_rsh);
     voxfog_resize(s_rsw, s_rsh);
+#endif
 }
 
 // --- Cubemap reflection FBO ----------------------------------------------------
@@ -114,7 +122,8 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
     static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
     GpuTex id = 0;
     int size = 0;
-    int first = 1;
+    int loaded = 0;
+    int valid = 1;
 
     // PNG хранит строки сверху вниз (в capture флип по Y), а glTexImage2D
     // считает строку 0 низом — без обратного флипа отражения были бы
@@ -135,33 +144,49 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
         char **files = SDL_GlobDirectory(dir, pattern, 0, &count);
         if (!files || count == 0) {
             if (files) SDL_free(files);
-            continue;
+            valid = 0;
+            break;
         }
-        // Take the most recent (last in list)
-        char *latest = files[0];
+        // SDL_GlobDirectory хранит строки внутри одного блока: копируем имя
+        // до освобождения списка.
+        const char *latest = files[0];
         for (int i = 1; i < count; i++) {
             if (strcmp(files[i], latest) > 0) latest = files[i];
         }
+        char latest_name[256];
+        snprintf(latest_name, sizeof latest_name, "%s", latest);
         SDL_free(files);
 
         char fullpath[512];
-        snprintf(fullpath, sizeof fullpath, "%s/%s", dir, latest);
+        snprintf(fullpath, sizeof fullpath, "%s/%s", dir, latest_name);
         int w, h, ch;
         unsigned char *px = stbi_load(fullpath, &w, &h, &ch, 3);
         if (!px) {
-            SDL_Log("Failed to load cubemap face %s: %s", latest, stbi_failure_reason());
-            continue;
+            SDL_Log("Failed to load cubemap face %s: %s", latest_name, stbi_failure_reason());
+            valid = 0;
+            break;
         }
-        if (first) {
+        if (w != h || (size && (w != size || h != size))) {
+            SDL_Log("Invalid cubemap face %s: %dx%d, expected %dx%d square",
+                    latest_name, w, h, size, size);
+            stbi_image_free(px);
+            valid = 0;
+            break;
+        }
+        if (!id) {
             id = gpu_tex_gen(s_gpu);
             size = w;
-            first = 0;
         }
         gpu_cubemap_face_rgb8(s_gpu, id, face, w, h, px);
+        loaded++;
         stbi_image_free(px);
     }
     stbi_set_flip_vertically_on_load(0);   // глобальный флаг — вернуть как было
 
+    if (!valid || loaded != 6) {
+        if (id) gpu_tex_delete(s_gpu, &id);
+        return 0;
+    }
     if (id) {
         gpu_tex_params_cubemap(s_gpu, id, 1);
         if (out_size) *out_size = size;
@@ -532,9 +557,17 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     if (!s_gpu) s_gpu = gpu_create();   // RHI-бэкенд (GL): один на процесс
     cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
                      "масштаб рендера сцены (1 = полное разрешение окна)");
-    cvar_register_ex("r_present_blit", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
-                     "present: grade+blit двумя проходами (1) / один композит "
-                     "натив (0, быстрее)");
+    cvar_register_ex("r_cheap_fog", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "туман только в шейдерах (без voxfog-проходов)");
+    cvar_register_ex("r_present_blit", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "present: grade+blit двумя проходами (1, быстрее на 0.1мс) / один композит "
+                     "натив (0)");
+    lowend_profile_init();
+    lowend_profile_apply();
+#ifdef USE_GLES_PATH
+    // GLES использует единый shader-present: blit default FBO ненадёжен на EGL.
+    cvar_set("r_present_blit", 0.0f);
+#endif
     // Сцена сразу в масштабе: таргеты (MSAA/GI/SSR/туман) меньше окна
     float sc = cvar_get("r_render_scale");
     if (sc < 0.4f) sc = 0.4f;
@@ -543,12 +576,38 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     s_rsh = (int)((float)vh * sc + 0.5f);
     if (s_rsw < 1) s_rsw = 1;
     if (s_rsh < 1) s_rsh = 1;
+    s_scene_ldr = cvar_get("r_scene_ldr") > 0.5f;
+#ifdef USE_GLES_PATH
+    // Не все GLES-устройства умеют RGBA16F как color attachment.
+    // В этом случае выбираем валидный LDR target вместо чёрного incomplete FBO.
+    {
+        SrDevice *probe = sr_create();
+        if (probe && !sr_caps(probe)->color_half_float) {
+            cvar_set("r_scene_ldr", 1.0f);
+            s_scene_ldr = 1;
+            SDL_Log("GLES: RGBA16F target unsupported, using RGBA8 scene");
+        }
+        sr_destroy(probe);
+    }
+#endif
     memset(&s_bloom, 0, sizeof s_bloom);
     bloom_init(&s_bloom, s_rsw, s_rsh);
+    SDL_Log("Scene target: %dx%d %s, present=%s", s_rsw, s_rsh,
+            cvar_get("r_scene_ldr") > 0.5f ? "RGBA8" : "RGBA16F",
+#ifdef USE_GLES_PATH
+            "shader"
+#else
+            cvar_get("r_present_blit") > 0.5f ? "blit" : "shader"
+#endif
+    );
+#ifndef USE_GLES_PATH
     ssr_init(&s_ssr, s_rsw, s_rsh);
     memset(&s_gi, 0, sizeof s_gi);
     gi_init(&s_gi, s_rsw, s_rsh);
     voxfog_init(w, s_rsw, s_rsh);
+#else
+    (void)w;
+#endif
     make_cubemap_fbo(256); // кубомап фиксированного размера
     s_cubemap_valid = 0;
     s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
@@ -559,20 +618,24 @@ void renderer_setup(const WorldState *w, int vw, int vh)
 
 void renderer_resize(int vw, int vh)
 {
-    if (!s_active) return;
-    bloom_resize(&s_bloom, vw, vh);
-    ssr_resize(&s_ssr, vw, vh);
-    gi_resize(&s_gi, vw, vh);
-    voxfog_resize(vw, vh);
+    if (!s_active || vw <= 0 || vh <= 0) return;
+    s_vw = vw;
+    s_vh = vh;
+    // Принудить общий scaled-resize: реальные FBO должны соответствовать
+    // r_render_scale, а не нативному размеру окна.
+    s_rsw = s_rsh = 0;
+    scene_size_update();
 }
 
 void renderer_teardown(void)
 {
     if (!s_active) return;
     bloom_cleanup(&s_bloom);
+#ifndef USE_GLES_PATH
     ssr_cleanup(&s_ssr);
     gi_cleanup(&s_gi);
     voxfog_cleanup();
+#endif
     if (s_refl_cubemap) {
         gpu_tex_delete(s_gpu, &s_refl_cubemap);
         for (int i = 0; i < 6; i++) gpu_fbo_delete(s_gpu, &s_refl_cubemap_fbo[i]);
@@ -616,11 +679,16 @@ static ProfSlot node_slot(const char *name)
 
 static void render_part(SceneNode *world, float dt, int ui)
 {
+    int profiling = cvar_get("profiler") > 0.5f;
     for (SceneNode *c = world->first_child; c; c = c->next) {
         if (!c->render) continue;
         int is_ui = (strcmp(c->name, "Minimap") == 0) ||
                     (strcmp(c->name, "DebugHUD") == 0);
         if (is_ui != ui) continue;
+        if (!profiling) {
+            c->render(c, dt);
+            continue;
+        }
         ProfSlot slot = node_slot(c->name);
         Uint64 t0 = SDL_GetPerformanceCounter();
         prof_gpu_begin(slot);
@@ -810,14 +878,17 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         // Каскадные тени: узлы рисуют глубину (pass = RP_SHADOW). Всегда
         // заполненными — до включения каркасного режима.
         if (s_rc.shadow_on) {
-            Uint64 t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_SHADOW);
+            int profiling = cvar_get("profiler") > 0.5f;
+            Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_SHADOW);
             shadow_render(world, &s_rc);
-            prof_gpu_end(PROF_SHADOW);
-            Uint64 t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_SHADOW,
-                        (float)(t1 - t0) * 1000.0f /
-                        (float)SDL_GetPerformanceFrequency());
+            if (profiling) {
+                prof_gpu_end(PROF_SHADOW);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_SHADOW,
+                            (float)(t1 - t0) * 1000.0f /
+                            (float)SDL_GetPerformanceFrequency());
+            }
         }
 gpu_wireframe(s_gpu, s_wire);
         render_3d(world, dt);
@@ -857,7 +928,10 @@ gpu_wireframe(s_gpu, s_wire);
             prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
             scene_for_post = ssr_tex(&s_ssr);
         }
-        if (voxfog_is_on()) {
+        // r_cheap_fog: туман ТОЛЬКО шейдерный (в terrain.fs/wheat.fs —
+        // дистанционный mix + ранний выход дальней травы), без voxfog-марша
+        // и композита. Для КАРТОШКИ: горизонт смягчён, ноль доп. проходов.
+        if (voxfog_is_on() && cvar_get("r_cheap_fog") < 0.5f) {
             Uint64 t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_BLOOM);
             bloom_render(&s_bloom, scene_for_post, voxfog_fbo(),
@@ -867,23 +941,34 @@ gpu_wireframe(s_gpu, s_wire);
             prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
             t0 = SDL_GetPerformanceCounter();
             prof_gpu_begin(PROF_FOG);
-            voxfog_render(s_vw, s_vh, &s_rc,
+            voxfog_render(s_rsw, s_rsh, s_vw, s_vh, &s_rc,
                           voxfog_texture(), bloom_scene_depth(&s_bloom));
             prof_gpu_end(PROF_FOG);
             t1 = SDL_GetPerformanceCounter();
             prof_add_ms(PROF_FOG, (float)(t1 - t0) * 1000.0f / (float)pf);
         } else {
-            Uint64 t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_BLOOM);
+            int profiling = cvar_get("profiler") > 0.5f;
+            Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_BLOOM);
             // r_present_blit=1 — grade в масштабе сцены + аппаратный blit
             // (быстрее на слабых iGPU); 0 — шейдерный композит на экран.
+#ifdef USE_GLES_PATH
+            // ES/EGL backbuffer: fullscreen shader present. Реальные Android
+            // surface сохраняют кадр до SDL_GL_SwapWindow; desktop offscreen
+            // EGL может не поддерживать readback default framebuffer корректно.
+            bloom_render(&s_bloom, scene_for_post, 0, s_vw, s_vh);
+#else
             if (cvar_get("r_present_blit") > 0.5f)
                 bloom_present(&s_bloom, scene_for_post, s_vw, s_vh);
             else
                 bloom_render(&s_bloom, scene_for_post, 0, s_vw, s_vh);
-            prof_gpu_end(PROF_BLOOM);
-            Uint64 t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
+#endif
+            if (profiling) {
+                prof_gpu_end(PROF_BLOOM);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_BLOOM,
+                            (float)(t1 - t0) * 1000.0f / (float)pf);
+            }
         }
     }
 
@@ -894,6 +979,11 @@ gpu_wireframe(s_gpu, s_wire);
 
 void renderer_end(Game *g, float dt)
 {
+    lowend_profile_frame(dt * 1000.0f);
+    // Все оверлеи и screenshot читают default framebuffer. Некоторые ES/EGL
+    // драйверы не сохраняют раздельные READ/DRAW bindings после пост-проходов.
+    gpu_bind_framebuffer(s_gpu, 0);
+    gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
     // Прицел — простая белая точка в центре (в игре, без консоли,
     // cvar r_crosshair; консоль: toggle_crosshair)
     if (g->world_loaded && app_state() == APP_PLAY && !console_active()
@@ -998,6 +1088,7 @@ void renderer_end(Game *g, float dt)
     if (cvar_get("profiler") > 0.5f && g->world_loaded) {
         char line[256];
         float total = prof_total_ms();
+        float gpu_total = prof_gpu_total_ms();
         float frame = dt * 1000.0f;
         float fps = frame > 0.001f ? 1000.0f / frame : 0.0f;
         gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
@@ -1008,11 +1099,18 @@ void renderer_end(Game *g, float dt)
         const float dim[4] = { 0.62f, 0.66f, 0.74f, 1.0f };
         const float hot[4] = { 1.0f, 0.72f, 0.3f, 1.0f };
         float fh = hud_text_line_height_small();
-        float y = (float)s_vh - 8.0f - fh * 8.0f;
-        hud_rect_draw(s_vw, s_vh, (float)s_vw - 330.0f, y - 8.0f, 322.0f,
-                      fh * 8.0f + 16.0f, bg);
-        float x = (float)s_vw - 318.0f;
+        float y = (float)s_vh - 8.0f - fh * 9.0f;
+        hud_rect_draw(s_vw, s_vh, (float)s_vw - 390.0f, y - 8.0f, 382.0f,
+                      fh * 9.0f + 16.0f, bg);
+        float x = (float)s_vw - 378.0f;
         snprintf(line, sizeof line, "Frame %.1f ms  (%.0f fps)", frame, fps);
+        hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
+        y += fh;
+        snprintf(line, sizeof line, "CPU slots %.1f | GPU slots %.1f ms", total, gpu_total);
+        hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, dim);
+        y += fh;
+        snprintf(line, sizeof line, "%s | %dx%d %.2fx", lowend_profile_name(),
+                 s_rsw, s_rsh, lowend_profile_scale());
         hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
         y += fh;
         snprintf(line, sizeof line, "Tris %d | Verts %d | Draws %d",
@@ -1032,8 +1130,9 @@ void renderer_end(Game *g, float dt)
             float cpu = prof_ms(i);
             float gpu = prof_gpu_ms(i);
             if (cpu <= 0.01f && gpu <= 0.01f) continue;
-            float ref = gpu > cpu ? gpu : cpu;
-            float pct = total > 0.01f ? 100.0f * ref / total : 0.0f;
+            float cpu_pct = total > 0.01f ? 100.0f * cpu / total : 0.0f;
+            float gpu_pct = gpu_total > 0.01f ? 100.0f * gpu / gpu_total : 0.0f;
+            float pct = cpu_pct > gpu_pct ? cpu_pct : gpu_pct;
             snprintf(line, sizeof line, "%-10s CPU %5.2f | GPU %5.2f ms",
                      prof_name(i), cpu, gpu);
             const float *c = (pct >= 25.0f) ? hot : (pct >= 10.0f ? fg : dim);

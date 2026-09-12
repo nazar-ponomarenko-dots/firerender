@@ -421,14 +421,6 @@ void voxfog_resize(int vw, int vh)
         glDeleteTextures(1, &s_tex_half);
         s_fbo_half = s_tex_half = 0;
     }
-    if (s_prog_comp) {
-        resources_program_release(s_prog_comp);
-        s_prog_comp = 0;
-    }
-    if (s_fbo_half) {
-        glDeleteFramebuffers(1, &s_fbo_half);
-        glDeleteTextures(1, &s_tex_half);
-    }
     // Марш тумана в ПОЛРАЗМЕРЕ: RGBA8 (цвет тумана + trans в альфе).
     // Гладкий туман билинейный апскейл не выдаёт, а фрагментов вчетверо меньше.
     glGenTextures(1, &s_tex_half);
@@ -649,8 +641,8 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     glEnable(GL_DEPTH_TEST);
 }
 
-void voxfog_render(int vw, int vh, const RendererContext *rc,
-                   GLuint scene_tex, GLuint scene_depth)
+void voxfog_render(int scene_w, int scene_h, int out_w, int out_h,
+                   const RendererContext *rc, GLuint scene_tex, GLuint scene_depth)
 {
     if (!s_on) return;
     if (!s_prog || !s_fbo) return;
@@ -660,10 +652,10 @@ void voxfog_render(int vw, int vh, const RendererContext *rc,
     if (s_fbo_half && s_prog_comp) {
         GLint prev_fbo = 0;
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
-        render_volumetric((vw + 1) / 2, (vh + 1) / 2, s_fbo_half,
+        render_volumetric((scene_w + 1) / 2, (scene_h + 1) / 2, s_fbo_half,
                           rc, scene_tex, scene_depth, 1);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, vw, vh);
+        glViewport(0, 0, out_w, out_h);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
         glDisable(GL_BLEND);
@@ -681,7 +673,7 @@ void voxfog_render(int vw, int vh, const RendererContext *rc,
     }
     // Один и тот же проход в ПОЛНОМ разрешении экрана. Режим 2 отличается
     // только выборкой каскада (uFogMode): марш по одному грубому каскаду.
-    render_volumetric(vw, vh, 0, rc, scene_tex, scene_depth, 0);
+    render_volumetric(out_w, out_h, 0, rc, scene_tex, scene_depth, 0);
 }
 
 void voxfog_cleanup(void)

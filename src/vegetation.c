@@ -41,6 +41,7 @@
 #include "stb_image.h"
 #include <limits.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,6 +153,11 @@ static float *g_static_g, *g_static_w;   // статичный слой (вся 
 static int g_static_gc, g_static_wc;
 static float *g_dyn_g, *g_dyn_w;         // динамический слой (вокруг камеры)
 static int g_dyn_gc, g_dyn_wc, g_dyn_cap;
+// Общие scratch-буферы генерации: раньше каждый плотный чанк временно выделял
+// два массива по VEG_CAND_CAP (в сумме ~4.7 MiB) прямо в кадре.
+static float *g_gen_scratch_g, *g_gen_scratch_w;
+static float *g_shadow_scratch_g, *g_shadow_scratch_w;
+static int g_shadow_scratch_gcap, g_shadow_scratch_wcap;
 // INT_MAX: первый veg_update должен ОБЯЗАТЕЛЬНО сработать (иначе при старте
 // камеры в чанке (0,0) динамический слой никогда не сгенерируется)
 static int g_chunk_cam[2] = { INT_MAX, INT_MAX };
@@ -185,7 +191,7 @@ static GLuint g_veg_indirect[4];      // DrawElementsIndirectCommand
 static GLuint g_veg_vao_cull[4];      // VAO с инстансами из Cull-SSBO
 static GLuint s_cull_prog = 0;        // compute-программа отсечения
 static GLint u_cull_vp, u_cull_viewh, u_cull_tan, u_cull_minpix, u_cull_src, u_cull_off;
-static GLint u_cull_planes, u_cull_campos;
+static GLint u_cull_planes, u_cull_campos, u_cull_capacity;
 
 // Прототипы GPU-driven (определены ниже, используются выше по файлу).
 static void veg_gpu_init(VegParams *p);
@@ -197,7 +203,8 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc);
 static GLuint s_shadowveg_prog = 0;
 static GLint u_veg_viewproj, u_veg_veg, u_veg_thin, u_veg_time;
 static GLint u_veg_campos, u_veg_dyn, u_veg_walk, u_veg_windboost;
-static VegParams *s_veg = NULL;   // для hot-reload (shader_on_reshade)
+static GLint u_cull_lodshift = -1;
+static VegParams *s_veg = NULL;
 
 // Проги создаются СНАРУЖИ (make_node / reshade: refcount балансируется там).
 // Здесь — только uniform'ы для ТЕКУЩИХ id (p->prog и s_shadowveg_prog).
@@ -213,11 +220,12 @@ static void veg_prog_init(VegParams *p)
     u_veg_walk     = glGetUniformLocation(s_shadowveg_prog, "uWalk");
     u_veg_windboost = glGetUniformLocation(s_shadowveg_prog, "uWindBoost");
 
-    scene_uniforms_init(&p->su, prog);    // общий набор сцены
+    scene_uniforms_init(&p->su, prog);
     p->u_dyn      = glGetUniformLocation(prog, "uDyn");
-    p->u_time     = glGetUniformLocation(prog, "uTime");   // ветер
+    p->u_time     = glGetUniformLocation(prog, "uTime");
     p->u_walk     = glGetUniformLocation(prog, "uWalk");
     p->u_windboost = glGetUniformLocation(prog, "uWindBoost");
+    p->u_lodshift = glGetUniformLocation(prog, "uLodShift");
 
     // Статичные uniform'ы растительности
     glUseProgram(prog);
@@ -437,6 +445,22 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
 // (см. определение ниже — используется статикой и теневыми буферами).
 static void veg_setup_vao(GLuint vao, GLuint inst_vbo);
 
+static void veg_instance_offset(GLuint inst_vbo, int first)
+{
+    const GLsizei stride = 12 * (GLsizei)sizeof(float);
+    const uintptr_t base = (uintptr_t)first * (uintptr_t)stride;
+    glBindBuffer(GL_ARRAY_BUFFER, inst_vbo);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (const void *)(base));
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride,
+                          (const void *)(base + 3 * sizeof(float)));
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride,
+                          (const void *)(base + 5 * sizeof(float)));
+    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride,
+                          (const void *)(base + 9 * sizeof(float)));
+    glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, stride,
+                          (const void *)(base + 10 * sizeof(float)));
+}
+
 // --- Супер-чанки статики (64 м = 4x4 чанка по 16 м) ------------------------
 // Статический слой рисуется НЕ целиком, а только супер-чанками в радиусе
 // видимости камеры (glDrawElementsInstancedBaseInstance). Дальше спрайты
@@ -612,6 +636,7 @@ static void veg_update(const float cam_pos[3], VegParams *p)
             if (dx*dx + dz*dz <= dr2) { need[nn][0] = i; need[nn][1] = j; nn++; }
         }
     // выгружаем чанки, вышедшие из радиуса
+    int dirty = 0;
     for (int idx = 0; idx < g_map_w * g_map_d; idx++) {
         VegChunk *c = &g_veg_chunks[idx];
         if (!c->g && !c->w) continue;
@@ -621,6 +646,7 @@ static void veg_update(const float cam_pos[3], VegParams *p)
         if (!keep) {
             free(c->g); free(c->w);
             c->g = NULL; c->w = NULL; c->gn = c->wn = 0;
+            dirty = 1;
         }
     }
     // Ближние чанки — первыми (бюджет может срезать дальние до следующего
@@ -645,7 +671,8 @@ static void veg_update(const float cam_pos[3], VegParams *p)
     // пересоздаём чанки, чья плотность заметно изменилась
     int changed = 0;
     int budget = (int)cvar_get("r_veg_regen_budget");
-    if (budget <= 0) budget = 4096;
+    if (budget < 1) budget = 1;
+    if (budget > 2) budget = 2;
     g_regen_pending = 0;
     for (int k = 0; k < nn; k++) {
         int i = need[k][0], j = need[k][1];
@@ -671,18 +698,29 @@ static void veg_update(const float cam_pos[3], VegParams *p)
                 g_regen_pending = 1;
                 continue;
             }
-            free(c->g); free(c->w);
-            float *gb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
-            float *wb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+            if (!g_gen_scratch_g)
+                g_gen_scratch_g = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+            if (!g_gen_scratch_w)
+                g_gen_scratch_w = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
             int gn = 0, wn = 0;
+            float dg_d, dw_d;
             veg_gen_chunk(p->world, i, j, cam_pos[0], cam_pos[2], false,
-                          gb, wb, &gn, &wn, &c->dg_d, &c->dw_d);
-            if (gn == 0) { free(gb); gb = NULL; }
-            if (wn == 0) { free(wb); wb = NULL; }
+                          g_gen_scratch_g, g_gen_scratch_w, &gn, &wn,
+                          &dg_d, &dw_d);
+            float *gb = gn ? malloc((size_t)gn * 12 * sizeof(float)) : NULL;
+            float *wb = wn ? malloc((size_t)wn * 12 * sizeof(float)) : NULL;
+            if (gn) memcpy(gb, g_gen_scratch_g, (size_t)gn * 12 * sizeof(float));
+            if (wn) memcpy(wb, g_gen_scratch_w, (size_t)wn * 12 * sizeof(float));
+            free(c->g); free(c->w);
             c->g = gb; c->w = wb; c->gn = gn; c->wn = wn;
+            c->dg_d = dg_d; c->dw_d = dw_d;
             changed++;
+            dirty = 1;
         }
     }
+    // При хвосте бюджета бывают кадры без готового нового чанка. Раньше они
+    // всё равно копировали всю динамику и переопределяли VBO/SSBO/тени.
+    if (!dirty) return;
     // плоский динамический буфер -> VBO
     int gc = 0, wc = 0;
     for (int k = 0; k < nn; k++) {
@@ -765,8 +803,18 @@ static void veg_dyn_thin_build(int need[][2], int nn, VegParams *p)
     g_veg_shadow_cnt[3] = ow;
     // 3) заполняем тонкие буферы в порядке need-списка (тот же порядок
     //    экземпляров, что и раньше: карты теней идентичны)
-    float *tg = malloc((size_t)(og ? og : 1) * 12 * sizeof(float));
-    float *tw = malloc((size_t)(ow ? ow : 1) * 12 * sizeof(float));
+    if (og > g_shadow_scratch_gcap) {
+        g_shadow_scratch_gcap = og + og / 4 + 1;
+        g_shadow_scratch_g = realloc(g_shadow_scratch_g,
+            (size_t)g_shadow_scratch_gcap * 12 * sizeof(float));
+    }
+    if (ow > g_shadow_scratch_wcap) {
+        g_shadow_scratch_wcap = ow + ow / 4 + 1;
+        g_shadow_scratch_w = realloc(g_shadow_scratch_w,
+            (size_t)g_shadow_scratch_wcap * 12 * sizeof(float));
+    }
+    float *tg = g_shadow_scratch_g;
+    float *tw = g_shadow_scratch_w;
     int kg = 0, kw = 0;
     for (int k = 0; k < nn; k++) {
         VegChunk *c = &g_veg_chunks[need[k][1] * g_map_w + need[k][0]];
@@ -788,14 +836,13 @@ static void veg_dyn_thin_build(int need[][2], int nn, VegParams *p)
     glBufferData(GL_ARRAY_BUFFER, (size_t)og * 12 * sizeof(float), tg, GL_STREAM_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, g_veg_shadow_vbo[3]);
     glBufferData(GL_ARRAY_BUFFER, (size_t)ow * 12 * sizeof(float), tw, GL_STREAM_DRAW);
-    free(tg); free(tw);
 }
 
 // Теневой проход (RP_SHADOW): прореженные буферы, диапазоны по
 // супер-чанкам/чанкам внутри бокса каскада (логика переехала из shadow.c).
 static void veg_shadow_draw(const RendererContext *rc)
 {
-    (void)rc;
+    if (cvar_get("r_simple_render") > 0.5f && rc->shadow_cascade > 0) return;
     glDisable(GL_CULL_FACE);     // биллборды — с двух сторон
     glUseProgram(s_shadowveg_prog);
     glUniformMatrix4fv(u_veg_viewproj, 1, GL_FALSE, rc->shadow_vp);
@@ -885,14 +932,18 @@ static void veg_shadow_draw(const RendererContext *rc)
 void veg_node_render(SceneNode *n, float dt)
 {
     (void)dt;
+    // Полное отключение травы одной галкой — раньше floor=1.0 оставлял поле при density 0
+    if (cvar_get("r_wheat_density") < 0.01f && cvar_get("r_grass_density") < 0.01f &&
+        cvar_get("r_dandelion_density") < 0.01f) {
+        return;
+    }
     VegParams *p = n->params;
     const RendererContext *rc = p->rc;
-    // Теневой проход (RP_SHADOW): прореженные буферы и culling по боксу
     if (rc->pass == RP_SHADOW) {
         veg_shadow_draw(rc);
         return;
     }
-    g_veg_time += dt * (1.0f + fx_wetness());   // ветер: в дождь вдвое быстрее
+    g_veg_time += dt * (1.0f + fx_wetness());
     // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
     // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
     {
@@ -928,7 +979,8 @@ void veg_node_render(SceneNode *n, float dt)
     }
     glUniform1f(p->u_time, g_veg_time);
     glUniform1f(p->u_walk, rc->cam_fly ? 0.0f : 1.0f);
-    glUniform1f(p->u_windboost, rc->wetness);   // ветер: дождь сильнее
+    glUniform1f(p->u_windboost, rc->wetness);
+    if (p->u_lodshift >= 0) glUniform1f(p->u_lodshift, cvar_get("r_veg_lod_shift"));
     // Frustum-отсечение статики: 6 плоскостей конуса из viewproj (метод
     // Gribb-Hartmann, матрицы column-major — строки m[c*4+r]).
     frustum_extract(rc->viewproj);
@@ -948,34 +1000,34 @@ void veg_node_render(SceneNode *n, float dt)
     // подъёме камеры радиус растёт, чтобы обзор с горы не пустел.
     glUniform1f(p->u_dyn, 0.0f);   // статика: полный LOD (в т.ч. lod2)
     if (g_draw_static_main) {
-        if (g_has_base_instance) {
         float vis = s_vis_r * cvar_get("r_veg_vis_mult");
         if (rc->cam_pos[1] > VEG_VIS_H)
             vis += (rc->cam_pos[1] - VEG_VIS_H) * VEG_VIS_F;
         float vr2 = vis * vis;
-        float half = VEG_SUPER * VEG_CHUNK * 0.5f;   // полусторона супер-чанка
+        float half = VEG_SUPER * VEG_CHUNK * 0.5f;
         for (int pass = 0; pass < 2; pass++) {
-            glBindVertexArray(pass ? p->vao_sw : p->vao_sg);
+            GLuint vao = pass ? p->vao_sw : p->vao_sg;
+            GLuint vbo = pass ? p->vbo_sw : p->vbo_sg;
+            glBindVertexArray(vao);
             for (int s = 0; s < g_sc_n; s++) {
                 int cnt = pass ? g_sc_cnt_w[s] : g_sc_cnt_g[s];
                 if (cnt <= 0) continue;
-                // frustum: супер-чанк 64 м — ящик на всю высоту рельефа
                 if (!frustum_box(p->world, g_sc_cx[s] - half, g_sc_cz[s] - half,
                                  g_sc_cx[s] + half, g_sc_cz[s] + half)) continue;
                 float dx = g_sc_cx[s] - rc->cam_pos[0];
                 float dz = g_sc_cz[s] - rc->cam_pos[2];
                 if (dx*dx + dz*dz > vr2) continue;
-                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                        GL_UNSIGNED_INT, NULL, cnt,
-                        (GLuint)(pass ? g_sc_off_w[s] : g_sc_off_g[s]));
+                GLuint first = (GLuint)(pass ? g_sc_off_w[s] : g_sc_off_g[s]);
+                if (g_has_base_instance) {
+                    glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
+                            GL_UNSIGNED_INT, NULL, cnt, first);
+                } else {
+                    veg_instance_offset(vbo, (int)first);
+                    glDrawElementsInstanced(GL_TRIANGLES, 6,
+                                            GL_UNSIGNED_INT, NULL, cnt);
+                }
             }
-        }
-    } else {
-        // нет ARB_base_instance — рисуем весь статический слой целиком
-        glBindVertexArray(p->vao_sg);
-        glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL, g_static_gc);
-        glBindVertexArray(p->vao_sw);
-        glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL, g_static_wc);
+            if (!g_has_base_instance) veg_instance_offset(vbo, 0);
         }
     }
     glUniform1f(p->u_dyn, 1.0f);   // динамика: только lod0/lod1 (без lod2)
@@ -1047,10 +1099,12 @@ static void veg_gpu_init(VegParams *p)
     u_cull_viewh  = glGetUniformLocation(s_cull_prog, "uViewH");
     u_cull_tan    = glGetUniformLocation(s_cull_prog, "uTanHalfFov");
     u_cull_minpix = glGetUniformLocation(s_cull_prog, "uMinPix");
+    u_cull_lodshift = glGetUniformLocation(s_cull_prog, "uLodShift");
     u_cull_src    = glGetUniformLocation(s_cull_prog, "uSrcCount");
     u_cull_off    = glGetUniformLocation(s_cull_prog, "uOffset");
     u_cull_planes = glGetUniformLocation(s_cull_prog, "uPlanes");
     u_cull_campos = glGetUniformLocation(s_cull_prog, "uCamPos");
+    u_cull_capacity = glGetUniformLocation(s_cull_prog, "uDstCapacity");
     // Привязка SSBO-блоков compute-программы к binding points 0/1/2.
     GLuint bsrc = (p_glGetProgramResourceIndex)
                   ? p_glGetProgramResourceIndex(s_cull_prog, GL_SHADER_STORAGE_BLOCK, "Src")
@@ -1092,8 +1146,8 @@ static void veg_gpu_init(VegParams *p)
 // после генерации статического слоя и после каждой пересборки динамики.
 static void veg_gpu_src_upload(int q, const float *src, int count)
 {
-    if (!g_veg_gpudriven || count <= 0) return;
     g_veg_src_cnt[q] = count;
+    if (!g_veg_gpudriven || count <= 0) return;
     size_t bytes = (size_t)count * 12 * sizeof(float);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, g_veg_src_ssbo[q]);
     glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, src, GL_DYNAMIC_COPY);
@@ -1119,8 +1173,7 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc)
     // всего спрайта (см. veg_cull.cs), поэтому растения на кромке экрана
     // остаются видны — раньше тест точкой обрезал их целиком.
     glUniform1f(u_cull_minpix, cvar_get("r_veg_minpix"));
-    // Плоскости фрустума в МИРЕ (Gribb-Hartmann, frustum.c): нормали внутрь.
-    // rc->frustum уже посчитан renderer_ctx_fill для этого кадра.
+    if (u_cull_lodshift >= 0) glUniform1f(u_cull_lodshift, cvar_get("r_veg_lod_shift"));
     glUniform4fv(u_cull_planes, 6, &rc->frustum.p[0][0]);
     glUniform3f(u_cull_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
     glActiveTexture(GL_TEXTURE0);
@@ -1137,6 +1190,8 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, g_veg_src_ssbo[q]);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, g_veg_cull_ssbo[q]);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, g_veg_indirect[q]);
+        if (u_cull_capacity >= 0)
+            glUniform1i(u_cull_capacity, g_veg_src_cnt[q]);
 
         if (q < 2) {
             // СТАТИКА: только видимые супер-чанки (как фолбэк). Это и есть
@@ -1174,6 +1229,7 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc)
 
     // --- PASS 2: indirect-отрисовка выживших ------------------------------
     glUseProgram(p->prog);
+    if (p->u_lodshift >= 0) glUniform1f(p->u_lodshift, cvar_get("r_veg_lod_shift"));
     for (int q = 0; q < 4; q++) {
         if (g_veg_src_cnt[q] <= 0) continue;
         if ((q < 2 && !g_draw_static_main) || (q >= 2 && !g_draw_dyn_main)) continue;
@@ -1218,6 +1274,8 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
                          "множитель радиуса прорисовки пшеницы (1 = карта)");
         cvar_register_ex("r_veg_falloff_mult", 1.0f, 0.3f, 1.0f, CVAR_ARCHIVE,
                          "спад плотности поля: <1 — реже уже к среднему кольцу");
+        cvar_register_ex("r_veg_lod_shift", 0.0f, 0.0f, 2.0f, CVAR_ARCHIVE,
+                         "сдвиг LOD пшеницы к камере (0=как на карте, 1-2=шире раньше)");
         cvar_register_ex("r_veg_regen_budget", 4096.0f, 1.0f, 4096.0f,
                          CVAR_ARCHIVE, "чанков регенерации за кадр (меньше = "
                          "меньше рывков CPU, дорисовывается в следующих)");
@@ -1339,10 +1397,16 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     // Статичный слой растительности: вся карта, один раз при старте
     veg_static_init(p);
 
-    // Есть ли ARB_base_instance (нужен для выборочной отрисовки супер-чанков)
+    // GLES не имеет core base-instance. Даже если desktop-драйвер экспортирует
+    // адрес расширения в ES-контексте, используем гарантированную эмуляцию.
+#ifdef USE_GLES_PATH
+    g_has_base_instance = 0;
+#else
     g_has_base_instance = p_glDrawElementsInstancedBaseInstance != NULL;
+#endif
     SDL_Log("Vegetation draw: %s",
-            g_has_base_instance ? "instanced super-chunks" : "full static");
+            g_has_base_instance ? "instanced super-chunks (base-instance)"
+                                : "instanced super-chunks (offset emulation)");
 
     // Предпрореженный слой для теней (каждый 2-й экземпляр)
     veg_shadow_build();
@@ -1384,7 +1448,12 @@ void veg_cleanup(SceneNode *n)
     g_chunk_cam[0] = g_chunk_cam[1] = INT_MAX;
     free(g_static_g); free(g_static_w);
     free(g_dyn_g); free(g_dyn_w);
+    free(g_gen_scratch_g); free(g_gen_scratch_w);
+    free(g_shadow_scratch_g); free(g_shadow_scratch_w);
     g_static_g = g_static_w = g_dyn_g = g_dyn_w = NULL;
+    g_gen_scratch_g = g_gen_scratch_w = NULL;
+    g_shadow_scratch_g = g_shadow_scratch_w = NULL;
+    g_shadow_scratch_gcap = g_shadow_scratch_wcap = 0;
     free(g_sc_cnt_g); free(g_sc_cnt_w);
     free(g_sc_off_g); free(g_sc_off_w);
     free(g_sc_cx); free(g_sc_cz);

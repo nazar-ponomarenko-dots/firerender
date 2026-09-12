@@ -34,6 +34,33 @@
 #  endif
 #endif
 
+// --- Константы GLES 3.1 / GL 4.3 (compute + SSBO) ----------------------------
+//  GLES3-заголовок (gl3.h) их не знает: это фичи GLES 3.1. Числовые значения
+//  одинаковы в OpenGL и OpenGL ES — просто доопределяем. Если контекст
+//  устройства младше 3.1, функции из GL_FUNCS_OPT останутся NULL и движок
+//  откатится на инстансный путь (g_gl_gpu_driven == 0).
+#if defined(USE_GLES_PATH) && !defined(GL_SHADER_STORAGE_BUFFER)
+#define GL_COMPUTE_SHADER                0x91B9
+#define GL_MAX_COMPUTE_WORK_GROUP_COUNT  0x91BE
+#define GL_MAX_COMPUTE_WORK_GROUP_SIZE   0x91BF
+#define GL_SHADER_STORAGE_BUFFER         0x90D2
+#define GL_SHADER_STORAGE_BLOCK          0x92E6
+#define GL_BUFFER_UPDATE_BARRIER_BIT     0x00000100
+#define GL_COMMAND_BARRIER_BIT           0x00000400
+#define GL_ELEMENT_ARRAY_BARRIER_BIT     0x00000002
+#define GL_PIXEL_BUFFER_BARRIER_BIT      0x00000080
+#define GL_SHADER_IMAGE_ACCESS_BARRIER_BIT 0x00000020
+#define GL_TEXTURE_FETCH_BARRIER_BIT     0x00000008
+#define GL_TEXTURE_UPDATE_BARRIER_BIT    0x00000100
+#define GL_UNIFORM_BARRIER_BIT           0x00000004
+#define GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT 0x00000001
+#define GL_SHADER_STORAGE_BARRIER_BIT   0x00002000
+#define GL_DRAW_INDIRECT_BUFFER         0x8F3F
+#define GL_TIME_ELAPSED                 0x88BF
+#define GL_R16                          0x822A   // на GLES = GL_R16_EXT
+#define GL_ALL_BARRIER_BITS              0xFFFFFFFFu
+#endif
+
 #define GL_FUNCS(F)                                                              \
     F(const GLubyte *, glGetString,              (GLenum))                        \
     F(void,             glClearColor,            (GLfloat, GLfloat, GLfloat, GLfloat)) \
@@ -77,15 +104,11 @@
     F(void,             glGetIntegerv,           (GLenum, GLint *))               \
     F(GLboolean,        glIsEnabled,             (GLenum))                        \
     F(GLenum,           glGetError,              (void))                          \
-    F(void,             glDrawBuffer,            (GLenum))                        \
-    F(void,             glReadBuffer,            (GLenum))                        \
     F(void,             glDeleteFramebuffers,    (GLsizei, const GLuint *))       \
-    F(void,             glPolygonMode,           (GLenum, GLenum))                \
     F(void,             glPolygonOffset,         (GLfloat, GLfloat))              \
     F(void,             glVertexAttribDivisor,   (GLuint, GLuint))                 \
     F(void,             glDrawElements,          (GLenum, GLsizei, GLenum, const void *)) \
     F(void,             glDrawElementsInstanced, (GLenum, GLsizei, GLenum, const void *, GLsizei)) \
-    F(void,             glDrawElementsInstancedBaseInstance, (GLenum, GLsizei, GLenum, const void *, GLsizei, GLuint)) \
     F(void,             glDrawArraysInstanced,  (GLenum, GLint, GLsizei, GLsizei)) \
 
 // --- OPTIONAL: GPU-driven рендер (compute + indirect) ------------------------
@@ -94,6 +117,10 @@
 //  контекст старый — тогда g_gl_gpu_driven = 0 и используется инстансный
 //  фолбэк. Не включены в GL_FUNCS, чтобы не ломать загрузку на GL 3.3.
 #define GL_FUNCS_OPT(F)                                                          \
+    F(void,             glDrawBuffer,                (GLenum))                   \
+    F(void,             glReadBuffer,                (GLenum))                   \
+    F(void,             glPolygonMode,               (GLenum, GLenum))           \
+    F(void,             glDrawElementsInstancedBaseInstance, (GLenum, GLsizei, GLenum, const void *, GLsizei, GLuint)) \
     F(void,             glDispatchCompute,           (GLuint, GLuint, GLuint))   \
     F(void,             glMemoryBarrier,             (GLbitfield))               \
     F(void,             glBindBufferBase,            (GLenum, GLuint, GLuint))   \
@@ -140,6 +167,7 @@
     F(void,             glDeleteQueries,         (GLsizei, const GLuint *))       \
     F(void,             glBeginQuery,            (GLenum, GLuint))                \
     F(void,             glEndQuery,              (GLenum))                        \
+    F(void,             glGetQueryObjectiv,     (GLuint, GLenum, GLint *))       \
     F(void,             glGetQueryObjectui64v,   (GLuint, GLenum, GLuint64 *))
 
 #define F(ret, name, args) extern ret (APIENTRY *p_##name) args;
@@ -254,6 +282,7 @@ extern int g_gl_gpu_driven;
 #define glDeleteQueries           p_glDeleteQueries
 #define glBeginQuery              p_glBeginQuery
 #define glEndQuery                p_glEndQuery
+#define glGetQueryObjectiv        p_glGetQueryObjectiv
 #define glGetQueryObjectui64v     p_glGetQueryObjectui64v
 
 // Загружает все указатели из текущего GL-контекста. 0 — успех, -1 — ошибка.

@@ -582,6 +582,11 @@ static void audio_load_map(Game *g)
 // прогресса справа снизу с подписью фазы (loading.c предъявляет кадры).
 int game_load_world(Game *g)
 {
+    if (!g || g->world_loading) {
+        SDL_Log("World load rejected: nested load");
+        return -1;
+    }
+    g->world_loading = 1;
     // FR_STAGES: тайминг фаз загрузки мира (поиск тяжёлых мест загрузки)
     const int st = getenv("FR_STAGES") != NULL;
     double st_f = (double)SDL_GetPerformanceFrequency();
@@ -592,7 +597,11 @@ int game_load_world(Game *g)
     loading_begin();
     loading_progress(0.05f, "Загрузка уровня");
     WorldTextures wt;
-    if (world_load_geometry(g, &wt) != 0) { loading_end(); return -1; } // фаза 1
+    if (world_load_geometry(g, &wt) != 0) {
+        loading_end();
+        g->world_loading = 0;
+        return -1;
+    } // фаза 1
     STLOG("geometry+textures");
     loading_progress(0.30f, "Собираем сцену");
     if (scene_build(g, &wt) != 0) {
@@ -601,6 +610,7 @@ int game_load_world(Game *g)
         world_unload_geometry(g);
         SDL_Log("World load failed: scene_build");
         loading_end();
+        g->world_loading = 0;
         return -1;                                       // фаза 2: сцена
     }
     STLOG("scene_build");
@@ -623,6 +633,7 @@ int game_load_world(Game *g)
     lua_engine_map(g->map_name);
     loading_progress(1.0f, "Готово");
     loading_end();
+    g->world_loading = 0;
     return 0;
 }
 

@@ -23,4 +23,9 @@ void input_sync_mode(void);
 // 1 — был получен SDL_EVENT_QUIT (главный цикл завершает работу).
 int input_quit(void);
 
+// Android/window lifecycle: background останавливает simulation/render/swap;
+// resume сообщает один раз, чтобы главный цикл сбросил clock accumulator.
+int input_background(void);
+int input_take_resumed(void);
+
 #endif
