@@ -83,8 +83,17 @@ SceneNode *decals_make_node(const WorldState *w, const RendererContext *rc)
 
     s_d = p;
     const float size[3] = { 100.0f, 10.0f, 100.0f };
-    return node_new("Decals", "MeshInstance3D", NULL, size, p, NULL,
-                    decals_node_render);
+    SceneNode *node = node_new("Decals", "MeshInstance3D", NULL, size, p, NULL,
+                               decals_node_render);
+    if (!node) {
+        s_d = NULL;
+        if (p->vbo) glDeleteBuffers(1, &p->vbo);
+        if (p->ibo) glDeleteBuffers(1, &p->ibo);
+        if (p->vao) glDeleteVertexArrays(1, &p->vao);
+        resources_program_release(p->prog);
+        free(p);
+    }
+    return node;
 }
 
 // Колбэк узла: рендер всех декалей (из обхода сцены)
@@ -100,6 +109,7 @@ static void decals_node_render(SceneNode *n, float dt)
 static float decal_sample_terrain(const WorldState *w, float x, float z,
                                   float hw, float hd, float u, float v)
 {
+    (void)u; (void)v;               // зарезервированы: смещение сэмпла по UV
     // 3x3 сетка сэмплов (u,v в 0..1): центр + 4 угла + 4 середины сторон
     const float du[3] = { -1.0f, 0.0f, 1.0f };
     const float dv[3] = { -1.0f, 0.0f, 1.0f };

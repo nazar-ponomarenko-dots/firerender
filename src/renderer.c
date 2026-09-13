@@ -473,25 +473,25 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniformMatrix4fv(su->u_viewproj, 1, GL_FALSE, rc->viewproj);
     if (su->u_campos >= 0)
         glUniform3f(su->u_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
-    if (su->u_lightdir >= 0)
-        glUniform3fv(su->u_lightdir, SUN_MAX_LIGHTS, &rc->light_dir[0][0]);
-    if (su->u_lightcolor >= 0)
-        glUniform3fv(su->u_lightcolor, SUN_MAX_LIGHTS, &rc->light_color[0][0]);
-    if (su->u_lightint >= 0)
-        glUniform1fv(su->u_lightint, SUN_MAX_LIGHTS, rc->light_intensity);
+    if (su->u_lightdir >= 0 && rc->light_count > 0)
+        glUniform3fv(su->u_lightdir, rc->light_count, &rc->light_dir[0][0]);
+    if (su->u_lightcolor >= 0 && rc->light_count > 0)
+        glUniform3fv(su->u_lightcolor, rc->light_count, &rc->light_color[0][0]);
+    if (su->u_lightint >= 0 && rc->light_count > 0)
+        glUniform1fv(su->u_lightint, rc->light_count, rc->light_intensity);
     if (su->u_lightcount >= 0) glUniform1i(su->u_lightcount, rc->light_count);
     // Точечные и прожекторные источники
-    if (su->u_pointpos >= 0) glUniform3fv(su->u_pointpos, SCENE_MAX_POINT, &rc->point_pos[0][0]);
-    if (su->u_pointcolor >= 0) glUniform3fv(su->u_pointcolor, SCENE_MAX_POINT, &rc->point_color[0][0]);
-    if (su->u_pointint >= 0) glUniform1fv(su->u_pointint, SCENE_MAX_POINT, rc->point_intensity);
-    if (su->u_pointrange >= 0) glUniform1fv(su->u_pointrange, SCENE_MAX_POINT, rc->point_range);
+    if (su->u_pointpos >= 0 && rc->point_count > 0) glUniform3fv(su->u_pointpos, rc->point_count, &rc->point_pos[0][0]);
+    if (su->u_pointcolor >= 0 && rc->point_count > 0) glUniform3fv(su->u_pointcolor, rc->point_count, &rc->point_color[0][0]);
+    if (su->u_pointint >= 0 && rc->point_count > 0) glUniform1fv(su->u_pointint, rc->point_count, rc->point_intensity);
+    if (su->u_pointrange >= 0 && rc->point_count > 0) glUniform1fv(su->u_pointrange, rc->point_count, rc->point_range);
     if (su->u_pointcount >= 0) glUniform1i(su->u_pointcount, rc->point_count);
-    if (su->u_spotpos >= 0) glUniform3fv(su->u_spotpos, SCENE_MAX_SPOT, &rc->spot_pos[0][0]);
-    if (su->u_spotdir >= 0) glUniform3fv(su->u_spotdir, SCENE_MAX_SPOT, &rc->spot_dir[0][0]);
-    if (su->u_spotcolor >= 0) glUniform3fv(su->u_spotcolor, SCENE_MAX_SPOT, &rc->spot_color[0][0]);
-    if (su->u_spotint >= 0) glUniform1fv(su->u_spotint, SCENE_MAX_SPOT, rc->spot_intensity);
-    if (su->u_spotrange >= 0) glUniform1fv(su->u_spotrange, SCENE_MAX_SPOT, rc->spot_range);
-    if (su->u_spotangle >= 0) glUniform1fv(su->u_spotangle, SCENE_MAX_SPOT, rc->spot_angle);
+    if (su->u_spotpos >= 0 && rc->spot_count > 0) glUniform3fv(su->u_spotpos, rc->spot_count, &rc->spot_pos[0][0]);
+    if (su->u_spotdir >= 0 && rc->spot_count > 0) glUniform3fv(su->u_spotdir, rc->spot_count, &rc->spot_dir[0][0]);
+    if (su->u_spotcolor >= 0 && rc->spot_count > 0) glUniform3fv(su->u_spotcolor, rc->spot_count, &rc->spot_color[0][0]);
+    if (su->u_spotint >= 0 && rc->spot_count > 0) glUniform1fv(su->u_spotint, rc->spot_count, rc->spot_intensity);
+    if (su->u_spotrange >= 0 && rc->spot_count > 0) glUniform1fv(su->u_spotrange, rc->spot_count, rc->spot_range);
+    if (su->u_spotangle >= 0 && rc->spot_count > 0) glUniform1fv(su->u_spotangle, rc->spot_count, rc->spot_angle);
     if (su->u_spotcount >= 0) glUniform1i(su->u_spotcount, rc->spot_count);
     if (su->u_ambient >= 0)
         glUniform3f(su->u_ambient, rc->ambient[0], rc->ambient[1], rc->ambient[2]);
@@ -750,6 +750,7 @@ static const float s_face_ups[6][3] = {
 
 // Центр кубомапа отражений: x/z игрока, y — уровень воды под игроком
 // (если воды нет — высота камеры: куб описывает окружение игрока).
+__attribute__((unused))
 static void cubemap_center_pos(Game *g, float out[3])
 {
     const Camera *cam = &g->cam->cam;
@@ -890,9 +891,9 @@ void renderer_frame(Game *g, float dt, int draw_3d)
                             (float)SDL_GetPerformanceFrequency());
             }
         }
-gpu_wireframe(s_gpu, s_wire);
+        if (s_wire) gpu_wireframe(s_gpu, 1);
         render_3d(world, dt);
-        gpu_wireframe(s_gpu, 0);
+        if (s_wire) gpu_wireframe(s_gpu, 0);
         did_3d = 1;
     }
     if (did_3d) {
@@ -900,54 +901,62 @@ gpu_wireframe(s_gpu, s_wire);
         bloom_resolve(&s_bloom);
         gpu_bind_framebuffer(s_gpu, 0);
         gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
-        Uint64 pf = SDL_GetPerformanceFrequency();
+        int profiling = cvar_get("profiler") > 0.5f;
+        Uint64 pf = profiling ? SDL_GetPerformanceFrequency() : 0;
         GLuint scene_for_post = bloom_scene_tex(&s_bloom);
         // GI (аналог Lumen): непрямой свет + ambient occlusion. Идёт ПЕРВЫМ
         // из пост-проходов — SSR и bloom должны видеть уже подсвеченную
         // сцену (иначе отражения и свечение считаются от «недосвеченной»).
         if (gi_is_on()) {
-            Uint64 tg = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_GI);
+            Uint64 tg = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_GI);
             scene_for_post = gi_render(&s_gi, scene_for_post,
                                        bloom_scene_depth(&s_bloom), &s_rc);
-            prof_gpu_end(PROF_GI);
-            Uint64 te = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_GI, (float)(te - tg) * 1000.0f / (float)pf);
+            if (profiling) {
+                prof_gpu_end(PROF_GI);
+                Uint64 te = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_GI, (float)(te - tg) * 1000.0f / (float)pf);
+            }
         }
         // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
         // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
         if (cvar_get("r_ssr") >= 0.5f &&
             (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
             cvar_get("r_ssr_strength") > 0.0f) {
-            Uint64 ts = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_SSR);
+            Uint64 ts = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_SSR);
             ssr_render(&s_ssr, scene_for_post,
                        bloom_scene_depth(&s_bloom), &s_rc);
-            prof_gpu_end(PROF_SSR);
-            Uint64 te = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
+            if (profiling) {
+                prof_gpu_end(PROF_SSR);
+                Uint64 te = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
+            }
             scene_for_post = ssr_tex(&s_ssr);
         }
         // r_cheap_fog: туман ТОЛЬКО шейдерный (в terrain.fs/wheat.fs —
         // дистанционный mix + ранний выход дальней травы), без voxfog-марша
         // и композита. Для КАРТОШКИ: горизонт смягчён, ноль доп. проходов.
         if (voxfog_is_on() && cvar_get("r_cheap_fog") < 0.5f) {
-            Uint64 t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_BLOOM);
+            Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_BLOOM);
             bloom_render(&s_bloom, scene_for_post, voxfog_fbo(),
                          s_rsw, s_rsh);
-            prof_gpu_end(PROF_BLOOM);
-            Uint64 t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
-            t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_FOG);
+            if (profiling) {
+                prof_gpu_end(PROF_BLOOM);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
+                t0 = SDL_GetPerformanceCounter();
+                prof_gpu_begin(PROF_FOG);
+            }
             voxfog_render(s_rsw, s_rsh, s_vw, s_vh, &s_rc,
                           voxfog_texture(), bloom_scene_depth(&s_bloom));
-            prof_gpu_end(PROF_FOG);
-            t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_FOG, (float)(t1 - t0) * 1000.0f / (float)pf);
+            if (profiling) {
+                prof_gpu_end(PROF_FOG);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_FOG, (float)(t1 - t0) * 1000.0f / (float)pf);
+            }
         } else {
-            int profiling = cvar_get("profiler") > 0.5f;
             Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
             if (profiling) prof_gpu_begin(PROF_BLOOM);
             // r_present_blit=1 — grade в масштабе сцены + аппаратный blit

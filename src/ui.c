@@ -314,7 +314,6 @@ bool ui_slider(Ui *u, const char *label, float *value,
 {
     int id = ++u->id;
     float ih = ui_layout_item_h(u) + 8.0f;
-    int hover = ui_hit(u, id, u->cx, u->cy, u->col_w, ih);
     bool changed = false;
 
     // Трек: сразу после label, до зоны значения. Бегунок всегда идёт

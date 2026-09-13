@@ -262,6 +262,8 @@ void main() {
         float fog = smoothstep(uFogStart, uFogEnd, dist);
         col = mix(col, uFogColor, fog);
     }
-    float a = (uBlend == 0 || uBlend == 3) ? 1.0 : c.a * uAlpha;
+    // alphatest: альфа текстуры (0.5..1 у кромки) — при активном MSAA
+    // включён alpha-to-coverage, частичное покрытие сглаживает край.
+    float a = (uBlend == 0 || uBlend == 3) ? c.a : c.a * uAlpha;
     FragColor = vec4(col, a);
 }

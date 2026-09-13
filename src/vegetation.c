@@ -25,6 +25,7 @@
 #include "vegetation.h"
 
 #include "assets.h"
+#include "bloom.h"
 #include "cvars.h"
 #include "gl_loader.h"
 #include "linalg.h"
@@ -476,7 +477,7 @@ static int g_has_base_instance;        // есть ли ARB_base_instance
 // Статичный слой: вся карта, минимальная плотность. Один раз при старте.
 // Экземпляры раскладываются ПО СУПЕР-ЧАНКАМ (64 м), чтобы рендер мог
 // рисовать только видимые супер-чанки (см. veg_node_render).
-static void veg_static_init(VegParams *p)
+static int veg_static_init(VegParams *p)
 {
     g_sc_gw = (g_map_w + VEG_SUPER - 1) / VEG_SUPER;
     g_sc_gh = (g_map_d + VEG_SUPER - 1) / VEG_SUPER;
@@ -487,6 +488,11 @@ static void veg_static_init(VegParams *p)
     g_sc_off_w = malloc((size_t)(g_sc_n + 1) * sizeof(int));
     g_sc_cx = malloc((size_t)g_sc_n * sizeof(float));
     g_sc_cz = malloc((size_t)g_sc_n * sizeof(float));
+    g_gen_scratch_g = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+    g_gen_scratch_w = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+    if (!g_sc_cnt_g || !g_sc_cnt_w || !g_sc_off_g || !g_sc_off_w ||
+        !g_sc_cx || !g_sc_cz || !g_gen_scratch_g || !g_gen_scratch_w)
+        return 0;
 
     // проход 1: считаем растения на каждый супер-чанк
     for (int sy = 0; sy < g_sc_gh; sy++) {
@@ -500,13 +506,11 @@ static void veg_static_init(VegParams *p)
                 for (int dx = 0; dx < VEG_SUPER; dx++) {
                     int i = sx * VEG_SUPER + dx, j = sy * VEG_SUPER + dy;
                     if (i >= g_map_w || j >= g_map_d) continue;
-                    float *gb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
-                    float *wb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
                     int gn = 0, wn = 0;
-                    veg_gen_chunk(p->world, i, j, 0, 0, true, gb, wb,
+                    veg_gen_chunk(p->world, i, j, 0, 0, true,
+                                   g_gen_scratch_g, g_gen_scratch_w,
                                    &gn, &wn, NULL, NULL);
                     g += gn; w += wn;
-                    free(gb); free(wb);
                 }
             g_sc_cnt_g[sy * g_sc_gw + sx] = g;
             g_sc_cnt_w[sy * g_sc_gw + sx] = w;
@@ -520,8 +524,9 @@ static void veg_static_init(VegParams *p)
     }
     g_static_gc = g_sc_off_g[g_sc_n];
     g_static_wc = g_sc_off_w[g_sc_n];
-    g_static_g = malloc((size_t)g_static_gc * 12 * sizeof(float));
-    g_static_w = malloc((size_t)g_static_wc * 12 * sizeof(float));
+    g_static_g = g_static_gc ? malloc((size_t)g_static_gc * 12 * sizeof(float)) : NULL;
+    g_static_w = g_static_wc ? malloc((size_t)g_static_wc * 12 * sizeof(float)) : NULL;
+    if ((g_static_gc && !g_static_g) || (g_static_wc && !g_static_w)) return 0;
 
     // проход 2: заполняем буферы (генерация детерминирована — те же счётчики)
     int pos_g = 0, pos_w = 0;
@@ -531,18 +536,18 @@ static void veg_static_init(VegParams *p)
                 for (int dx = 0; dx < VEG_SUPER; dx++) {
                     int i = sx * VEG_SUPER + dx, j = sy * VEG_SUPER + dy;
                     if (i >= g_map_w || j >= g_map_d) continue;
-                    float *gb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
-                    float *wb = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
                     int gn = 0, wn = 0;
-                    veg_gen_chunk(p->world, i, j, 0, 0, true, gb, wb,
+                    veg_gen_chunk(p->world, i, j, 0, 0, true,
+                                   g_gen_scratch_g, g_gen_scratch_w,
                                    &gn, &wn, NULL, NULL);
-                    memcpy(g_static_g + (size_t)pos_g * 12, gb,
-                           (size_t)gn * 12 * sizeof(float));
-                    memcpy(g_static_w + (size_t)pos_w * 12, wb,
-                           (size_t)wn * 12 * sizeof(float));
+                    if (gn) memcpy(g_static_g + (size_t)pos_g * 12,
+                                   g_gen_scratch_g,
+                                   (size_t)gn * 12 * sizeof(float));
+                    if (wn) memcpy(g_static_w + (size_t)pos_w * 12,
+                                   g_gen_scratch_w,
+                                   (size_t)wn * 12 * sizeof(float));
                     pos_g += gn;
                     pos_w += wn;
-                    free(gb); free(wb);
                 }
         }
     }
@@ -554,6 +559,7 @@ static void veg_static_init(VegParams *p)
                  g_static_w, GL_STATIC_DRAW);
     SDL_Log("Veg static: %d grass, %d wheat (whole map, %d super-chunks)",
             g_static_gc, g_static_wc, g_sc_n);
+    return 1;
 }
 
 // Предпрореженный статический слой для теней: каждый 2-й экземпляр.
@@ -702,6 +708,11 @@ static void veg_update(const float cam_pos[3], VegParams *p)
                 g_gen_scratch_g = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
             if (!g_gen_scratch_w)
                 g_gen_scratch_w = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+            if (!g_gen_scratch_g || !g_gen_scratch_w) {
+                SDL_Log("Vegetation: generation scratch allocation failed");
+                g_regen_pending = 1;
+                return;
+            }
             int gn = 0, wn = 0;
             float dg_d, dw_d;
             veg_gen_chunk(p->world, i, j, cam_pos[0], cam_pos[2], false,
@@ -709,6 +720,12 @@ static void veg_update(const float cam_pos[3], VegParams *p)
                           &dg_d, &dw_d);
             float *gb = gn ? malloc((size_t)gn * 12 * sizeof(float)) : NULL;
             float *wb = wn ? malloc((size_t)wn * 12 * sizeof(float)) : NULL;
+            if ((gn && !gb) || (wn && !wb)) {
+                free(gb); free(wb);
+                SDL_Log("Vegetation: chunk allocation failed");
+                g_regen_pending = 1;
+                return;
+            }
             if (gn) memcpy(gb, g_gen_scratch_g, (size_t)gn * 12 * sizeof(float));
             if (wn) memcpy(wb, g_gen_scratch_w, (size_t)wn * 12 * sizeof(float));
             free(c->g); free(c->w);
@@ -728,9 +745,20 @@ static void veg_update(const float cam_pos[3], VegParams *p)
         gc += c->gn; wc += c->wn;
     }
     if (gc > g_dyn_cap || wc > g_dyn_cap) {
-        g_dyn_cap = (int)((gc > wc ? gc : wc) * 1.2f) + 1;
-        g_dyn_g = realloc(g_dyn_g, (size_t)g_dyn_cap * 12 * sizeof(float));
-        g_dyn_w = realloc(g_dyn_w, (size_t)g_dyn_cap * 12 * sizeof(float));
+        int cap = (int)((gc > wc ? gc : wc) * 1.2f) + 1;
+        float *ng = realloc(g_dyn_g, (size_t)cap * 12 * sizeof(float));
+        if (!ng) {
+            SDL_Log("Vegetation: dynamic grass buffer allocation failed");
+            return;
+        }
+        g_dyn_g = ng;
+        float *nw = realloc(g_dyn_w, (size_t)cap * 12 * sizeof(float));
+        if (!nw) {
+            SDL_Log("Vegetation: dynamic wheat buffer allocation failed");
+            return;
+        }
+        g_dyn_w = nw;
+        g_dyn_cap = cap;
     }
     float *gd = g_dyn_g, *wd = g_dyn_w;
     for (int k = 0; k < nn; k++) {
@@ -967,6 +995,11 @@ void veg_node_render(SceneNode *n, float dt)
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);             // биллборды видны с обеих сторон
     glUseProgram(p->prog);
+    // MSAA не сглаживает alpha-cutout края спрайтов (discard) — включаем
+    // alpha-to-coverage: полупрозрачная кромка текселя даёт частичное
+    // покрытие сэмплов и край сглаживается. На теневую карту не влияет.
+    int a2c = bloom_msaa_active() > 0;
+    if (a2c) glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
     // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
     scene_uniforms_bind(&p->su, rc);
     // Растения: свои bias/градиент (shadow_bias_veg из map.json — тени
@@ -991,6 +1024,7 @@ void veg_node_render(SceneNode *n, float dt)
     if (g_veg_gpudriven && (int)cvar_get("r_veg_gpudriven") > 0.5f) {
         veg_gpu_draw(p, rc);
         glEnable(GL_CULL_FACE);
+        if (a2c) glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
         return;
     }
 
@@ -1038,6 +1072,7 @@ void veg_node_render(SceneNode *n, float dt)
         glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL, g_dyn_wc);
     }
     glEnable(GL_CULL_FACE);
+    if (a2c) glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
 }
 
 int veg_count(int q)
@@ -1361,6 +1396,19 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     glBindVertexArray(0);
 
     VegParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        resources_program_release(prog);
+        glDeleteTextures(1, &tex);
+        glDeleteBuffers(1, &g_veg_mesh_vbo);
+        glDeleteBuffers(1, &g_veg_mesh_ibo);
+        for (int q = 0; q < 4; q++) {
+            glDeleteBuffers(1, &g_veg_vb[q]);
+            glDeleteVertexArrays(1, &g_veg_vao[q]);
+            g_veg_vb[q] = g_veg_vao[q] = 0;
+        }
+        g_veg_mesh_vbo = g_veg_mesh_ibo = 0;
+        return NULL;
+    }
     p->world = w;
     p->rc = rc;
     p->prog = prog;
@@ -1379,8 +1427,10 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
                                                  "shaders/shadowveg.vs",
                                                  "shaders/shadowveg.fs");
     if (!s_shadowveg_prog) {
-        resources_program_release(p->prog);
-        // ... остальное освободит вег_cleanup сцены (VBO/VAO уже в GL)
+        SceneNode partial = {0};
+        partial.params = p;
+        veg_cleanup(&partial);
+        free(p);
         return NULL;
     }
     veg_prog_init(p);              // uniform'ы + статичные
@@ -1395,7 +1445,14 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     g_dyn_cap = 0;
 
     // Статичный слой растительности: вся карта, один раз при старте
-    veg_static_init(p);
+    if (!veg_static_init(p)) {
+        SDL_Log("Vegetation: static layer allocation failed");
+        SceneNode partial = {0};
+        partial.params = p;
+        veg_cleanup(&partial);
+        free(p);
+        return NULL;
+    }
 
     // GLES не имеет core base-instance. Даже если desktop-драйвер экспортирует
     // адрес расширения в ES-контексте, используем гарантированную эмуляцию.
@@ -1426,8 +1483,15 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
 
     const float size[3] = { w->world_w, w->max_height - w->min_height,
                             w->world_d };
-    return node_new("Vegetation", "MeshInstance3D", NULL, size, p,
-                    NULL, veg_node_render);
+    SceneNode *node = node_new("Vegetation", "MeshInstance3D", NULL, size, p,
+                               NULL, veg_node_render);
+    if (!node) {
+        SceneNode partial = {0};
+        partial.params = p;
+        veg_cleanup(&partial);
+        free(p);
+    }
+    return node;
 }
 
 void veg_cleanup(SceneNode *n)

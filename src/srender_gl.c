@@ -282,6 +282,8 @@ void sr_wireframe(SrDevice *d, int on)
 #ifndef USE_GLES_PATH
     if (p_glPolygonMode)
         glPolygonMode(GL_FRONT_AND_BACK, on ? GL_LINE : GL_FILL);
+#else
+    (void)on;   // каркас недоступен в GLES — полигонный режим не эмулируем
 #endif
 }
 

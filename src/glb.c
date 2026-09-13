@@ -25,6 +25,7 @@
 #include "stb_image.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -135,6 +136,25 @@ static void mat4_transform_nrm(const float m[16], const float *n, float *o)
     o[0] = x; o[1] = y; o[2] = z;
 }
 
+typedef struct { const JsonNode *node; float m[16]; } GlbStackItem;
+
+static int stack_push(GlbStackItem **stack, int *n, int *cap,
+                      const JsonNode *node, const float *matrix)
+{
+    if (*n >= *cap) {
+        int next = *cap ? *cap * 2 : 64;
+        GlbStackItem *p = realloc(*stack, (size_t)next * sizeof *p);
+        if (!p) return 0;
+        *stack = p;
+        *cap = next;
+    }
+    (*stack)[*n].node = node;
+    if (matrix) memcpy((*stack)[*n].m, matrix, 16 * sizeof(float));
+    else mat4_identity((*stack)[*n].m);
+    (*n)++;
+    return 1;
+}
+
 // --- Бакет вершин (по материалу) ----------------------------------------------
 typedef struct {
     int mat;                       // индекс материала (-1 = без)
@@ -147,35 +167,50 @@ static Bucket *b_get(Bucket **arr, int *n, int *cap, int mat)
 {
     for (int i = 0; i < *n; i++) if ((*arr)[i].mat == mat) return &(*arr)[i];
     if (*n >= *cap) {
-        *cap = *cap ? *cap * 2 : 16;
-        *arr = realloc(*arr, (size_t)*cap * sizeof **arr);
+        int next = *cap ? *cap * 2 : 16;
+        Bucket *p = realloc(*arr, (size_t)next * sizeof **arr);
+        if (!p) return NULL;
+        *arr = p;
+        *cap = next;
     }
     Bucket *b = &(*arr)[(*n)++];
     memset(b, 0, sizeof *b);
     b->mat = mat;
     return b;
 }
-static void b_push_v(Bucket *b, float px, float py, float pz,
-                     float nx, float ny, float nz, float u, float v)
+static int b_push_v(Bucket *b, float px, float py, float pz,
+                    float nx, float ny, float nz, float u, float v)
 {
     if (b->vn >= b->vcap) {
-        b->vcap = b->vcap ? b->vcap * 2 : 4096;
-        b->verts = realloc(b->verts, (size_t)b->vcap * 3 * sizeof(float));
-        b->nrm = realloc(b->nrm, (size_t)b->vcap * 3 * sizeof(float));
-        b->uv = realloc(b->uv, (size_t)b->vcap * 2 * sizeof(float));
+        int next = b->vcap < 1 ? 4096 : (b->vcap > (1 << 28) ? 0 : b->vcap * 2);
+        if (next <= 0) return 0;
+        float *nv = realloc(b->verts, (size_t)next * 3 * sizeof(float));
+        if (nv) b->verts = nv;
+        float *nn = realloc(b->nrm, (size_t)next * 3 * sizeof(float));
+        if (nn) b->nrm = nn;
+        float *nu = realloc(b->uv, (size_t)next * 2 * sizeof(float));
+        if (nu) b->uv = nu;
+        if (!nv || !nn || !nu) return 0;
+        b->vcap = next;
     }
     b->verts[3 * b->vn] = px; b->verts[3 * b->vn + 1] = py; b->verts[3 * b->vn + 2] = pz;
     b->nrm[3 * b->vn] = nx; b->nrm[3 * b->vn + 1] = ny; b->nrm[3 * b->vn + 2] = nz;
     b->uv[2 * b->vn] = u; b->uv[2 * b->vn + 1] = v;
     b->vn++;
+    return 1;
 }
-static void b_push_i(Bucket *b, unsigned int i)
+static int b_push_i(Bucket *b, unsigned int i)
 {
     if (b->idxn >= b->icap) {
-        b->icap = b->icap ? b->icap * 2 : 4096;
-        b->idx = realloc(b->idx, (size_t)b->icap * sizeof(unsigned int));
+        int next = b->icap < 1 ? 4096 : (b->icap > (1 << 28) ? 0 : b->icap * 2);
+        if (next <= 0) return 0;
+        unsigned int *p = realloc(b->idx, (size_t)next * sizeof(unsigned int));
+        if (!p) return 0;
+        b->idx = p;
+        b->icap = next;
     }
     b->idx[b->idxn++] = i;
+    return 1;
 }
 static void b_free(Bucket *b)
 {
@@ -366,7 +401,7 @@ GlbModel *glb_parse_file(const char *path)
 
     Bucket *buckets = NULL; int bk_n = 0, bk_cap = 0;
     int ok = 1; const char *err = "";
-    struct StackItem { const JsonNode *node; float m[16]; } *stack = NULL;
+    GlbStackItem *stack = NULL;
     int st_n = 0, st_cap = 0;
 
     const JsonNode *scene = json_find(root, "scenes");
@@ -378,19 +413,22 @@ GlbModel *glb_parse_file(const char *path)
             int ni = (int)json_num(json_array_get(rk, i), -1);
             const JsonNode *nd = (ni >= 0 && ni < json_array_len(nodes)) ? json_array_get(nodes, ni) : NULL;
             if (!nd) continue;
-            if (st_n >= st_cap) { st_cap = st_cap ? st_cap * 2 : 64; stack = realloc(stack, (size_t)st_cap * sizeof *stack); }
-            stack[st_n].node = nd; mat4_identity(stack[st_n].m); st_n++;
+            if (!stack_push(&stack, &st_n, &st_cap, nd, NULL)) {
+                ok = 0; err = "нехватка памяти стека узлов"; break;
+            }
         }
     } else {
         // нет сцен — обходим все nodes как плоский список
         for (int i = 0; i < json_array_len(nodes); i++) {
-            if (st_n >= st_cap) { st_cap = st_cap ? st_cap * 2 : 64; stack = realloc(stack, (size_t)st_cap * sizeof *stack); }
-            stack[st_n].node = json_array_get(nodes, i); mat4_identity(stack[st_n].m); st_n++;
+            const JsonNode *nd = json_array_get(nodes, i);
+            if (!stack_push(&stack, &st_n, &st_cap, nd, NULL)) {
+                ok = 0; err = "нехватка памяти стека узлов"; break;
+            }
         }
     }
 
     while (st_n > 0 && ok) {
-        struct StackItem it = stack[--st_n];
+        GlbStackItem it = stack[--st_n];
         const JsonNode *nd = it.node;
         if (!nd) continue;
         float local[16];
@@ -439,6 +477,7 @@ GlbModel *glb_parse_file(const char *path)
                     long nv = ap->count;
 
                     Bucket *bk = b_get(&buckets, &bk_n, &bk_cap, mat_idx);
+                    if (!bk) { ok = 0; err = "нехватка памяти бакетов"; break; }
                     unsigned int base = (unsigned int)bk->vn;
                     long pos_base = (ap->bufferView >= 0 && ap->bufferView < bv_n)
                                     ? bvs[ap->bufferView].byteOffset + ap->byteOffset : 0;
@@ -452,17 +491,25 @@ GlbModel *glb_parse_file(const char *path)
                         if (au) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
                         // БЕЗ флипа V: stb_image кладёт верхнюю строку
                         // картинки в t=0, glTF v=0 — тоже верх (см. glb_anim)
-                        b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1]);
+                        if (!b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1])) {
+                            ok = 0; err = "нехватка памяти вершин"; break;
+                        }
                     }
-                    if (ai) {
+                    if (ok && ai) {
                         long idx_base = ai->bufferView >= 0 && ai->bufferView < bv_n
                                         ? bvs[ai->bufferView].byteOffset + ai->byteOffset : 0;
-                        for (long i = 0; i < ai->count; i++) {
+                        for (long i = 0; i < ai->count && ok; i++) {
                             long ii = read_index(bin, idx_base, ai, bvs, bv_n, (int)i, nv);
-                            if (ii >= 0) b_push_i(bk, base + (unsigned int)ii);
+                            if (ii >= 0 && !b_push_i(bk, base + (unsigned int)ii)) {
+                                ok = 0; err = "нехватка памяти индексов"; break;
+                            }
                         }
-                    } else {
-                        for (long i = 0; i < nv; i++) b_push_i(bk, base + (unsigned int)i);
+                    } else if (ok) {
+                        for (long i = 0; i < nv && ok; i++) {
+                            if (!b_push_i(bk, base + (unsigned int)i)) {
+                                ok = 0; err = "нехватка памяти индексов"; break;
+                            }
+                        }
                     }
                 }
             }
@@ -474,8 +521,9 @@ GlbModel *glb_parse_file(const char *path)
                 int ci = (int)json_num(json_array_get(ch, i), -1);
                 const JsonNode *cnd = (ci >= 0 && ci < json_array_len(nodes)) ? json_array_get(nodes, ci) : NULL;
                 if (!cnd) continue;
-                if (st_n >= st_cap) { st_cap = st_cap ? st_cap * 2 : 64; stack = realloc(stack, (size_t)st_cap * sizeof *stack); }
-                stack[st_n].node = cnd; memcpy(stack[st_n].m, world, sizeof world); st_n++;
+                if (!stack_push(&stack, &st_n, &st_cap, cnd, world)) {
+                    ok = 0; err = "нехватка памяти стека узлов"; break;
+                }
             }
         }
     }
@@ -494,7 +542,18 @@ GlbModel *glb_parse_file(const char *path)
 
     // --- Материалы (псевдо-PBR 2004) + альбедо ----------------------------------
     GlbModel *model = calloc(1, sizeof *model);
+    if (!model) {
+        for (int i = 0; i < bk_n; i++) b_free(&buckets[i]);
+        free(buckets); free(bvs); json_free(); free(file);
+        return NULL;
+    }
     model->items = calloc((size_t)bk_n, sizeof *model->items);
+    if (!model->items) {
+        free(model);
+        for (int i = 0; i < bk_n; i++) b_free(&buckets[i]);
+        free(buckets); free(bvs); json_free(); free(file);
+        return NULL;
+    }
     model->count = bk_n;
     for (int bi = 0; bi < bk_n; bi++) {
         GlbItem *o = &model->items[bi];
@@ -594,6 +653,7 @@ typedef struct {
 static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
 {
     DrawItem *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
     glGenVertexArrays(1, &d->vao);
     glBindVertexArray(d->vao);
     glGenBuffers(1, &d->vbo);
@@ -674,6 +734,7 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
 }
 
 static void glb_node_exit(const Event *e, void *user);   // forward (см. ниже)
+static void glb_free_resources(GlbParams *p);
 
 SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
                          const RendererContext *rc)
@@ -688,6 +749,11 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     if (!prog) { glb_model_free(gm); return NULL; }
 
     GlbParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        resources_program_release(prog);
+        glb_model_free(gm);
+        return NULL;
+    }
     p->rc = rc;
     p->scale = scale > 0 ? scale : 1.0f;
     p->prog = prog;
@@ -697,6 +763,12 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     p->u_specular = glGetUniformLocation(prog, "uSpecular");
 
     p->items = calloc((size_t)gm->count, sizeof *p->items);
+    if (!p->items) {
+        resources_program_release(prog);
+        glb_model_free(gm);
+        free(p);
+        return NULL;
+    }
     p->count = 0;
     p->radius = 0.0f;
     // Per-vertex "открыто небу сверху": снег ляжет на крышу/капот/багажник,
@@ -705,6 +777,13 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     int *vc = malloc((size_t)gm->count * sizeof *vc);
     const unsigned **ip = malloc((size_t)gm->count * sizeof *ip);
     int *ic = malloc((size_t)gm->count * sizeof *ic);
+    if (!vp || !vc || !ip || !ic) {
+        free(vp); free(vc); free(ip); free(ic);
+        glb_free_resources(p);
+        glb_model_free(gm);
+        free(p);
+        return NULL;
+    }
     for (int i = 0; i < gm->count; i++) {
         vp[i] = gm->items[i].verts; vc[i] = gm->items[i].vcount;
         ip[i] = gm->items[i].indices; ic[i] = gm->items[i].index_count;
@@ -727,8 +806,12 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
                   dz = gm->items[i].verts[3*v+2];
             float r2 = dx*dx + dy*dy + dz*dz;
             if (r2 > p->radius) p->radius = r2;
-            if (dx<mn[0])mn[0]=dx; if(dy<mn[1])mn[1]=dy; if(dz<mn[2])mn[2]=dz;
-            if (dx>mx[0])mx[0]=dx; if(dy>mx[1])mx[1]=dy; if(dz>mx[2])mx[2]=dz;
+            if (dx < mn[0]) mn[0] = dx;
+            if (dy < mn[1]) mn[1] = dy;
+            if (dz < mn[2]) mn[2] = dz;
+            if (dx > mx[0]) mx[0] = dx;
+            if (dy > mx[1]) mx[1] = dy;
+            if (dz > mx[2]) mx[2] = dz;
         }
         if (s_dump_glb)
             SDL_Log("glb bkt %d: nv=%d x[%.2f..%.2f] y[%.2f..%.2f] z[%.2f..%.2f]",
@@ -749,6 +832,11 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
 
     float size[3] = {scale, scale, scale};
     SceneNode *n = node_new("GlbInstance", "GlbInstance3D", pos, size, p, NULL, glb_node_render);
+    if (!n) {
+        glb_free_resources(p);
+        free(p);
+        return NULL;
+    }
     // Масштаб — в трансформ узла: мировую матрицу собирает scene.c, поэтому
     // модель можно вращать (n->rot) и цеплять к костям других моделей.
     n->scl[0] = n->scl[1] = n->scl[2] = p->scale;

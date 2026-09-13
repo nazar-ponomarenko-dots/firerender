@@ -125,7 +125,12 @@ SceneNode *fauna_make_node(const RendererContext *rc)
     if (p->n == 0) { free(p); return NULL; }
 
     p->prog = make_program("shaders/fauna.vs", "shaders/fauna.fs");
-    if (!p->prog) { free(p); return NULL; }
+    if (!p->prog) {
+        for (int i = 0; i < p->n; i++)
+            if (p->g[i].tex) resources_texture_release(p->g[i].tex);
+        free(p);
+        return NULL;
+    }
     p->u_viewproj = glGetUniformLocation(p->prog, "uViewProj");
     p->u_objpos   = glGetUniformLocation(p->prog, "uObjPos");
     p->u_objsize  = glGetUniformLocation(p->prog, "uObjSize");
@@ -161,8 +166,18 @@ SceneNode *fauna_make_node(const RendererContext *rc)
     glBindVertexArray(0);
 
     const float size[3] = { 1000.0f, 300.0f, 1000.0f };
-    return node_new("Fauna", "MeshInstance3D", NULL, size, p,
-                    fauna_node_update, fauna_node_render);
+    SceneNode *node = node_new("Fauna", "MeshInstance3D", NULL, size, p,
+                               fauna_node_update, fauna_node_render);
+    if (!node) {
+        for (int i = 0; i < p->n; i++)
+            if (p->g[i].tex) resources_texture_release(p->g[i].tex);
+        resources_program_release(p->prog);
+        if (p->vbo) glDeleteBuffers(1, &p->vbo);
+        if (p->ibo) glDeleteBuffers(1, &p->ibo);
+        if (p->vao) glDeleteVertexArrays(1, &p->vao);
+        free(p);
+    }
+    return node;
 }
 
 void fauna_node_update(SceneNode *n, float dt)

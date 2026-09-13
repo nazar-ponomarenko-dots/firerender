@@ -339,5 +339,8 @@ void main() {
         float fog = smoothstep(uFogStart, uFogEnd, d);
         col = mix(col, uFogColor, fog);
     }
-    FragColor = vec4(col, 1.0);
+    // Альфа из текстуры (0.5..1 у сглаженной кромки): при активном MSAA
+    // включён alpha-to-coverage — частичное покрытие сглаживает край.
+    // Блендинг выключен, поэтому в таргет альфа не влияет.
+    FragColor = vec4(col, c.a);
 }

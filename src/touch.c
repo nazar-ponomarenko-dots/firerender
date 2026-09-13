@@ -81,6 +81,23 @@ int touch_available(void)
     return s_avail;
 }
 
+// Единый переключатель тач-элементов. Дефолт — автоматически: Android или
+// тачскрин -> 1, обычный десктоп -> 0. Пользователь перекрывает в config.cfg.
+static void touch_register_cvar(void)
+{
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    int auto_on =
+#ifdef __ANDROID__
+        1;
+#else
+        touch_available();
+#endif
+    cvar_register_ex("r_touch_ui", (float)auto_on, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "тач-элементы управления (кнопка прыжка, джойстик)");
+}
+
 void touch_set_ui_mode(int ui_mode)
 {
     if (!touch_available()) return;
@@ -218,17 +235,23 @@ int touch_event(const SDL_Event *ev)
 
 void touch_hud_draw(int vw, int vh)
 {
+    // Кнопки/джойстик по квару r_touch_ui (дефолт — авто по наличию тача).
+    // На обычном десктопе это лишний артефакт в углу, там он выключен.
+    touch_register_cvar();
+    if (cvar_get("r_touch_ui") < 0.5f) return;
     // На телефоне джойстик крупнее + кнопка прыжка справа всегда видна
     const float base[4] = { 0.5f, 0.5f, 0.5f, 0.28f };
     const float knob[4] = { 1.0f, 1.0f, 1.0f, 0.40f };
-    const float jump[4] = { 0.85f, 0.95f, 1.0f, 0.22f };
-    // Кнопка прыжка — правый нижний угол, 140x140 px
+    // Кнопка прыжка — правый нижний угол, 140x140 px. Картинка —
+    // img/ui/jump.png; файла нет -> движок показывает img/notfound.png
+    // (Source style, см. hud_button_draw / resources_texture).
     float jb = 140.0f;
     float scale = touch_scale((float)vw, (float)vh);
     jb *= scale;
-    hud_rect_draw(vw, vh, (float)vw - jb - 30.0f, (float)vh - jb - 30.0f, jb, jb, jump);
-    const float ja[4] = { 1.0f, 1.0f, 1.0f, 0.45f };
-    hud_rect_draw(vw, vh, (float)vw - jb - 30.0f + jb*0.35f, (float)vh - jb - 30.0f + jb*0.35f, jb*0.3f, jb*0.12f, ja);
+    const float tint[4] = { 1.0f, 1.0f, 1.0f, 0.85f };
+    hud_button_draw(vw, vh, "img/ui/jump.png",
+                    (float)vw - jb - 30.0f, (float)vh - jb - 30.0f,
+                    jb, jb, tint);
 
     if (!s_joystick) return;
     float bs = JOY_BASE_R * 2.0f * scale, ks = 68.0f * scale;

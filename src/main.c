@@ -664,7 +664,9 @@ int main(int argc, char *argv[])
                 s_shot_at = fs ? atoi(fs) : 450;
             }
             if (++s_frames == s_shot_at) cmd_screenshot(NULL);
-            if (s_frames >= s_shot_at + 30) running = false;
+            // FR_BENCH живёт десятки секунд (прогрев + замер) — выход только
+            // по bench.done; снимок всё равно делается на s_shot_at.
+            if (s_frames >= s_shot_at + 30 && !bench.active) running = false;
         }
         renderer_end(&game, dt);
         ST_ACC(s_st_end);

@@ -77,6 +77,18 @@ void hud_text_draw_big(int vw, int vh, float x, float y, const char *s,
 void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
                    const float color[4]);
 
+// Игровая кнопка-иконка: RGBA-текстура из img/*.png на кваде (x,y,w,h).
+// Отсутствующий файл движок подменяет img/notfound.png (Source style,
+// см. resources_texture); tint — тонировка + прозрачность.
+void hud_button_draw(int vw, int vh, const char *img_path,
+                     float x, float y, float w, float h,
+                     const float tint[4]);
+
+// Квад с уже загруженной GL-текстурой (UV 0..1), тем же шейдером.
+void hud_tex_quad_draw(int vw, int vh, GLuint tex,
+                       float x, float y, float w, float h,
+                       const float color[4]);
+
 // Освобождает GL-ресурсы узла.
 void hud_cleanup(SceneNode *n);
 

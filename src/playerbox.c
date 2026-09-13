@@ -41,6 +41,10 @@ SceneNode *playerbox_make_node(CameraParams *cam, const RendererContext *rc)
     if (!prog) return NULL;
 
     PlayerBoxParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        resources_program_release(prog);
+        return NULL;
+    }
     p->rc = rc;
     p->cam = cam;
     p->prog = prog;
@@ -54,8 +58,17 @@ SceneNode *playerbox_make_node(CameraParams *cam, const RendererContext *rc)
     pb_setup_vao(p->vao_fill, p->vbo_fill);
     pb_setup_vao(p->vao_line, p->vbo_line);
 
-    return node_new("PlayerBox", "PlayerBox3D", NULL, NULL, p,
-                    NULL, playerbox_node_render);
+    SceneNode *node = node_new("PlayerBox", "PlayerBox3D", NULL, NULL, p,
+                               NULL, playerbox_node_render);
+    if (!node) {
+        glDeleteBuffers(1, &p->vbo_fill);
+        glDeleteBuffers(1, &p->vbo_line);
+        glDeleteVertexArrays(1, &p->vao_fill);
+        glDeleteVertexArrays(1, &p->vao_line);
+        resources_program_release(p->prog);
+        free(p);
+    }
+    return node;
 }
 
 // 8 углов бокса: низ 0-3, верх 4-7 (см. selection.c)

@@ -34,6 +34,12 @@ SceneNode *selection_make_node(SceneNode *root, const RendererContext *rc)
     gpu_vao_bind(s_gpu, 0);
 
     SelParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        gpu_program_delete(s_gpu, &prog);
+        gpu_buf_delete(s_gpu, &vbo);
+        gpu_vao_delete(s_gpu, &vao);
+        return NULL;
+    }
     p->prog = prog;
     p->vao = vao;
     p->vbo = vbo;
@@ -41,8 +47,15 @@ SceneNode *selection_make_node(SceneNode *root, const RendererContext *rc)
     p->root = root;
     p->u_viewproj = gpu_program_loc(s_gpu, prog, "uViewProj");
     p->u_color    = gpu_program_loc(s_gpu, prog, "uColor");
-    return node_new("Selection", "Node3D", NULL, NULL, p,
-                    NULL, selection_node_render);
+    SceneNode *node = node_new("Selection", "Node3D", NULL, NULL, p,
+                               NULL, selection_node_render);
+    if (!node) {
+        gpu_program_delete(s_gpu, &p->prog);
+        gpu_buf_delete(s_gpu, &p->vbo);
+        gpu_vao_delete(s_gpu, &p->vao);
+        free(p);
+    }
+    return node;
 }
 
 void selection_set_on(int on)

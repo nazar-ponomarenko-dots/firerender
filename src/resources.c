@@ -99,21 +99,21 @@ int resources_resolve_path(const char *rel_path, char *out, size_t out_sz)
     // Через базовую директорию
     if (s_base_dir[0] && s_base_dir[0] != '.') {
         char cand[512];
-        snprintf(cand, sizeof cand, "%s/%s", s_base_dir, path);
-        if (access(cand, F_OK) == 0) {
+        int wr = snprintf(cand, sizeof cand, "%s/%s", s_base_dir, path);
+        if (wr > 0 && wr < (int)sizeof cand && access(cand, F_OK) == 0) {
             snprintf(out, out_sz, "%s", cand);
             return 1;
         }
-        snprintf(cand, sizeof cand, "%s/../%s", s_base_dir, path);
-        if (access(cand, F_OK) == 0) {
+        wr = snprintf(cand, sizeof cand, "%s/../%s", s_base_dir, path);
+        if (wr > 0 && wr < (int)sizeof cand && access(cand, F_OK) == 0) {
             snprintf(out, out_sz, "%s", cand);
             return 1;
         }
     }
     // Родительская директория текущей
     char up[512];
-    snprintf(up, sizeof up, "../%s", path);
-    if (access(up, F_OK) == 0) {
+    int wr = snprintf(up, sizeof up, "../%s", path);
+    if (wr > 0 && wr < (int)sizeof up && access(up, F_OK) == 0) {
         snprintf(out, out_sz, "%s", up);
         return 1;
     }
@@ -178,7 +178,7 @@ typedef struct ResEntry {
     int iw, ih;          // размеры (картинки)
     // Шейдерная программа: пути и mtime файлов (для hot-reload, см. resources_shader_reload)
     char vs[128], fs[128];
-    long vs_mt, fs_mt;
+    uint64_t vs_stamp, fs_stamp;
     // Текстура: параметры создания и mtime файла (для hot-reload текстур)
     char tex_path[128];
     int tex_channels, tex_wrap, tex_linear;
@@ -505,8 +505,8 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     snprintf(ne->vs, sizeof ne->vs, "%s", vs_path);
     snprintf(ne->fs, sizeof ne->fs, "%s", fs_path);
     if (!ne->from_pak) {
-        ne->vs_mt = file_mtime(vs_path);
-        ne->fs_mt = file_mtime(fs_path);
+        ne->vs_stamp = shader_source_stamp(vs_path);
+        ne->fs_stamp = shader_source_stamp(fs_path);
     }
     return prog;
 }
@@ -520,9 +520,8 @@ static int s_reshade_n, s_reshade_cap;
 // и они продолжают её рисовать. Держим до тех пор, пока ВСЕ держатели не вернут
 // её через resources_program_release (remaining — сколько релизов осталось).
 typedef struct { GLuint prog; int remaining; } PendingProg;
-#define PROG_PENDING_MAX 128
-static PendingProg s_prog_pending[PROG_PENDING_MAX];
-static int s_prog_pending_n = 0;
+static PendingProg *s_prog_pending;
+static int s_prog_pending_n, s_prog_pending_cap;
 
 static void prog_pending_add(GLuint prog, int remaining)
 {
@@ -530,7 +529,18 @@ static void prog_pending_add(GLuint prog, int remaining)
     // Уже есть такой id (повторный reload до релиза) — складываем релизы
     for (int i = 0; i < s_prog_pending_n; i++)
         if (s_prog_pending[i].prog == prog) { s_prog_pending[i].remaining += remaining; return; }
-    if (s_prog_pending_n >= PROG_PENDING_MAX) { glDeleteProgram(prog); return; } // предохранитель
+    if (s_prog_pending_n == s_prog_pending_cap) {
+        int cap = s_prog_pending_cap ? s_prog_pending_cap * 2 : 32;
+        PendingProg *p = realloc(s_prog_pending, (size_t)cap * sizeof *p);
+        if (!p) {
+            // Старый id ещё используют живые узлы: удалять его при OOM нельзя.
+            // Безопаснее оставить редкую утечку до завершения GL-контекста.
+            SDL_Log("resources: pending shader list OOM; keeping program %u", prog);
+            return;
+        }
+        s_prog_pending = p;
+        s_prog_pending_cap = cap;
+    }
     s_prog_pending[s_prog_pending_n].prog = prog;
     s_prog_pending[s_prog_pending_n].remaining = remaining;
     s_prog_pending_n++;
@@ -571,9 +581,9 @@ int resources_shader_reload(void)
     for (ResEntry *e = s_cache; e; e = e->next) {
         if (strncmp(e->key, "prog#", 5) != 0) continue;
         if (e->from_pak || e->vs[0] == 0) continue;
-        long mt0 = file_mtime(e->vs);
-        long mt1 = file_mtime(e->fs);
-        if (mt0 == e->vs_mt && mt1 == e->fs_mt) continue;
+        uint64_t stamp0 = shader_source_stamp(e->vs);
+        uint64_t stamp1 = shader_source_stamp(e->fs);
+        if (stamp0 == e->vs_stamp && stamp1 == e->fs_stamp) continue;
         // Перекомпиляция: новый id встаёт в кеш, а старую программу отдаём в
         // отложенное удаление — её ещё рисуют узлы, не слушающие reshade.
         // ВАЖНО: refcount счёта СТАРОЙ программы уходит в pending, поэтому для
@@ -587,8 +597,8 @@ int resources_shader_reload(void)
         prog_pending_add(old, e->refs);
         e->data = (void *)(uintptr_t)prog;
         e->refs = 0;                 // новый id: держатели пере-запросят
-        e->vs_mt = mt0;
-        e->fs_mt = mt1;
+        e->vs_stamp = stamp0;
+        e->fs_stamp = stamp1;
         SDL_Log("shader reloaded: %s + %s", e->vs, e->fs);
         changed++;
     }
@@ -643,7 +653,9 @@ void resources_shutdown(void)
     // не дожить до shutdown — на выходе удаляем всё разом.
     for (int i = 0; i < s_prog_pending_n; i++)
         glDeleteProgram(s_prog_pending[i].prog);
-    s_prog_pending_n = 0;
+    free(s_prog_pending);
+    s_prog_pending = NULL;
+    s_prog_pending_n = s_prog_pending_cap = 0;
     int n = 0;
     ResEntry *e = s_cache;
     while (e) {

@@ -119,7 +119,7 @@ static float rfv(const unsigned char*bin,long base,const GA*a,int elem,int comp)
 // Безопасное чтение индекса: только беззнаковые SCALAR-типы, диапазон [0,maxIdx].
 static long rfi(const unsigned char*bin,long base,const GA*a,int elem,long maxIdx){
     if(a->vec!=1) return -1;
-    long idx=-1; int sz=cs(a->comp); const unsigned char*p=bin+base+(long)elem*a->stride;
+    long idx=-1; const unsigned char*p=bin+base+(long)elem*a->stride;
     switch(a->comp){ case C_UINT:{unsigned v;memcpy(&v,p,4);idx=(long)v;break;}
         case C_USHORT:{unsigned short v;memcpy(&v,p,2);idx=(long)v;break;}
         case C_UBYTE:idx=(long)p[0];break; default:return -1;}
@@ -680,7 +680,9 @@ static void m4_rot_norm(const float *m, float *o)
     float lx = sqrtf(cx[0]*cx[0] + cx[1]*cx[1] + cx[2]*cx[2]);
     float ly = sqrtf(cy[0]*cy[0] + cy[1]*cy[1] + cy[2]*cy[2]);
     float lz = sqrtf(cz[0]*cz[0] + cz[1]*cz[1] + cz[2]*cz[2]);
-    if (lx < 1e-8f) lx = 1.0f; if (ly < 1e-8f) ly = 1.0f; if (lz < 1e-8f) lz = 1.0f;
+    if (lx < 1e-8f) lx = 1.0f;
+    if (ly < 1e-8f) ly = 1.0f;
+    if (lz < 1e-8f) lz = 1.0f;
     memset(o, 0, 16 * sizeof(float));
     o[0] = cx[0]/lx; o[1] = cx[1]/lx; o[2]  = cx[2]/lx;
     o[4] = cy[0]/ly; o[5] = cy[1]/ly; o[6]  = cy[2]/ly;
@@ -1023,7 +1025,8 @@ static void rag_joint_limits(AnimRag *r, const AnimGlb *a, PhysWorld *w)
         if (l1 < 1e-5f || l2 < 1e-5f) continue;
         for (int q = 0; q < 3; q++) { d1[q] /= l1; d2[q] /= l2; }
         float cth = d1[0]*d2[0] + d1[1]*d2[1] + d1[2]*d2[2];
-        if (cth > 1.0f) cth = 1.0f; if (cth < -1.0f) cth = -1.0f;
+        if (cth > 1.0f) cth = 1.0f;
+        if (cth < -1.0f) cth = -1.0f;
         float th = acosf(cth), th0 = r->tha0[i];
         float lo = th0 - 1.2f; if (lo < 0.1f) lo = 0.1f;
         float hi = th0 + 1.2f; if (hi > 2.6f) hi = 2.6f;

@@ -145,8 +145,18 @@ SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc)
 
     s_p = p;
     const float size[3] = { 100.0f, 100.0f, 100.0f };
-    return node_new("Particles", "MeshInstance3D", NULL, size, p,
-                    particles_node_update, particles_node_render);
+    SceneNode *node = node_new("Particles", "MeshInstance3D", NULL, size, p,
+                               particles_node_update, particles_node_render);
+    if (!node) {
+        s_p = NULL;
+        if (p->inst_vbo) glDeleteBuffers(1, &p->inst_vbo);
+        if (p->vbo) glDeleteBuffers(1, &p->vbo);
+        if (p->vao) glDeleteVertexArrays(1, &p->vao);
+        resources_program_release(p->prog);
+        if (p->tex) resources_texture_release(p->tex);
+        free(p);
+    }
+    return node;
 }
 
 // Колбэки узла: update — из фикс-тика (100 Гц), render — из обхода сцены

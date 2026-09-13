@@ -9,6 +9,7 @@
 #include "json.h"
 
 #include <SDL3/SDL.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -87,6 +88,21 @@ static int parse_hex4(void)
     return v;
 }
 
+static int string_buf_reserve(char **buf, size_t *cap, size_t need)
+{
+    if (need <= *cap) return 1;
+    size_t next = *cap;
+    while (next < need) {
+        if (next > SIZE_MAX / 2) { next = need; break; }
+        next = next ? next * 2 : 64;
+    }
+    char *p = realloc(*buf, next);
+    if (!p) return 0;
+    *buf = p;
+    *cap = next;
+    return 1;
+}
+
 // Строка в кавычках -> арена s_strs (с раскрытыми escape). NULL — ошибка.
 static const char *parse_string(void)
 {
@@ -128,16 +144,19 @@ static const char *parse_string(void)
                 if (cp < 0x80) {
                     c = (unsigned char)cp;
                 } else if (cp < 0x800) {
-                    if (len + 2 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    if (!string_buf_reserve(&buf, &cap, len + 3))
+                        { free(buf); return NULL; }
                     buf[len++] = (char)(0xC0 | (cp >> 6));
                     c = (unsigned char)(0x80 | (cp & 0x3F));
                 } else if (cp < 0x10000) {
-                    if (len + 3 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    if (!string_buf_reserve(&buf, &cap, len + 4))
+                        { free(buf); return NULL; }
                     buf[len++] = (char)(0xE0 | (cp >> 12));
                     buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
                     c = (unsigned char)(0x80 | (cp & 0x3F));
                 } else {   // суррогатная пара: до 0x10FFFF — 4 байта
-                    if (len + 4 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    if (!string_buf_reserve(&buf, &cap, len + 5))
+                        { free(buf); return NULL; }
                     buf[len++] = (char)(0xF0 | (cp >> 18));
                     buf[len++] = (char)(0x80 | ((cp >> 12) & 0x3F));
                     buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
@@ -148,7 +167,8 @@ static const char *parse_string(void)
             default: free(buf); return NULL;   // неизвестный escape
             }
         }
-        if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+        if (!string_buf_reserve(&buf, &cap, len + 2))
+            { free(buf); return NULL; }
         buf[len++] = (char)c;
     }
     const char *out = str_dup(buf, len);
@@ -259,7 +279,9 @@ const JsonNode *json_parse(const char *text, size_t len)
     // вызывается. Иначе выданные ранее указатели (sval/ключи, родительские
     // узлы) инвалидируются — use-after-free: на больших map.json падало
     // (30 деревьев проскакивали, 60 — краш в parse_value).
+    if (len == SIZE_MAX) return NULL;
     size_t est_nodes = len / 2 + 32;      // узел почти на каждые 2 байта
+    if (est_nodes > SIZE_MAX / sizeof(JsonNode)) return NULL;
     s_nodes = malloc(est_nodes * sizeof(JsonNode));
     if (!s_nodes) return NULL;
     s_ncap = est_nodes;

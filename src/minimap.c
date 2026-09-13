@@ -36,6 +36,12 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
     glBindVertexArray(0);
 
     MinimapParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+        resources_program_release(prog);
+        return NULL;
+    }
     p->prog = prog;
     p->vao = vao;
     p->vbo = vbo;
@@ -57,12 +63,21 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
     glUseProgram(0);
     const float pos[3] = { 16, 16, 0 };         // отступ от края окна
     const float size[3] = { 220, 220 * w->world_d / w->world_w, 0 };
-    return node_new("Minimap", "CanvasItem2D", pos, size, p,
-                    NULL, minimap_node_render);
+    SceneNode *node = node_new("Minimap", "CanvasItem2D", pos, size, p,
+                               NULL, minimap_node_render);
+    if (!node) {
+        if (p->tex_marker) resources_texture_release(p->tex_marker);
+        glDeleteBuffers(1, &p->vbo);
+        glDeleteVertexArrays(1, &p->vao);
+        resources_program_release(p->prog);
+        free(p);
+    }
+    return node;
 }
 
 void minimap_node_render(SceneNode *n, float dt)
 {
+    (void)dt;   // обновление привязано к счётчику кадров, а не ко времени
     // Обновление раз в 3 кадра: маркер игрока и карта почти статичны,
     // а каждый квад — перезаливка VBO. На глаз — uninterrupted motion.
     static int s_frame = 0;

@@ -11,6 +11,7 @@
 
 #include "stb_image.h"
 #include <math.h>
+#include <stdint.h>
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 #include <string.h>
@@ -201,6 +202,13 @@ int world_load(WorldState *w, WorldTextures *out)
     // честный fail, если карты карты.w нет нигде.
     unsigned char *img = resources_image_strict(map_path, &mw, &mh, STBI_rgb);
     if (!img) return -1;
+    if (mw <= 0 || mh <= 0 || (size_t)mw > SIZE_MAX / (size_t)mh ||
+        (size_t)mw * (size_t)mh > SIZE_MAX / (3 * sizeof(float))) {
+        stbi_image_free(img);
+        SDL_Log("World: invalid or oversized map dimensions %dx%d", mw, mh);
+        return -1;
+    }
+    const size_t pixels = (size_t)mw * (size_t)mh;
     SDL_Log("Map loaded: %s (%dx%d)", map_path, mw, mh);
 
     // --- Мир из карты: 1 пиксель = 1 метр -------------------------------------
@@ -224,9 +232,9 @@ int world_load(WorldState *w, WorldTextures *out)
             w->world_w, w->world_d, w->grid_w, w->grid_h);
 
     // Яркость (высота) и цвет карты в полном разрешении
-    float *lum = malloc((size_t)mw * mh * sizeof(float));
-    unsigned char *color = malloc((size_t)mw * mh * 3);
-    w->heights = malloc((size_t)mw * mh * sizeof(float));
+    float *lum = malloc(pixels * sizeof(float));
+    unsigned char *color = malloc(pixels * 3);
+    w->heights = malloc(pixels * sizeof(float));
     if (!lum || !color || !w->heights) {   // OOM — честный fail загрузки
         free(lum); free(color); free(w->heights);
         stbi_image_free(img);
@@ -234,7 +242,7 @@ int world_load(WorldState *w, WorldTextures *out)
         SDL_Log("World: no memory for %dx%d map", mw, mh);
         return -1;
     }
-    for (int i = 0; i < mw * mh; i++) {
+    for (size_t i = 0; i < pixels; i++) {
         const unsigned char *px = img + i * 3;
         color[i*3 + 0] = px[0];
         color[i*3 + 1] = px[1];
@@ -242,8 +250,8 @@ int world_load(WorldState *w, WorldTextures *out)
         lum[i] = (0.299f*px[0] + 0.587f*px[1] + 0.114f*px[2]) / 255.0f;
     }
     s_avg_lum = 0;
-    for (int i = 0; i < mw * mh; i++) s_avg_lum += lum[i];
-    s_avg_lum /= (float)(mw * mh);
+    for (size_t i = 0; i < pixels; i++) s_avg_lum += lum[i];
+    s_avg_lum /= (float)pixels;
     stbi_image_free(img);
     img = NULL;
 
@@ -251,7 +259,7 @@ int world_load(WorldState *w, WorldTextures *out)
     // Высоты считаем в C (height_curve), поэтому normal map, положение пшеницы
     // и HUD всегда согласованы с рельефом. blur_heights "синтерполирует" карту:
     // углы и ступеньки сглаживаются ещё до отрисовки. 1 px = 1 м.
-    for (int i = 0; i < mw * mh; i++)
+    for (size_t i = 0; i < pixels; i++)
         w->heights[i] = height_curve(w, 1.0f - lum[i]);
     // Сглаживание переходов + ограничение крутизны: сначала размываем, чтобы
     // убрать ступеньки, затем эродируем, чтобы уклоны не превышали erosion_slope
@@ -265,7 +273,7 @@ int world_load(WorldState *w, WorldTextures *out)
     // ПОСЛЕ blur/эрозии и ДО нормалей — нормали, коллизия (sample_height),
     // растительность и геометрия видят один и тот же выровненный рельеф.
     splat_flatten_roads(w);
-    unsigned char *nm = malloc((size_t)mw * mh * 3);
+    unsigned char *nm = malloc(pixels * 3);
     if (!nm) {
         free(lum); free(color);
         SDL_Log("World: no memory for normal map");
@@ -295,7 +303,7 @@ int world_load(WorldState *w, WorldTextures *out)
     // на склонах — "резкие переходы". 16 бит убирает их полностью.
     // Билинейная фильтрация + LINEAR дают плавную поверхность; коллизия
     // (sample_height) читает те же значения из float-массива — всё совпадает.
-    unsigned short *hb = malloc((size_t)mw * mh * sizeof(unsigned short));
+    unsigned short *hb = malloc(pixels * sizeof(unsigned short));
     if (!hb) {
         free(color); free(nm);            // lum уже освобождён выше
         SDL_Log("World: no memory for height texture");
@@ -305,7 +313,7 @@ int world_load(WorldState *w, WorldTextures *out)
     // Зажимаем диапазон до минимум 1 м, чтобы высота квантовалась корректно.
     float hspan = w->max_height - w->min_height;
     if (hspan < 1.0f) hspan = 1.0f;
-    for (int i = 0; i < mw * mh; i++) {
+    for (size_t i = 0; i < pixels; i++) {
         float t = (w->heights[i] - w->min_height) / hspan;
         if (t < 0) t = 0;
         if (t > 1) t = 1;
@@ -321,9 +329,9 @@ int world_load(WorldState *w, WorldTextures *out)
 #ifdef USE_GLES_PATH
     // GLES 3.0 не гарантирует EXT_texture_norm16. RG8 хранит те же 16 бит:
     // старший байт в R, младший в G; шейдер восстанавливает значение.
-    unsigned char *h_rg = malloc((size_t)mw * mh * 2);
+    unsigned char *h_rg = malloc(pixels * 2);
     if (!h_rg) { free(hb); free(color); free(nm); return -1; }
-    for (int i = 0; i < mw * mh; i++) {
+    for (size_t i = 0; i < pixels; i++) {
         h_rg[i*2+0] = (unsigned char)(hb[i] >> 8);
         h_rg[i*2+1] = (unsigned char)(hb[i] & 255);
     }

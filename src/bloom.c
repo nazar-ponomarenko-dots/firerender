@@ -189,6 +189,12 @@ static void msaa_free(BloomParams *b)
 
 // Желаемые сэмплы из cvar'а: только 0/4/16 (промежуточные modes убраны —
 // разница 2x/4x и 8x/16x на экране слабая, а цена заметная).
+// Активен ли MSAA-таргет сцены (для alpha-to-coverage на вырезанных краях).
+int bloom_msaa_active(void)
+{
+    return s_bloom_p ? s_bloom_p->msaa : 0;
+}
+
 static int msaa_wanted(void)
 {
     if (s_bloom_p && s_bloom_p->scene_ldr) return 0;  // RGBA8-сцена: без MSAA
@@ -265,17 +271,27 @@ void bloom_msaa_sync(BloomParams *b)
 
 void bloom_resolve(BloomParams *b)
 {
-    if (!b->msaa) return;      // без MSAA сцена уже в обычных текстурах
+    if (!b->msaa && !b->rbo_depth_nm) return;   // глубина уже в текстуре
     GLint readf = 0, drawf = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readf);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawf);
     GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
     glDisable(GL_SCISSOR_TEST);            // blit уважает ножницы — гасим
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo_ms);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo);
-    // Цвет + глубина: пост-эффекты (GI/SSR/туман) читают развёрнутую глубину
-    glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, b->vw, b->vh,
-                      GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    if (b->msaa) {
+        // Цвет + глубина: пост-эффекты (GI/SSR/туман) читают развёрнутую
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo_ms);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo_res);
+        glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, b->vw, b->vh,
+                          GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                          GL_NEAREST);
+    } else {
+        // Без MSAA цвет уже в текстуре; глубину копируем из RBO в текстуру
+        // (рендер в depth-текстуру отключает HiZ — см. bloom_resize).
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo_res);
+        glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, b->vw, b->vh,
+                          GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)readf);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)drawf);
     if (scissor) glEnable(GL_SCISSOR_TEST);
@@ -353,6 +369,10 @@ void bloom_resize(BloomParams *b, int vw, int vh)
         glDeleteFramebuffers(1, &b->fbo);
         glDeleteTextures(1, &b->tex);
         glDeleteTextures(1, &b->depth);
+        if (b->rbo_depth_nm) glDeleteRenderbuffers(1, &b->rbo_depth_nm);
+        if (b->fbo_res) glDeleteFramebuffers(1, &b->fbo_res);
+        b->rbo_depth_nm = 0;
+        b->fbo_res = 0;
         glDeleteFramebuffers(2, b->fbo_glow);
         glDeleteTextures(2, b->tex_glow);
     }
@@ -375,10 +395,26 @@ void bloom_resize(BloomParams *b, int vw, int vh)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, vw, vh, 0,
                  GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                           GL_TEXTURE_2D, b->depth, 0);
+    // Глубину сцены храним в RBO, а не текстурой-аттачментом: рендер в
+    // depth-текстуру лишает драйвер HiZ-оптимизаций, и перерисовка травы
+    // (гигантский overdraw с discard) замедлялась ВТРОЕ (4.4 -> 1.5 мс
+    // при 1080p). RBO — fast path; для пост-эффектов (GI/SSR/туман)
+    // глубина копируется в текстуру одним blit в bloom_resolve.
+    glGenRenderbuffers(1, &b->rbo_depth_nm);
+    glBindRenderbuffer(GL_RENDERBUFFER, b->rbo_depth_nm);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, vw, vh);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, b->rbo_depth_nm);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         SDL_Log("Bloom FBO incomplete (%dx%d)!", vw, vh);
+    // Resolve-FBO: та же цветовая текстура + depth-текстура — сюда blit'ится
+    // глубина (и цвет MSAA-развёртки) перед пост-проходами.
+    glGenFramebuffers(1, &b->fbo_res);
+    glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_res);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, b->tex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, b->depth, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // LDR-копия для present: композит (grade) рисуется в масштабе сцены,
     // на экран — аппаратный blit (дешевле шейдерного фуллскрина)
@@ -523,6 +559,10 @@ void bloom_cleanup(BloomParams *b)
         glDeleteFramebuffers(1, &b->fbo);
         glDeleteTextures(1, &b->tex);
         glDeleteTextures(1, &b->depth);
+        if (b->rbo_depth_nm) glDeleteRenderbuffers(1, &b->rbo_depth_nm);
+        if (b->fbo_res) glDeleteFramebuffers(1, &b->fbo_res);
+        b->rbo_depth_nm = 0;
+        b->fbo_res = 0;
         glDeleteFramebuffers(2, b->fbo_glow);
         glDeleteTextures(2, b->tex_glow);
         b->fbo = 0;

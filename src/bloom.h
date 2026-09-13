@@ -13,7 +13,9 @@
 
 typedef struct {
     GLuint fbo, tex;           // сцена: FBO + цвет (полный экран)
-    GLuint depth;              // буфер глубины сцены
+    GLuint depth;              // буфер глубины сцены (текстура для пост-эффектов)
+    GLuint rbo_depth_nm;       // глубина сцены БЕЗ MSAA: RBO-аттачмент
+    GLuint fbo_res;            // resolve-FBO (tex + depth-текстура) для blit'а
     GLuint fbo_ms;             // MSAA-сцена: мультисэмпл-FBO (r_msaa > 0)
     GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
     int msaa;                  // активные сэмплы (0 = MSAA выключен)
@@ -51,6 +53,11 @@ GLuint bloom_scene_fbo(const BloomParams *b);
 // Пересоздаёт MSAA-таргет, если cvar r_msaa изменился (вызывать ДО привязки
 // FBO сцены в начале кадра). Живое применение настройки без перезапуска.
 void bloom_msaa_sync(BloomParams *b);
+
+// Текущие сэмплы MSAA-таргета сцены (0 — без MSAA). Для alpha-to-coverage:
+// классический MSAA не сглаживает края alpha-cutout (discard в шейдере),
+// рисующие модули включают GL_SAMPLE_ALPHA_TO_COVERAGE при активном MSAA.
+int bloom_msaa_active(void);
 
 // Разворачивает мультисэмпл-сцену в обычные текстуры (цвет + глубина) для
 // постобработки (GI/SSR/туман читают их). Без MSAA — ничего не делает.

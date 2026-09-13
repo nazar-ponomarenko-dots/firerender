@@ -444,6 +444,10 @@ void app_apply_benchmark_preset(int level)
     cvar_set("r_vsync", 0.0f);
     cvar_set("host_framerate", 0.0f);
     cvar_set("profiler", 0.0f);
+    // FR_MSAA — bench-only переопределение сглаживания для A/B-замеров
+    // (применяется до загрузки карты; карта может перекрыть своим cvars).
+    const char *m = getenv("FR_MSAA");
+    if (m) cvar_set("r_msaa", (float)atoi(m));
     SDL_Log("BENCH preset: %s, native scale", GFX_PRESET_NAMES[level]);
 }
 

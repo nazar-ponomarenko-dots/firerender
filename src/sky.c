@@ -38,7 +38,10 @@ SceneNode *sky_make_node(const RendererContext *rc)
     GLuint prog = make_program("shaders/sky.vs", "shaders/sky.fs");
     int sw = 0, sh = 0;
     unsigned char *img = load_img(sc.tex, &sw, &sh, STBI_rgb);
-    if (!prog || !img) return NULL;
+    if (!prog || !img) {
+        if (prog) resources_program_release(prog);
+        return NULL;
+    }
 
     // Небо: REPEAT по X убирает шов панорамы на стыке 360 градусов.
     // LINEAR (последний аргумент 1) — без полос/пикселизации на куполе
@@ -74,6 +77,13 @@ SceneNode *sky_make_node(const RendererContext *rc)
     glEnableVertexAttribArray(0);
 
     SkyParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+        resources_program_release(prog);
+        resources_texture_release(tex);
+        return NULL;
+    }
     p->prog = prog;
     p->vao = vao;
     p->vbo = vbo;
@@ -111,7 +121,18 @@ SceneNode *sky_make_node(const RendererContext *rc)
     shader_on_reshade(sky_reshade);
 
     const float size[3] = { 0, 0, 0 };
-    return node_new("Sky", "Skybox3D", NULL, size, p, NULL, sky_node_render);
+    SceneNode *node = node_new("Sky", "Skybox3D", NULL, size, p, NULL,
+                               sky_node_render);
+    if (!node) {
+        s_sky = NULL;
+        if (p->noise_tex) resources_texture_release(p->noise_tex);
+        resources_texture_release(p->tex);
+        resources_program_release(p->prog);
+        glDeleteBuffers(1, &p->vbo);
+        glDeleteVertexArrays(1, &p->vao);
+        free(p);
+    }
+    return node;
 }
 
 // Hot-reload: пересоздать программу и uniform'ы неба.

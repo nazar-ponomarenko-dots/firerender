@@ -242,14 +242,19 @@ static const float s_lod_step[TERRAIN_LODS] = { 2.0f, 8.0f, 32.0f, 128.0f };
 typedef struct {
     float *v;    size_t nv, cv;    // 5 float на вершину
     GLuint *idx; size_t ni, ci;
+    int failed;
 } TerrMesh;
 
 static GLuint tm_push_vert(TerrMesh *m, float x, float z,
                            float u, float v, float drop)
 {
+    if (m->failed) return 0;
     if (m->nv + 5 > m->cv) {
-        m->cv = m->cv ? m->cv * 2 : 1 << 18;
-        m->v = realloc(m->v, m->cv * sizeof(float));
+        size_t cap = m->cv ? m->cv * 2 : 1 << 18;
+        float *p = realloc(m->v, cap * sizeof(float));
+        if (!p) { m->failed = 1; return 0; }
+        m->v = p;
+        m->cv = cap;
     }
     GLuint id = (GLuint)(m->nv / 5);
     m->v[m->nv++] = x;  m->v[m->nv++] = z;
@@ -260,9 +265,13 @@ static GLuint tm_push_vert(TerrMesh *m, float x, float z,
 
 static void tm_push_tri(TerrMesh *m, GLuint a, GLuint b, GLuint c)
 {
+    if (m->failed) return;
     if (m->ni + 3 > m->ci) {
-        m->ci = m->ci ? m->ci * 2 : 1 << 19;
-        m->idx = realloc(m->idx, m->ci * sizeof(GLuint));
+        size_t cap = m->ci ? m->ci * 2 : 1 << 19;
+        GLuint *p = realloc(m->idx, cap * sizeof(GLuint));
+        if (!p) { m->failed = 1; return; }
+        m->idx = p;
+        m->ci = cap;
     }
     m->idx[m->ni++] = a;  m->idx[m->ni++] = b;  m->idx[m->ni++] = c;
 }
@@ -371,16 +380,17 @@ static void terrain_tile_lod(const WorldState *w, TerrMesh *m,
 // квадов + юбки) и кладёт всё в один VBO/IBO. Формат вершины:
 // (x, z, u, v, drop) — 5 float; UV в центрах текселей карты (GL_LINEAR
 // между ними даёт билинейную высоту, как в прежней сетке 1 квад/метр).
-static void terrain_geometry_create(WorldState *w,
-                                    GLuint *vao, GLuint *vbo, GLuint *ibo,
-                                    int *vert_count,
-                                    TerrainTile **out_tiles, int *out_tiles_n)
+static int terrain_geometry_create(WorldState *w,
+                                   GLuint *vao, GLuint *vbo, GLuint *ibo,
+                                   int *vert_count,
+                                   TerrainTile **out_tiles, int *out_tiles_n)
 {
     int tiles_x = (int)ceilf(w->world_w / TERRAIN_TILE);
     int tiles_z = (int)ceilf(w->world_d / TERRAIN_TILE);
     if (tiles_x < 1) tiles_x = 1;
     if (tiles_z < 1) tiles_z = 1;
     TerrainTile *tiles = malloc((size_t)tiles_x * tiles_z * sizeof *tiles);
+    if (!tiles) return 0;
     TerrMesh m = {0};
     Uint64 t0 = SDL_GetTicks();
     for (int tj = 0; tj < tiles_z; tj++) {
@@ -407,6 +417,13 @@ static void terrain_geometry_create(WorldState *w,
                                  s_lod_step[l],
                                  &t->first[l], &t->count[l]);
         }
+    }
+    if (m.failed || m.nv == 0 || m.ni == 0) {
+        SDL_Log("Terrain: geometry allocation failed");
+        free(m.v);
+        free(m.idx);
+        free(tiles);
+        return 0;
     }
     SDL_Log("Terrain: %dx%d tiles (%d), 4 LODs: %d verts / %d indices in %llu ms",
             tiles_x, tiles_z, tiles_x * tiles_z,
@@ -439,6 +456,7 @@ static void terrain_geometry_create(WorldState *w,
     w->vert_count = *vert_count;      // для HUD (GRID/TRIS)
     *out_tiles = tiles;
     *out_tiles_n = tiles_x * tiles_z;
+    return 1;
 }
 
 // Возводит точку в расстояние до AABB тайла (0 = внутри)
@@ -462,6 +480,9 @@ static void terrain_draw_tiles(const TerrainParams *p,
     float lod2 = cvar_get("r_terrain_lod2");
     float lod3 = cvar_get("r_terrain_lod3");
     s_lod1 = lod1; s_lod2 = lod2; s_lod3 = lod3;
+    const float lod1_2 = lod1 * lod1;
+    const float lod2_2 = lod2 * lod2;
+    const float lod3_2 = lod3 * lod3;
     Frustum lf;                              // фрустум света (для тени)
     if (shadow) frustum_build(&lf, rc->shadow_vp);
     glBindVertexArray(p->vao);
@@ -481,13 +502,13 @@ static void terrain_draw_tiles(const TerrainParams *p,
         int lod;
         if (shadow) {
             float box = rc->shadow_box_cur;
-            lod = box <= 16.0f ? (d2 < 32.0f * 32.0f ? 0 : 1)
-                : box <= 96.0f ? (d2 < 96.0f * 96.0f ? 1 : 2)
-                :                (d2 < 256.0f * 256.0f ? 2 : 3);
+            lod = box <= 16.0f ? (d2 < 1024.0f ? 0 : 1)
+                : box <= 96.0f ? (d2 < 9216.0f ? 1 : 2)
+                :                (d2 < 65536.0f ? 2 : 3);
         } else {
-            lod = d2 < s_lod1 * s_lod1 ? 0
-                : d2 < s_lod2 * s_lod2 ? 1
-                : d2 < s_lod3 * s_lod3 ? 2 : 3;
+            lod = d2 < lod1_2 ? 0
+                : d2 < lod2_2 ? 1
+                : d2 < lod3_2 ? 2 : 3;
         }
         // Убрано: доклад в консоль "Terrain/frame: ..." каждые 240 кадров (шум).
         if (!t->count[lod]) continue;
@@ -506,6 +527,7 @@ static GLuint terrain_ground_texture(const unsigned char *ground_img,
 {
     int cw = 512, ch = 512;
     unsigned char *cover = malloc((size_t)cw * ch * 3);
+    if (!cover) return 0;
     memcpy(cover, ground_img, (size_t)cw * ch * 3);   // фон = земля 1:1
     unsigned int rng2 = 0x51f15e;
     // Пучков много (2200): дальний вид растительности несёт ИМЕННО эта
@@ -551,25 +573,47 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     unsigned char *grass_img  = load_img("img/grass.png", &aw, &ah, STBI_rgb_alpha);
     if (!ground_img || !grass_img) return NULL;
     GLuint tex_ground = terrain_ground_texture(ground_img, grass_img);
+    if (!tex_ground) return NULL;
     // Пиксели во владении ресурсного кеша — не освобождаем (см. resources.h)
 
     GLuint prog = make_program("shaders/terrain.vs", "shaders/terrain.fs");
-    if (!prog) return NULL;
+    if (!prog) { glDeleteTextures(1, &tex_ground); return NULL; }
     // Теневая программа (глубина рельефа): после cleanup() s_shadow_prog == 0,
     // поэтому replace здесь эквивалентен plain-загрузке.
     s_shadow_prog = resources_program_replace(s_shadow_prog,
                                               "shaders/shadow.vs",
                                               "shaders/shadow.fs");
-    if (!s_shadow_prog) { resources_program_release(prog); return NULL; }
+    if (!s_shadow_prog) {
+        resources_program_release(prog);
+        glDeleteTextures(1, &tex_ground);
+        return NULL;
+    }
 
-    GLuint vao, vbo, ibo;
-    int vert_count;
+    GLuint vao = 0, vbo = 0, ibo = 0;
+    int vert_count = 0;
     TerrainTile *tiles = NULL;
     int tiles_n = 0;
-    terrain_geometry_create(w, &vao, &vbo, &ibo, &vert_count,
-                            &tiles, &tiles_n);
+    if (!terrain_geometry_create(w, &vao, &vbo, &ibo, &vert_count,
+                                 &tiles, &tiles_n)) {
+        resources_program_release(s_shadow_prog);
+        s_shadow_prog = 0;
+        resources_program_release(prog);
+        glDeleteTextures(1, &tex_ground);
+        return NULL;
+    }
 
     TerrainParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        glDeleteBuffers(1, &vbo);
+        glDeleteBuffers(1, &ibo);
+        glDeleteVertexArrays(1, &vao);
+        free(tiles);
+        resources_program_release(s_shadow_prog);
+        s_shadow_prog = 0;
+        resources_program_release(prog);
+        glDeleteTextures(1, &tex_ground);
+        return NULL;
+    }
     p->world = w;
     p->rc = rc;                           // кадровые данные (renderer.c)
     p->prog = prog;
@@ -596,8 +640,15 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
 
     const float size[3] = { w->world_w, w->max_height - w->min_height,
                             w->world_d };
-    return node_new("Terrain", "MeshInstance3D", NULL, size, p,
-                    NULL, terrain_node_render);
+    SceneNode *node = node_new("Terrain", "MeshInstance3D", NULL, size, p,
+                               NULL, terrain_node_render);
+    if (!node) {
+        SceneNode partial = {0};
+        partial.params = p;
+        terrain_cleanup(&partial);
+        free(p);
+    }
+    return node;
 }
 
 void terrain_node_render(SceneNode *n, float dt)

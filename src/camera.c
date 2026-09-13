@@ -140,6 +140,7 @@ SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
                             float fov_deg, float znear, float zfar)
 {
     CameraParams *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
     p->world = w;
     p->cam.pos[0] = start_pos[0];
     p->cam.pos[1] = start_pos[1];
@@ -150,8 +151,10 @@ SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
     p->znear = znear;
     p->zfar = zfar;
     const float size[3] = { fov_deg, znear, zfar };   // fov, near, far — тоже "размер"
-    return node_new("Camera", "Camera3D", start_pos, size, p,
-                    camera_node_update, NULL);
+    SceneNode *node = node_new("Camera", "Camera3D", start_pos, size, p,
+                               camera_node_update, NULL);
+    if (!node) free(p);
+    return node;
 }
 
 static int s_demo = 0;          // демо-сцена: ввод выключен, камеру ведёт main.c

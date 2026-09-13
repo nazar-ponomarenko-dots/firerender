@@ -126,25 +126,29 @@ void cmd_pause(const char *args)
 static int s_map_switching = 0;   // рекурсия: скрипт/команда грузит карту внутри game_load_world
 static int map_reload(Game *g, const char *name, int force)
 {
-    if (!g || g->world_loading || s_map_switching) {
+    if (!g || !name || g->world_loading || s_map_switching) {
         console_print("map: вложенный вызов игнорируется (карта уже грузится)");
         return -1;
     }
-    if (!force && g->world_loaded && strcmp(name, g->map_name) == 0) {
-        console_print("map \"%s\" уже загружена", name);
+    char target_name[sizeof g->map_name];
+    char old_name[sizeof g->map_name];
+    snprintf(target_name, sizeof target_name, "%s", name);
+    snprintf(old_name, sizeof old_name, "%s", g->map_name);
+    if (!force && g->world_loaded && strcmp(target_name, old_name) == 0) {
+        console_print("map \"%s\" уже загружена", target_name);
         return 0;
     }
     // Проверяем пакет до разрушения текущего мира. Полноценная загрузка всё ещё
     // может упасть позднее, но простая опечатка больше не выбрасывает игрока.
-    if (strcmp(name, "map") != 0) {
+    if (strcmp(target_name, "map") != 0) {
         char path[160], resolved[512];
-        snprintf(path, sizeof path, "maps/%s.zip", name);
+        snprintf(path, sizeof path, "maps/%s.zip", target_name);
         if (!resources_resolve_path(path, resolved, sizeof resolved)) {
             console_print("map: нет %s", path);
             return -1;
         }
     }
-    snprintf(g->map_name, sizeof g->map_name, "%s", name);
+    snprintf(g->map_name, sizeof g->map_name, "%s", target_name);
     if (!g->world_loaded) {
         SDL_Log("Map selected: %s (загрузится при НОВОЙ ИГРЕ)", g->map_name);
         return 0;
@@ -152,13 +156,23 @@ static int map_reload(Game *g, const char *name, int force)
     s_map_switching = 1;
     game_unload_world(g);
     int rc = game_load_world(g);
-    s_map_switching = 0;
     if (rc != 0) {
-        SDL_Log("Map %s load failed", g->map_name);
-        snprintf(g->map_name, sizeof g->map_name, "map1");
-        app_set_state(APP_MENU);
+        SDL_Log("Map %s load failed; restoring %s", target_name, old_name);
+        if (g->world_loaded) game_unload_world(g);
+        snprintf(g->map_name, sizeof g->map_name, "%s", old_name);
+        int rollback_rc = game_load_world(g);
+        s_map_switching = 0;
+        if (rollback_rc == 0) {
+            app_set_state(APP_PLAY);
+            console_print("map: загрузка %s не удалась, восстановлена %s",
+                          target_name, old_name);
+        } else {
+            SDL_Log("Map rollback %s failed", old_name);
+            app_set_state(APP_MENU);
+        }
         return -1;
     }
+    s_map_switching = 0;
     game_demo_stop(g);
     bool was_load = g->player.pending_spawn != 0;
     if (g->player.pending_spawn) {

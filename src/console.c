@@ -124,7 +124,7 @@ void console_drain(void)
             // Строку копируем ДО exec: console_later вложенного wait может
             // дописать хвост, а уплотнение ниже — перезаписать ячейку.
             char cmd[sizeof s_pend[0].cmd];
-            snprintf(cmd, sizeof cmd, "%s", s_pend[i].cmd);
+            if (snprintf(cmd, sizeof cmd, "%s", s_pend[i].cmd) < 0) cmd[0] = 0;
             console_exec_one(cmd);          // может добавить новые (wait)
         } else {
             if (kept != i) s_pend[kept] = s_pend[i];
