@@ -324,8 +324,12 @@ AnimGlb *glb_anim_parse(const char *path)
             for(long v=0;v<nv;v++){
                 float p[3],n[3]={0,1,0},u[2]={0,0};
                 rvv(bin,pb,ap,(int)v,p);
-                if(an) rvv(bin,nb,an,(int)v,n);
-                if(au) rvv(bin,ub,au,(int)v,u);
+                // NORMAL/UV/JOINTS/WEIGHTS индексируются тем же v, но acc_fits
+                // проверял каждый по СВОЕМУ count. Битый GLB с count < nv иначе
+                // читал бы за пределами bin-чанка (OOB) — читаем атрибут только
+                // в пределах его собственного count, иначе дефолт.
+                if(an&&v<an->count) rvv(bin,nb,an,(int)v,n);
+                if(au&&v<au->count) rvv(bin,ub,au,(int)v,u);
                 P->verts[3*v]=p[0]; P->verts[3*v+1]=p[1]; P->verts[3*v+2]=p[2];
                 P->normals[3*v]=n[0]; P->normals[3*v+1]=n[1]; P->normals[3*v+2]=n[2];
                 // БЕЗ флипа V: stb_image кладёт верхнюю строку картинки в
@@ -334,8 +338,8 @@ AnimGlb *glb_anim_parse(const char *path)
                 P->uvs[2*v]=u[0]; P->uvs[2*v+1]=u[1];
                 if(P->bone_idx){
                     float ji[4]={0,0,0,0},we[4]={0,0,0,0};
-                    if(aj) rvv(bin,jb,aj,(int)v,ji);
-                    if(aw) rvv(bin,wb,aw,(int)v,we);
+                    if(aj&&v<aj->count) rvv(bin,jb,aj,(int)v,ji);
+                    if(aw&&v<aw->count) rvv(bin,wb,aw,(int)v,we);
                     for(int k=0;k<4;k++) P->bone_idx[4*v+k]=(int)ji[k];
                     for(int k=0;k<4;k++) P->bone_w[4*v+k]=we[k];
                 }
@@ -449,8 +453,11 @@ AnimGlb *glb_anim_parse(const char *path)
                    acc_fits(&accs[outp],bvs,bv_n,(long)bin_len)){
                     GA*ti=&accs[inp],*vo=&accs[outp];
                     long nk=ti->count>16*1024*1024?0:ti->count;   // потолок против OOM/OOB
-                    // CUBICSPLINE требует output-count >= nk*3*comp (иначе rfv читает мимо акцессора)
-                    if(Samp->interp==ANIM_CUBIC&&vo->count<nk*3){ nk=0; }
+                    // output-count должен покрывать все ключи, иначе rfv читает
+                    // мимо акцессора (OOB на битом GLB): LINEAR/STEP — comp на
+                    // ключ (нужно >= nk), CUBICSPLINE — 3*comp (нужно >= nk*3).
+                    if(Samp->interp==ANIM_CUBIC){ if(vo->count<nk*3) nk=0; }
+                    else if(vo->count<nk){ nk=0; }
                     Samp->comp=vo->vec; Samp->nkeys=nk;
                     // CUBICSPLINE хранит per key 3*comp (in-tangent, value,
                     // out-tangent); LINEAR/STEP — comp на ключ.
@@ -1346,6 +1353,7 @@ static void anim_render(SceneNode*n,float dt){
     const float *inst = n->world;
     glEnable(GL_DEPTH_TEST); glUseProgram(p->prog);
     scene_uniforms_bind(&p->su,p->rc);
+    scene_uniforms_probe(&p->su, inst[12], inst[13], inst[14]);
     if(p->u_tex>=0)glUniform1i(p->u_tex,0);
     for(int i=0;i<p->count;i++){
         AnimDrawItem*d=&p->items[i];

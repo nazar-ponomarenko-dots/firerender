@@ -197,7 +197,13 @@ int bloom_msaa_active(void)
 
 static int msaa_wanted(void)
 {
-    if (s_bloom_p && s_bloom_p->scene_ldr) return 0;  // RGBA8-сцена: без MSAA
+    // ПРИМ.: раньше при RGBA8-сцене (r_scene_ldr, «упрощённый»/КАРТОШКА) MSAA
+    // принудительно выключался — из-за этого кнопка «Сглаживание» в меню на
+    // КАРТОШКЕ не делала НИЧЕГО (Выкл=4x=16x по фпс). MSAA работает и с LDR:
+    // мультисэмпл-буфер RGBA16F разворачивается блитом в RGBA8-текстуру сцены
+    // (bloom_resolve вызывается каждый кадр, present читает уже развёрнутое).
+    // Оставляем выбор игроку: по умолчанию r_msaa=0 — картошка быстрая, но
+    // включённый 4x/16x теперь честно применяется (и честно стоит bandwidth).
     static const int allowed[] = { 0, 4, 16 };
     float v = cvar_get("r_msaa");
     int s = (int)(v + 0.5f);
@@ -269,9 +275,11 @@ void bloom_msaa_sync(BloomParams *b)
     if (want != b->msaa) msaa_create(b, want);
 }
 
-void bloom_resolve(BloomParams *b)
+void bloom_resolve(BloomParams *b, int want_depth)
 {
-    if (!b->msaa && !b->rbo_depth_nm) return;   // глубина уже в текстуре
+    // Без MSAA единственная работа — копия глубины RBO->текстура. Если её
+    // никто не читает (КАРТОШКА: GI/SSR/voxfog выкл), пропускаем весь blit.
+    if (!b->msaa && (!b->rbo_depth_nm || !want_depth)) return;
     GLint readf = 0, drawf = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readf);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawf);

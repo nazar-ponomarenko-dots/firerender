@@ -254,6 +254,8 @@ void mesh_node_render(SceneNode *n, float dt)
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, p->rc);
+    // Запечённый свет: проба в позиции узла (перевод из мировой матрицы).
+    scene_uniforms_probe(&p->su, model[12], model[13], model[14]);
     glUniformMatrix4fv(p->u_model, 1, GL_FALSE, model);
     material_bind(&p->mat, &p->ml, 0);
     glActiveTexture(GL_TEXTURE0);

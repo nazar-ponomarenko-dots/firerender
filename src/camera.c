@@ -159,6 +159,7 @@ SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
 
 static int s_demo = 0;          // демо-сцена: ввод выключен, камеру ведёт main.c
 static int s_input_lock = 0;    // консоль открыта: ввод игрока выключен
+static int s_frozen = 0;        // игрок мёртв: ввод и движение заморожены
 
 void camera_demo_set(int on)
 {
@@ -170,13 +171,18 @@ void camera_lock_input(int lock)
     s_input_lock = lock;
 }
 
+void camera_set_frozen(int frozen)
+{
+    s_frozen = frozen;
+}
+
 void camera_node_update(SceneNode *n, float dt)
 {
     CameraParams *p = n->params;
     // FOV — cvar (консоль: set fov 90, колесо мыши тоже пишет в cvar)
     float fov = cvar_get("fov");
     if (fov > 0.0f && fov <= 180.0f) p->fov_deg = fov;
-    if (!s_demo && !s_input_lock) {
+    if (!s_demo && !s_input_lock && !s_frozen) {
         float mx = 0, my = 0;
         if (!getenv("FR_NOMOUSE")) {
             SDL_GetRelativeMouseState(&mx, &my);

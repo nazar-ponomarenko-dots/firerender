@@ -59,6 +59,9 @@ uniform int uSpotCount;
 uniform vec3 uAmbient;
 uniform vec3 uSkyColor;
 uniform vec3 uGroundColor;
+uniform vec3 uProbeAmb;          // запечённый ambient в точке объекта (с переотражениями)
+uniform float uProbeSun;         // запечённая видимость солнца (0..1) от статичных преград
+uniform float uProbeOn;          // 1 = использовать запечённый свет (r_baked_light + есть данные)
 uniform vec3 uFogColor;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -100,10 +103,9 @@ float sample_cascade(vec3 wp, int c) {
     return cascade_tap(uShadowMap3, uShadowBias[3], suv);
 }
 
-#define SHADOW_BOX0 4.0f
-#define SHADOW_BOX1 8.0f
-#define SHADOW_BOX2 48.0f
-#define SHADOW_LIMIT 256.0f
+// границы каскадов — uShadowBox[4]: РАДИУС покрытия каскада (половина
+// стороны бокса; бокс центрирован на камере) = {4,8,48,256}.
+uniform float uShadowBox[4];
 
 float object_shadow(vec3 wp) {
     if (uShadowOn < 0.5) return 1.0;
@@ -111,21 +113,21 @@ float object_shadow(vec3 wp) {
     // Дальние деревья: самозатенение биллборда на 100+ м нечитаемо, а цена
     // — 1-2 тапа CSM на КАЖДЫЙ пиксель дерева (их на экране больше всего).
     if (dist >= 100.0) return 1.0;
-    if (dist < SHADOW_BOX0) {
-        float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
+    if (dist < uShadowBox[0]) {
+        float t = smoothstep(uShadowBox[0] * 0.8, uShadowBox[0], dist);
         // Ранний выход вне зоны бленда: большинство пикселей платят за 1 тап
         if (t < 0.02) return sample_cascade(wp, 0);
         if (t > 0.98) return sample_cascade(wp, 1);
         return mix(sample_cascade(wp, 0), sample_cascade(wp, 1), t);
     }
-    if (dist < SHADOW_BOX1) {
-        float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
+    if (dist < uShadowBox[1]) {
+        float t = smoothstep(uShadowBox[1] * 0.8, uShadowBox[1], dist);
         if (t < 0.02) return sample_cascade(wp, 1);
         if (t > 0.98) return sample_cascade(wp, 2);
         return mix(sample_cascade(wp, 1), sample_cascade(wp, 2), t);
     }
-    if (dist < SHADOW_BOX2) {
-        float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
+    if (dist < uShadowBox[2]) {
+        float t = smoothstep(uShadowBox[2] * 0.8, uShadowBox[2], dist);
         if (t < 0.02) return sample_cascade(wp, 2);
         if (t > 0.98) return sample_cascade(wp, 3);
         return mix(sample_cascade(wp, 2), sample_cascade(wp, 3), t);
@@ -171,7 +173,9 @@ void main() {
 
     // полусферический ambient: сверху — небо, снизу — отражение от земли
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
+    if (uProbeOn > 0.5) amb = uProbeAmb;   // запечённый свет: переотражения + AO + подсветка
     float shadow = object_shadow(vWorldPos);
+    float sunvis = (uProbeOn > 0.5) ? uProbeSun : 1.0;  // тень статичных преград из бейка
 
     // Диффуз почти РОВНЫЙ, как у пшеницы: у биллборда нормаль бессмысленна.
     // Светит КАЖДЫЙ направленный источник; CSM-тень — только солнце (0).
@@ -181,7 +185,7 @@ void main() {
     for (int i = 0; i < uLightCount; i++) {
         vec3 li = normalize(uLightDir[i]);
         float diff = 0.55 + 0.25 * max(dot(N, li), 0.0);
-        float sh = (i == 0) ? shadow : 1.0;
+        float sh = (i == 0) ? shadow * sunvis : 1.0;
         light += uLightColor[i] * uLightIntensity[i] * diff * sh;
         if (i == 0) L = li;
     }

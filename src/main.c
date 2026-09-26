@@ -30,6 +30,7 @@
 #include "commands.h"
 #include "events.h"
 #include "renderer.h"
+#include "srender.h"
 #include "buildnum.h"
 #include "input.h"
 #include "lua_engine.h"
@@ -170,7 +171,10 @@ static void sync_cvars(Game *g)
         // CSM рендерится в режимах 1 (только динамика) и 2 (динамика вблизи
         // игрока, статика — по всему миру)
         shadow_set(sh == 1.0f || sh == 2.0f);
-        if (sh == 2.0f && g->world_loaded)  // статические: пересчитать сейчас
+        // Статические: пересчитываем карту теней ТОЛЬКО если нет запечённого
+        // лайтмапа. Есть готовый (map/baked) — режим 2 читает его, а CPU-бейк
+        // был бы 2+ сек впустую (его результат шейдер игнорирует).
+        if (sh == 2.0f && g->world_loaded && !terrain_baked_light_have())
             terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
         SDL_Log("Shadows mode: %d", (int)sh);
     }
@@ -230,7 +234,6 @@ static int fr_test_apply(Game *g)
     const char *fr_test = getenv("FR_TEST");
     if (!fr_test) return 0;
     if (strchr(fr_test, 'x')) console_selftest();
-    if (strchr(fr_test, 's')) shadow_toggle();
     if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
     if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // кэш статических каскадов off
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
@@ -239,7 +242,6 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'c')) g_shadow_cull = 0;
     if (strchr(fr_test, 'e')) veg_set_static_main(0);
     if (strchr(fr_test, 'f')) veg_set_dyn_main(0);
-    if (strchr(fr_test, 'o')) voxfog_set(1);
     if (game_load_world(g) != 0) {
         SDL_Log("FR_TEST: world load failed");
         return -1;
@@ -420,7 +422,57 @@ int main(int argc, char *argv[])
 #endif
     }
 
-    // 2) Атрибуты GL-контекста (SDL уже инициализирована выше) -----------------
+    // 2) Окно и контекст -------------------------------------------------------
+    // Выбор бэкенда на этапе компиляции: make vulkan / make metal дают окна
+    // БЕЗ GL-контекста (Vulkan/Metal-девайс поднимает sr_create()). Пока
+    // рендер-пайплайн на этих API не портирован — девайс поднимается,
+    // статус логируется, движок завершается корректно.
+    int ww = WIN_W, wh = WIN_H;
+    {
+        const char *ew = getenv("FR_W"), *eh = getenv("FR_H");
+        if (ew && eh) { ww = atoi(ew); wh = atoi(eh); }
+    }
+#if defined(FR_BACKEND_VULKAN) || defined(FR_BACKEND_METAL)
+    {
+        unsigned win_flags = SDL_WINDOW_RESIZABLE
+#ifdef FR_BACKEND_VULKAN
+            | SDL_WINDOW_VULKAN;
+#else
+            | SDL_WINDOW_METAL;
+#endif
+        g_win = SDL_CreateWindow("firerender", ww, wh, win_flags);
+        if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
+        sr_api_report();
+        SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
+        SrDevice *dev = sr_create();
+        if (dev) {
+            const SrCaps *c = sr_caps(dev);
+            SDL_Log("Backend %s: device OK (%s %s), но рендер-пайплайн на этот "
+                    "API ещё не портирован (sr_* заглушки) — завершение.",
+                    sr_api_name(
+#ifdef FR_BACKEND_VULKAN
+                        SR_API_VULKAN
+#else
+                        SR_API_METAL
+#endif
+                    ),
+                    c->vendor, c->version);
+            sr_destroy(dev);
+        } else {
+            SDL_Log("Backend %s: sr_create() не удался",
+                    sr_api_name(
+#ifdef FR_BACKEND_VULKAN
+                        SR_API_VULKAN
+#else
+                        SR_API_METAL
+#endif
+                    ));
+        }
+        SDL_DestroyWindow(g_win);
+        SDL_Quit();
+        return 0;
+    }
+#endif
 #ifdef USE_GLES_PATH
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -437,13 +489,6 @@ int main(int argc, char *argv[])
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
-    // 3) Окно и контекст -------------------------------------------------------
-    // FR_W/FR_H — headless-тест высоких разрешений (4К и т.п.)
-    int ww = WIN_W, wh = WIN_H;
-    {
-        const char *ew = getenv("FR_W"), *eh = getenv("FR_H");
-        if (ew && eh) { ww = atoi(ew); wh = atoi(eh); }
-    }
     g_win = SDL_CreateWindow("firerender", ww, wh,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
@@ -469,6 +514,7 @@ int main(int argc, char *argv[])
 #else
     SDL_Log("Renderer profile: DESKTOP GL");
 #endif
+    sr_api_report();   // статус рендерных API (GL/GLES + заготовки Vulkan/Metal)
     SDL_Log("Graphics API: %s", glGetString(GL_VERSION));
     SDL_Log("GPU-driven veg (compute+indirect): %s",
             g_gl_gpu_driven ? "ENABLED" : "disabled (instanced fallback)");
@@ -552,11 +598,26 @@ int main(int argc, char *argv[])
             if (fr_test_apply(&game) != 0) goto fail;   // FR_TEST: мир
 
             if (getenv("FR_CONSOLE")) console_toggle();   // консоль при старте
-            // cvar-синки не должны перетирать FR_TEST на первом кадре —
-            // примайниваем только то, что трогает FR_TEST (тени/туман).
-            // Полноэкран/VSync/каркас применит первый sync_cvars из config.cfg.
+            // Ресинк подсистем с cvar'ами ПОСЛЕ загрузки мира. shadow_init/
+            // voxfog_init читают режим в начале game_load_world, но map_apply,
+            // графические пресеты и скрипт карты могут сменить r_shadows_mode/
+            // r_fog_mode уже ПОСЛЕ инициализации. Раньше мы лишь пресеедили
+            // трекеры текущим значением — и sync_cvars, не видя «изменения»,
+            // НИКОГДА не приводил g_shadow_on/туман в соответствие: CSM оставался
+            // включён в режиме blob/выкл (карта теней рисовалась впустую), а
+            // туман застревал в режиме из инициализации. Теперь принудительно
+            // синхронизируем состояние с итоговым режимом.
             s_sync_shadows = cvar_get("r_shadows_mode");
+            shadow_set(s_sync_shadows == 1.0f || s_sync_shadows == 2.0f);
             s_sync_fog = cvar_get("r_fog_mode");
+            voxfog_set_mode((int)s_sync_fog);
+            // FR_TEST 's'/'o' переключают подсистему ПОВЕРХ режима (A/B-кадры) —
+            // применяем после ресинка, иначе shadow_init/voxfog_init их затирали.
+            {
+                const char *ft = getenv("FR_TEST");
+                if (ft && strchr(ft, 's')) shadow_toggle();
+                if (ft && strchr(ft, 'o')) voxfog_set(1);
+            }
         }
 
         // В APK assets неизменяемы, а периодические stat() только будят storage.
@@ -613,6 +674,25 @@ int main(int argc, char *argv[])
         sync_cvars(&game);
         input_sync_mode();
 
+        // FR_CVAR="name value;name value" — переопределить cvar'ы для
+        // headless-тестов ПОСЛЕ config.cfg (иначе архивные значения перетрут).
+        {
+            static int s_fr_cvar_done = 0;
+            const char *fc = getenv("FR_CVAR");
+            if (fc && !s_fr_cvar_done) {
+                s_fr_cvar_done = 1;
+                char buf[512];
+                snprintf(buf, sizeof buf, "%s", fc);
+                for (char *tok = strtok(buf, ";"); tok; tok = strtok(NULL, ";")) {
+                    char name[64]; float val;
+                    if (sscanf(tok, "%63s %f", name, &val) == 2) {
+                        cvar_set(name, val);
+                        SDL_Log("FR_CVAR: %s = %g", name, val);
+                    }
+                }
+            }
+        }
+
         // FR_TEST 'H': автонаведение камеры на рэгдолл каждый кадр —
         // головной тест физики не должен зависеть от того, куда уползла
         // модель (без этого она уезжает из кадра и баг не видно).
@@ -634,11 +714,21 @@ int main(int argc, char *argv[])
             }
         }
 
+        // FR_TEST 'K': убить игрока за ~1.2 c до снимка (headless FR_TEST=SK) —
+        // проверка экрана смерти, «завала» камеры и заморозки ввода.
+        if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'K') &&
+            game.world_loaded && app_state() == APP_PLAY &&
+            !health_is_dead(&game.player.hp)) {
+            static float k_t = 0.0f;
+            k_t += dt;
+            if (k_t > 0.1f) { health_kill(&game.player.hp);
+                              SDL_Log("FR_TEST K: player killed"); }
+        }
+
         // Отложенные события (events_emit_deferred) — безопасная точка после
         // всех тиков, до рендера: колбэки не могут переиспользовать списки
         // слушателей посреди итерации.
         events_flush_deferred();
-
         ST_ACC(s_st_sync);
 
         // Рендер: сцена -> bloom/туман -> оверлеи (см. renderer.c)
@@ -667,6 +757,22 @@ int main(int argc, char *argv[])
             // FR_BENCH живёт десятки секунд (прогрев + замер) — выход только
             // по bench.done; снимок всё равно делается на s_shot_at.
             if (s_frames >= s_shot_at + 30 && !bench.active) running = false;
+        }
+        // FR_BAKE: офлайн-компиляция света карты (make mapbake). Прогреваем
+        // несколько кадров (солнце/CSM/rc устаканиваются), печём RGB-люксель
+        // рельефа + сетку зондов в map/baked/ и выходим. Движок потом только
+        // ЧИТАЕТ их (после make mapzip кладёт baked/ в zip карты).
+        if (getenv("FR_BAKE") && game.world_loaded &&
+            app_state() == APP_PLAY && game.sun_node) {
+            static int s_bake_warm = 0;
+            if (++s_bake_warm == 30) {
+                SDL_Log("FR_BAKE: запекаю свет карты...");
+                terrain_light_bake(&game.world,
+                                   (SunParams *)game.sun_node->params,
+                                   renderer_context());
+                SDL_Log("FR_BAKE: готово. Свет в map/baked/ — запусти make mapzip.");
+                running = false;
+            }
         }
         renderer_end(&game, dt);
         ST_ACC(s_st_end);
@@ -731,7 +837,7 @@ int main(int argc, char *argv[])
                 else if (shot_frame < target) shot_frame++;
                 if (shot_frame == target) {
                     unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
-                    glReadPixels(0, 0, renderer_vw(), renderer_vh(), GL_RGB, GL_UNSIGNED_BYTE, px);
+                    renderer_read_pixels(px, renderer_vw(), renderer_vh());
                     FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
                     if (f) {
                         fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());

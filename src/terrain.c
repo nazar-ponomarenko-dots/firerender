@@ -10,6 +10,7 @@
 #include "gl_loader.h"
 #include "linalg.h"
 #include "mapdata.h"
+#include "png.h"
 #include "resources.h"
 #include "shader.h"
 #include "sky.h"
@@ -18,8 +19,13 @@
 #include "stb_image.h"
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#  include <direct.h>
+#endif
 
 #include <SDL3/SDL.h>
 
@@ -51,6 +57,10 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     p->u_statictex = glGetUniformLocation(prog, "uStaticShadow");
     p->u_static_on = glGetUniformLocation(prog, "uStaticOn");
     p->u_worldsize = glGetUniformLocation(prog, "uWorldSize");
+    p->u_baked_lm  = glGetUniformLocation(prog, "uBakedLM");
+    p->u_baked_on  = glGetUniformLocation(prog, "uBakedOn");
+    p->u_sunvis    = glGetUniformLocation(prog, "uSunVis");
+    p->u_sunvis_on = glGetUniformLocation(prog, "uSunVisOn");
     p->u_wetness_mask = glGetUniformLocation(prog, "uWetnessMask");
     // Поверхности (splat): маска + 4 слоя. Юниты: 10 — маска, 12..15 — слои
     // (0..9 и 11 заняты базой/нормалями/высотами/каскадами/статикой/
@@ -58,6 +68,7 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     p->u_splat = glGetUniformLocation(prog, "uSplat");
     p->u_splat_on = glGetUniformLocation(prog, "uSplatOn");
     p->u_detail_dist = glGetUniformLocation(prog, "uDetailDist");
+    p->u_simple = glGetUniformLocation(prog, "uSimple");
     p->u_layer_scale = glGetUniformLocation(prog, "uLayerScale");
     for (int i = 0; i < SPLAT_LAYERS; i++) {
         char name[16];
@@ -84,6 +95,12 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     }
     glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
     glUniform1i(p->u_static_on, 0);
+    if (p->u_baked_lm >= 0) glUniform1i(p->u_baked_lm, 11); // люксель (unit 11:
+                                                            // 9 занят кубомапом
+                                                            // отражений uReflection)
+    if (p->u_baked_on >= 0) glUniform1f(p->u_baked_on, 0.0f);
+    if (p->u_sunvis >= 0) glUniform1i(p->u_sunvis, 16);     // карта видимости солнца
+    if (p->u_sunvis_on >= 0) glUniform1f(p->u_sunvis_on, 0.0f);
     glUniform2f(p->u_worldsize, w->world_w, w->world_d);
     // Слои поверхностей: сэмплеры и масштабы тайлов (метров на тайл).
     if (p->u_splat >= 0) glUniform1i(p->u_splat, 10);
@@ -212,6 +229,17 @@ static int ray_hits_object(float x, float y, float z)
 
 static GLuint s_static_tex = 0;
 static int s_static_baked = 0;
+
+// --- Запечённый свет: GL-текстура люкселя + 3D-сетка зондов --------------------
+static GLuint s_baked_lm_tex = 0;    // RGB8 люксель рельефа (unit 11)
+static GLuint s_baked_sunvis_tex = 0;// R8 (grayscale) видимость солнца (unit 16):
+                                     // дальние статичные тени в режиме 1 (CSM)
+static int    s_baked_have = 0;      // 1 = люксель загружен/запечён
+// Сетка зондов освещённости для динамических объектов (ambient RGB + sunvis).
+static float *s_probes = NULL;       // nx*ny*nz*4 float (RGB + sunvis)
+static int    s_pnx = 0, s_pny = 0, s_pnz = 0;
+static float  s_py0 = 0.0f, s_py1 = 0.0f;   // вертикальный диапазон сетки
+static float  s_pwx = 0.0f, s_pwz = 0.0f;   // размеры мира (для UV сетки)
 
 // --- Тайловая геометрия с 4 LOD -------------------------------------------------
 // Карта режется на тайлы 128x128 м. Каждый тайл строится в 4 LOD-уровнях
@@ -705,6 +733,41 @@ void terrain_node_render(SceneNode *n, float dt)
             glBindTexture(GL_TEXTURE_2D, s_static_tex);
         }
     }
+    // Запечённый свет (unit 11): RGB-люксель заменяет ambient+солнце+тень.
+    // Это СТАТИЧНОЕ решение освещения (тени преград запечены офлайн), поэтому
+    // включается ТОЛЬКО в режиме статических теней (r_shadows_mode==2). В
+    // режимах 0/1/3 террейн идёт динамическим путём (ambient+солнце+CSM):
+    // так «динамика ВМЕСТО статики», а не поверх неё. Готов только офлайн
+    // (make mapbake) и по cvar r_baked_light.
+    // ВАЖНО: не unit 9 — там кубомап отражений uReflection (samplerCube).
+    // Два сэмплера разных типов на одном юните = INVALID_OPERATION на строгих
+    // десктоп-драйверах, и весь проход террейна молча пропадает (llvmpipe
+    // терпел, реальный GL — нет: рельеф не рисовался вообще).
+    {
+        float on = 0.0f;
+        if (cvar_get("r_shadows_mode") == 2.0f &&
+            cvar_get("r_baked_light") > 0.5f && terrain_baked_light_have())
+            on = 1.0f;
+        if (p->u_baked_on >= 0) glUniform1f(p->u_baked_on, on);
+        if (on > 0.5f) {
+            glActiveTexture(GL_TEXTURE11);
+            glBindTexture(GL_TEXTURE_2D, s_baked_lm_tex);
+        }
+    }
+    // Карта видимости солнца (unit 16): ТОЛЬКО в режиме 1 (CSM). Каскады кроют
+    // ближнюю зону; за их пределом теней не было (см. shadow_at → 1.0 за 250 м).
+    // Здесь на ДАЛЬНИХ дистанциях подмешиваем запечённую статичную тень — далёкие
+    // деревья/поле снова отбрасывают тень на горизонте.
+    {
+        float on = 0.0f;
+        if (cvar_get("r_shadows_mode") == 1.0f && terrain_baked_sunvis_have())
+            on = 1.0f;
+        if (p->u_sunvis_on >= 0) glUniform1f(p->u_sunvis_on, on);
+        if (on > 0.5f) {
+            glActiveTexture(GL_TEXTURE16);
+            glBindTexture(GL_TEXTURE_2D, s_baked_sunvis_tex);
+        }
+    }
     // Маска мокрости (под крышей): unit 8
     if (terrain_wetness_mask_have()) {
         glActiveTexture(GL_TEXTURE8);
@@ -715,6 +778,8 @@ void terrain_node_render(SceneNode *n, float dt)
     // экономим на БОЛЬШОЙ части экрана (режим «КАРТОШКА»).
     if (p->u_detail_dist >= 0)
         glUniform1f(p->u_detail_dist, cvar_get("r_terr_detail_dist"));
+    if (p->u_simple >= 0)
+        glUniform1f(p->u_simple, cvar_get("r_simple_render"));
     // Поверхности (splat): маска на юните 10, слои на 12..15
     if (p->u_splat_on >= 0)
         glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
@@ -863,7 +928,602 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
     s_static_baked = 1;
 }
 
-// --- Wetness mask (baked "under roof" detection) ---------------------------
+// ===========================================================================
+//  Запечённый свет (offline). Считается ОДИН раз в make mapbake (FR_BAKE),
+//  пишется в map/baked/, движок только читает. Динамика (fauna/particles/
+//  glb_anim) в запекании НЕ участвует — окклюдеры только статические
+//  (цилиндры ShadowObj из mapdata_object, как у теней).
+// ===========================================================================
+// Разрешение офлайн-лайтмапа: 2 текселя/м (было 1) — чётче тени деревьев/поля.
+// Отвязан от STATIC_SHADOW_W/H (рантайм-R8-фолбэк остаётся 1 тексель/м).
+#define BAKE_LM_W 4096
+#define BAKE_LM_H 2304
+
+// Нормаль рельефа из конечных разностей карты высот (совпадает с геометрией).
+static void bl_normal(const WorldState *w, float x, float z, float N[3])
+{
+    float e = 1.0f;
+    float hl = sample_height(w, x - e, z), hr = sample_height(w, x + e, z);
+    float hd = sample_height(w, x, z - e), hu = sample_height(w, x, z + e);
+    float nx = hl - hr, ny = 2.0f * e, nz = hd - hu;
+    float l = sqrtf(nx * nx + ny * ny + nz * nz);
+    if (l < 1e-6f) { N[0] = 0; N[1] = 1; N[2] = 0; return; }
+    N[0] = nx / l; N[1] = ny / l; N[2] = nz / l;
+}
+
+// Луч из точки в направлении (dx,dy,dz): упёрся ли в рельеф/статический объект
+// на дистанции до maxd? Выход за карту или выше мира — небо (0, не закрыт).
+static int bl_ray_blocked(const WorldState *w, float x, float y, float z,
+                          float dx, float dy, float dz,
+                          float maxd, float step)
+{
+    int n = (int)(maxd / step);
+    for (int s = 1; s <= n; s++) {
+        float tt = s * step;
+        float px = x + dx * tt, py = y + dy * tt, pz = z + dz * tt;
+        if (px < 0 || pz < 0 || px > w->world_w || pz > w->world_d) return 0;
+        if (py > w->max_height + 6.0f) return 0;
+        if (static_ground(w, px, pz) > py + 0.5f) return 1;
+        if (ray_hits_object(px, py, pz)) return 1;
+    }
+    return 0;
+}
+
+// Поле пшеницы (прямоугольник мира) — низкий полупрозрачный слой окклюдера.
+#define BAKE_WHEAT_H     1.4f    // высота колосьев над землёй, м
+#define BAKE_WHEAT_TRANS 0.72f   // пропускание света за шаг марша сквозь колосья
+                                 // (солнце низкое ~11°, луч идёт сквозь колосья
+                                 //  длинным косым путём ~5 шагов → V поля ~0.3;
+                                 //  иначе тень поля тонет в клампе яркой лайтмапы)
+static int bl_in_field(const WorldState *w, float x, float z)
+{
+    return w->field_w > 1.0f && w->field_d > 1.0f &&
+           x >= w->field_x0 && x <= w->field_x0 + w->field_w &&
+           z >= w->field_z0 && z <= w->field_z0 + w->field_d;
+}
+
+// Луч к солнцу для ЗАПЕКАНИЯ: двухфазный шаг, возвращает ПРОПУСКАНИЕ [0..1].
+// Раньше единый шаг 8 м проскакивал кроны деревьев (радиус ~4.5 м) между
+// выборками — отсюда «дыры» в тени. Теперь вблизи (до 160 м, где живут объекты
+// и локальный рельеф) шаг 1.5 м, дальше — 10 м до 480 м (дальние гребни).
+// Смещение начала (t0) убирает самопопадание и сшивает выборки соседних
+// текселей, снимая «полосатость». Рельеф/крона — глухой блок (0); пшеница —
+// мягкий фильтр (тень поля на землю), произведение пропусканий по слою.
+static float bl_sun_ray_vis(const WorldState *w, float x, float y, float z,
+                            float dx, float dy, float dz, float t0)
+{
+    float tt = 1.0f + t0;
+    const float breaks[2] = { 160.0f, 480.0f };
+    const float steps[2]  = { 1.5f, 10.0f };
+    float trans = 1.0f;
+    for (int phase = 0; phase < 2; phase++) {
+        for (; tt <= breaks[phase]; tt += steps[phase]) {
+            float px = x + dx * tt, py = y + dy * tt, pz = z + dz * tt;
+            if (px < 0 || pz < 0 || px > w->world_w || pz > w->world_d) return trans;
+            if (py > w->max_height + 6.0f) return trans;
+            float g = static_ground(w, px, pz);
+            if (g > py + 0.5f) return 0.0f;                 // рельеф — глухо
+            if (ray_hits_object(px, py, pz)) return 0.0f;   // крона — глухо
+            // Пшеница: точка внутри поля и НИЖЕ верхушки колосьев — фильтрует
+            // свет (мягкая тень поля). Только на ближней фазе (шаг 1.5 м).
+            if (phase == 0 && py < g + BAKE_WHEAT_H && bl_in_field(w, px, pz)) {
+                trans *= BAKE_WHEAT_TRANS;
+                if (trans < 0.03f) return 0.0f;
+            }
+        }
+    }
+    return trans;
+}
+
+// Дробная видимость солнца [0..1]: супервыборка лучей в узком конусе вокруг
+// направления на солнце (мягкая полутень) + разный сдвиг начала у каждого луча.
+// Бинарное 0/1 давало ступенчатые «кисточкой» края; усреднение по конусу +
+// пост-размытие поля дают гладкую стилизованную тень, совпадающую с геометрией.
+#define BAKE_SUN_SAMPLES 8
+#define BAKE_SUN_CONE    0.055f   // полу-угол конуса (~3.1°) — ширина полутени
+static float bl_sun_vis(const WorldState *w, float x, float y, float z,
+                        float dx, float dy, float dz)
+{
+    // Ортобазис (u,v), перпендикулярный направлению на солнце.
+    float ux, uy, uz;
+    if (fabsf(dy) < 0.99f) { ux = dz; uy = 0.0f; uz = -dx; }
+    else { ux = 1.0f; uy = 0.0f; uz = 0.0f; }
+    float ul = sqrtf(ux*ux + uy*uy + uz*uz); ux/=ul; uy/=ul; uz/=ul;
+    float vx = dy*uz - dz*uy, vy = dz*ux - dx*uz, vz = dx*uy - dy*ux;
+    float acc = 0.0f;
+    for (int s = 0; s < BAKE_SUN_SAMPLES; s++) {
+        // Диск конуса выборкой Фогеля (золотой угол) — равномерно, без сгустков.
+        float ang = 2.399963f * (float)s;
+        float rr  = BAKE_SUN_CONE * sqrtf(((float)s + 0.5f) / BAKE_SUN_SAMPLES);
+        float jx = cosf(ang) * rr, jy = sinf(ang) * rr;
+        float rx = dx + ux*jx + vx*jy;
+        float ry = dy + uy*jx + vy*jy;
+        float rz = dz + uz*jx + vz*jy;
+        float rl = sqrtf(rx*rx + ry*ry + rz*rz); rx/=rl; ry/=rl; rz/=rl;
+        acc += bl_sun_ray_vis(w, x, y, z, rx, ry, rz, (float)s * 0.3f);
+    }
+    return acc / (float)BAKE_SUN_SAMPLES;
+}
+
+// AO по небу: доля лучей верхней полусферы (смещённых к N), уходящих в небо.
+// Локальная окклюзия под кронами / у склонов (радиус ~26 м). 1 = открыто.
+static float bl_sky_ao(const WorldState *w, float x, float y, float z,
+                       const float N[3])
+{
+    // 9 фиксированных направлений: зенит + 8 по кольцу под 45°.
+    static const float ring[8][2] = {
+        { 1, 0 }, { 0.707f, 0.707f }, { 0, 1 }, { -0.707f, 0.707f },
+        { -1, 0 }, { -0.707f, -0.707f }, { 0, -1 }, { 0.707f, -0.707f }
+    };
+    int open = 0, total = 0;
+    float dirs[9][3];
+    dirs[0][0] = 0; dirs[0][1] = 1; dirs[0][2] = 0;            // зенит
+    for (int k = 0; k < 8; k++) {
+        dirs[k + 1][0] = ring[k][0] * 0.6f;
+        dirs[k + 1][1] = 0.8f;                                 // наклон 45°+
+        dirs[k + 1][2] = ring[k][1] * 0.6f;
+    }
+    for (int k = 0; k < 9; k++) {
+        float dx = dirs[k][0], dy = dirs[k][1], dz = dirs[k][2];
+        if (dx * N[0] + dy * N[1] + dz * N[2] <= 0.05f) continue; // за горизонтом
+        total++;
+        if (!bl_ray_blocked(w, x, y + 0.4f, z, dx, dy, dz, 26.0f, 2.0f)) open++;
+    }
+    return total ? (float)open / (float)total : 1.0f;
+}
+
+// Кадровое состояние света для запекания (из RendererContext).
+typedef struct {
+    const WorldState *w;
+    float *E;                    // BAKE_LM_W*BAKE_LM_H*3 float (люксель)
+    const float *V;              // BAKE_LM_W*BAKE_LM_H — дробная видимость солнца
+    float amb[3], sky[3], grd[3];
+    float ldir[SUN_MAX_LIGHTS][3], lcol[SUN_MAX_LIGHTS][3], lint[SUN_MAX_LIGHTS];
+    int lcount;
+} BakeLight;
+
+// Проход видимости солнца: дробная тень [0..1] с супервыборкой (см. bl_sun_vis).
+// Считается ОТДЕЛЬНО от освещения, чтобы поле можно было размыть (мягкая
+// полутень) до композиции — иначе тень выходит ступенчатой «кисточкой».
+static void bake_sunvis_rows(int j0, int j1, void *ud)
+{
+    BakeLight *b = (BakeLight *)ud;
+    const WorldState *w = b->w;
+    float *V = (float *)b->V;
+    float dx = 0, dy = 1, dz = 0, ln = 0;
+    if (b->lcount > 0) {
+        dx = b->ldir[0][0]; dy = b->ldir[0][1]; dz = b->ldir[0][2];
+        ln = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (ln > 1e-4f) { dx/=ln; dy/=ln; dz/=ln; }
+    }
+    for (int j = j0; j < j1; j++) {
+        for (int i = 0; i < BAKE_LM_W; i++) {
+            float vis = 1.0f;
+            if (b->lcount > 0 && ln > 1e-4f) {
+                float x = ((float)i + 0.5f) / BAKE_LM_W * w->world_w;
+                float z = ((float)j + 0.5f) / BAKE_LM_H * w->world_d;
+                float y = static_ground(w, x, z);
+                vis = bl_sun_vis(w, x, y, z, dx, dy, dz);
+            }
+            V[(size_t)j * BAKE_LM_W + i] = vis;
+        }
+    }
+}
+
+// Прямой проход: ambient (полусфера) * AO + прямой свет каждого направленного
+// источника; видимость солнца (0) — только у источника 0 (как в шейдере).
+static void bake_direct_rows(int j0, int j1, void *ud)
+{
+    BakeLight *b = (BakeLight *)ud;
+    const WorldState *w = b->w;
+    for (int j = j0; j < j1; j++) {
+        for (int i = 0; i < BAKE_LM_W; i++) {
+            float x = ((float)i + 0.5f) / BAKE_LM_W * w->world_w;
+            float z = ((float)j + 0.5f) / BAKE_LM_H * w->world_d;
+            float y = static_ground(w, x, z);
+            float N[3]; bl_normal(w, x, z, N);
+            float ao = bl_sky_ao(w, x, y, z, N);
+            // Полусферный ambient (как terrain.fs), приглушённый AO.
+            float t = N[1] * 0.5f + 0.5f;
+            float aok = 0.35f + 0.65f * ao;
+            float light[3];
+            for (int c = 0; c < 3; c++) {
+                float amb = (b->grd[c] + (b->sky[c] - b->grd[c]) * t) * b->amb[c];
+                light[c] = amb * aok;
+            }
+            // Видимость солнца — дробная, из размытого поля (мягкая полутень).
+            float shadow = b->V ? b->V[(size_t)j * BAKE_LM_W + i] : 1.0f;
+            // тень душит ambient до 1/4 (как mix(0.25,1,shadow) в шейдере)
+            float ambmul = 0.25f + 0.75f * shadow;
+            for (int c = 0; c < 3; c++) light[c] *= ambmul;
+            // Прямой свет: каждый направленный источник.
+            for (int li = 0; li < b->lcount; li++) {
+                float dx = b->ldir[li][0], dy = b->ldir[li][1], dz = b->ldir[li][2];
+                float ln = sqrtf(dx*dx + dy*dy + dz*dz);
+                if (ln < 1e-4f) continue;
+                dx/=ln; dy/=ln; dz/=ln;
+                float diff = N[0]*dx + N[1]*dy + N[2]*dz; if (diff < 0) diff = 0;
+                float sh = (li == 0) ? shadow : 1.0f;
+                float k = b->lint[li] * (0.55f + 0.45f * diff) * sh;
+                for (int c = 0; c < 3; c++) light[c] += b->lcol[li][c] * k;
+            }
+            float *o = &b->E[((size_t)j * BAKE_LM_W + i) * 3];
+            o[0] = light[0]; o[1] = light[1]; o[2] = light[2];
+        }
+    }
+}
+
+// Диффузный переотражённый бонс: собираем свет из кольца соседей (снимок src),
+// тонируем цветом земли (bounce tint) и добавляем к приёмнику (dst). Один
+// проход = "цвет земли перетекает в тень" — стилизованный GI без трассировки.
+typedef struct {
+    const float *src;   // снимок люкселя до бонса
+    float *dst;         // приёмник (= копия src + непрямой)
+    float tint[3];      // тон отражённого света (цвет земли * усиление)
+} BounceJob;
+
+static void bake_bounce_rows(int j0, int j1, void *ud)
+{
+    BounceJob *b = (BounceJob *)ud;
+    // Кольца выборок (в текселях): 32 соседа, вес спадает с дистанцией.
+    static const int rad[4] = { 5, 11, 23, 45 };
+    static const float ring[8][2] = {
+        { 1, 0 }, { 0.707f, 0.707f }, { 0, 1 }, { -0.707f, 0.707f },
+        { -1, 0 }, { -0.707f, -0.707f }, { 0, -1 }, { 0.707f, -0.707f }
+    };
+    for (int j = j0; j < j1; j++) {
+        for (int i = 0; i < BAKE_LM_W; i++) {
+            float acc[3] = { 0, 0, 0 }, wsum = 0.0f;
+            for (int r = 0; r < 4; r++) {
+                float wgt = 1.0f / (1.0f + rad[r] / 12.0f);
+                for (int k = 0; k < 8; k++) {
+                    int sx = i + (int)(ring[k][0] * rad[r]);
+                    int sy = j + (int)(ring[k][1] * rad[r]);
+                    if (sx < 0) sx = 0; else if (sx >= BAKE_LM_W) sx = BAKE_LM_W - 1;
+                    if (sy < 0) sy = 0; else if (sy >= BAKE_LM_H) sy = BAKE_LM_H - 1;
+                    const float *s = &b->src[((size_t)sy * BAKE_LM_W + sx) * 3];
+                    acc[0] += s[0] * wgt; acc[1] += s[1] * wgt; acc[2] += s[2] * wgt;
+                    wsum += wgt;
+                }
+            }
+            const float *self = &b->src[((size_t)j * BAKE_LM_W + i) * 3];
+            float *o = &b->dst[((size_t)j * BAKE_LM_W + i) * 3];
+            for (int c = 0; c < 3; c++)
+                o[c] = self[c] + b->tint[c] * (wsum > 0 ? acc[c] / wsum : 0.0f);
+        }
+    }
+}
+
+// Создать каталог map/baked (idempotent).
+static void bake_ensure_dir(void)
+{
+#ifdef _WIN32
+    _mkdir("map"); _mkdir("map\\baked");
+#else
+    mkdir("map", 0755); mkdir("map/baked", 0755);
+#endif
+}
+
+// --- Сетка зондов освещённости (для динамических объектов) ------------------
+#define BAKE_PROBE_NX 64
+#define BAKE_PROBE_NZ 36
+#define BAKE_PROBE_NY 8
+
+// Пишет probes.bin: заголовок + nx*ny*nz*4 float (ambient RGB + видимость
+// солнца). Каждый зонд — точка в 3D; объект берёт трилинейную выборку.
+static void bake_probes(const WorldState *w, const BakeLight *b)
+{
+    int nx = BAKE_PROBE_NX, ny = BAKE_PROBE_NY, nz = BAKE_PROBE_NZ;
+    float y0 = w->min_height, y1 = w->max_height + 30.0f;
+    float *P = calloc((size_t)nx * ny * nz * 4, sizeof(float));
+    if (!P) return;
+    float sdx = 0, sdy = 1, sdz = 0;
+    if (b->lcount > 0) {
+        float ln = sqrtf(b->ldir[0][0]*b->ldir[0][0] + b->ldir[0][1]*b->ldir[0][1]
+                       + b->ldir[0][2]*b->ldir[0][2]);
+        if (ln > 1e-4f) { sdx = b->ldir[0][0]/ln; sdy = b->ldir[0][1]/ln;
+                          sdz = b->ldir[0][2]/ln; }
+    }
+    float upN[3] = { 0, 1, 0 };
+    for (int iz = 0; iz < nz; iz++)
+    for (int iy = 0; iy < ny; iy++)
+    for (int ix = 0; ix < nx; ix++) {
+        float x = (nx > 1) ? (float)ix / (nx - 1) * w->world_w : 0;
+        float z = (nz > 1) ? (float)iz / (nz - 1) * w->world_d : 0;
+        float y = y0 + (ny > 1 ? (float)iy / (ny - 1) : 0) * (y1 - y0);
+        float g = static_ground(w, x, z);
+        if (y < g + 0.5f) y = g + 0.5f;            // зонд не под землёй
+        float ao = bl_sky_ao(w, x, y, z, upN);
+        float aok = 0.35f + 0.65f * ao;
+        float sunv = (b->lcount > 0) ? bl_sun_vis(w, x, y, z, sdx, sdy, sdz) : 1.0f;
+        float *o = &P[(((size_t)iz * ny + iy) * nx + ix) * 4];
+        for (int c = 0; c < 3; c++)               // всенаправленный ambient (t=0.5)
+            o[c] = (b->grd[c] + (b->sky[c] - b->grd[c]) * 0.5f) * b->amb[c] * aok;
+        o[3] = sunv;
+    }
+    FILE *f = fopen("map/baked/probes.bin", "wb");
+    if (f) {
+        int32_t hdr[4] = { 0x504C5246 /*'FRLP'*/, 1, 0, 0 };  // magic, ver
+        int32_t dims[3] = { nx, ny, nz };
+        float bounds[4] = { w->world_w, w->world_d, y0, y1 };
+        fwrite(hdr, sizeof(int32_t), 2, f);
+        fwrite(dims, sizeof(int32_t), 3, f);
+        fwrite(bounds, sizeof(float), 4, f);
+        fwrite(P, sizeof(float), (size_t)nx * ny * nz * 4, f);
+        fclose(f);
+        SDL_Log("Baked probes: %dx%dx%d -> map/baked/probes.bin", nx, ny, nz);
+    }
+    // Оставляем сетку в памяти для превью в этом же процессе.
+    free(s_probes);
+    s_probes = P; s_pnx = nx; s_pny = ny; s_pnz = nz;
+    s_py0 = y0; s_py1 = y1; s_pwx = w->world_w; s_pwz = w->world_d;
+}
+
+void terrain_light_bake(const WorldState *w, SunParams *sun,
+                        const RendererContext *rc)
+{
+    if (!w || !rc) return;
+    shobjs_build(w);   // статические окклюдеры (динамика исключена)
+
+    BakeLight b; memset(&b, 0, sizeof b);
+    b.w = w;
+    for (int c = 0; c < 3; c++) {
+        b.amb[c] = rc->ambient[c];
+        b.sky[c] = rc->sky_color[c];
+        b.grd[c] = rc->ground_color[c];
+    }
+    b.lcount = rc->light_count < SUN_MAX_LIGHTS ? rc->light_count : SUN_MAX_LIGHTS;
+    for (int i = 0; i < b.lcount; i++) {
+        for (int c = 0; c < 3; c++) {
+            b.ldir[i][c] = rc->light_dir[i][c];
+            b.lcol[i][c] = rc->light_color[i][c];
+        }
+        b.lint[i] = rc->light_intensity[i];
+    }
+    (void)sun;
+
+    size_t n = (size_t)BAKE_LM_W * BAKE_LM_H * 3;
+    size_t np = (size_t)BAKE_LM_W * BAKE_LM_H;
+    float *E = malloc(n * sizeof(float));
+    float *E2 = malloc(n * sizeof(float));
+    float *V = malloc(np * sizeof(float));      // дробная видимость солнца
+    float *V2 = malloc(np * sizeof(float));     // она же после размытия
+    unsigned char *rgb = malloc((size_t)BAKE_LM_W * BAKE_LM_H * 3);
+    if (!E || !E2 || !V || !V2 || !rgb) {
+        free(E); free(E2); free(V); free(V2); free(rgb); return;
+    }
+
+    Uint64 t0 = SDL_GetTicks();
+
+    // 1) Дробная видимость солнца (супервыборка по конусу) — отдельным полем.
+    b.V = V;
+    jobs_parallel_for(0, BAKE_LM_H, bake_sunvis_rows, &b);
+    // 2) Сепарабельное размытие поля тени (гаусс R=3) — мягкая полутень, снимает
+    //    «кисточкой» ступеньки. Горизонталь V->V2, вертикаль V2->V.
+    {
+        const int R = 3;
+        float wt[4] = { 0.383f, 0.242f, 0.061f, 0.006f };  // гаусс sigma~1.5
+        for (int j = 0; j < BAKE_LM_H; j++)
+            for (int i = 0; i < BAKE_LM_W; i++) {
+                float acc = V[(size_t)j*BAKE_LM_W + i] * wt[0], ws = wt[0];
+                for (int r = 1; r <= R; r++) {
+                    int a = i - r < 0 ? 0 : i - r;
+                    int c = i + r >= BAKE_LM_W ? BAKE_LM_W - 1 : i + r;
+                    acc += (V[(size_t)j*BAKE_LM_W + a] + V[(size_t)j*BAKE_LM_W + c]) * wt[r];
+                    ws += 2.0f * wt[r];
+                }
+                V2[(size_t)j*BAKE_LM_W + i] = acc / ws;
+            }
+        for (int j = 0; j < BAKE_LM_H; j++)
+            for (int i = 0; i < BAKE_LM_W; i++) {
+                float acc = V2[(size_t)j*BAKE_LM_W + i] * wt[0], ws = wt[0];
+                for (int r = 1; r <= R; r++) {
+                    int a = j - r < 0 ? 0 : j - r;
+                    int c = j + r >= BAKE_LM_H ? BAKE_LM_H - 1 : j + r;
+                    acc += (V2[(size_t)a*BAKE_LM_W + i] + V2[(size_t)c*BAKE_LM_W + i]) * wt[r];
+                    ws += 2.0f * wt[r];
+                }
+                V[(size_t)j*BAKE_LM_W + i] = acc / ws;
+            }
+    }
+    // 3) Прямой свет с дробной тенью из размытого поля V.
+    b.E = E;
+    b.V = V;
+    jobs_parallel_for(0, BAKE_LM_H, bake_direct_rows, &b);
+
+    // Один диффузный бонс (цвет земли перетекает в тень).
+    BounceJob bj;
+    bj.src = E; bj.dst = E2;
+    for (int c = 0; c < 3; c++) bj.tint[c] = rc->ground_color[c] * 0.85f;
+    jobs_parallel_for(0, BAKE_LM_H, bake_bounce_rows, &bj);
+
+    // Клампим итог к [0,1] (terrain.fs всё равно делает min(light,1)) -> RGB8.
+    for (size_t i = 0; i < n; i++) {
+        float v = E2[i]; if (v < 0) v = 0; if (v > 1) v = 1;
+        rgb[i] = (unsigned char)(v * 255.0f + 0.5f);
+    }
+    bake_ensure_dir();
+    if (png_save("map/baked/lightmap.png", BAKE_LM_W, BAKE_LM_H, rgb) == 0)
+        SDL_Log("Baked lightmap: %dx%d -> map/baked/lightmap.png in %llu ms",
+                BAKE_LM_W, BAKE_LM_H,
+                (unsigned long long)(SDL_GetTicks() - t0));
+
+    // Загрузить в GL сразу (превью в этом же процессе).
+    if (!s_baked_lm_tex) glGenTextures(1, &s_baked_lm_tex);
+    glBindTexture(GL_TEXTURE_2D, s_baked_lm_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, BAKE_LM_W, BAKE_LM_H, 0,
+                 GL_RGB, GL_UNSIGNED_BYTE, rgb);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Карта видимости солнца (sunvis): дробное поле V, но в 2× меньшем разрешении
+    // (2048x1152). Нужна режиму 1 (динамика) для ДАЛЬНИХ теней за пределами
+    // каскадов CSM — статичные тени деревьев/поля «подгружаются» на горизонте.
+    // Серая (R=G=B), пишем через RGB-png (grayscale достаточно для дали).
+    {
+        int sw = BAKE_LM_W / 2, sh = BAKE_LM_H / 2;
+        unsigned char *sv = malloc((size_t)sw * sh * 3);
+        if (sv) {
+            for (int j = 0; j < sh; j++)
+                for (int i = 0; i < sw; i++) {
+                    // 2x2 бокс-фильтр из полноразмерного V.
+                    float a = V[(size_t)(2*j)  * BAKE_LM_W + 2*i]
+                            + V[(size_t)(2*j)  * BAKE_LM_W + 2*i+1]
+                            + V[(size_t)(2*j+1)* BAKE_LM_W + 2*i]
+                            + V[(size_t)(2*j+1)* BAKE_LM_W + 2*i+1];
+                    unsigned char c = (unsigned char)(a * 0.25f * 255.0f + 0.5f);
+                    size_t o = ((size_t)j * sw + i) * 3;
+                    sv[o] = sv[o+1] = sv[o+2] = c;
+                }
+            png_save("map/baked/sunvis.png", sw, sh, sv);
+            if (!s_baked_sunvis_tex) glGenTextures(1, &s_baked_sunvis_tex);
+            glBindTexture(GL_TEXTURE_2D, s_baked_sunvis_tex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, sw, sh, 0,
+                         GL_RGB, GL_UNSIGNED_BYTE, sv);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            free(sv);
+        }
+    }
+
+    bake_probes(w, &b);
+    free(E); free(E2); free(V); free(V2); free(rgb);
+    s_baked_have = 1;
+}
+
+void terrain_baked_light_free(void)
+{
+    if (s_baked_lm_tex) { glDeleteTextures(1, &s_baked_lm_tex); s_baked_lm_tex = 0; }
+    if (s_baked_sunvis_tex) { glDeleteTextures(1, &s_baked_sunvis_tex); s_baked_sunvis_tex = 0; }
+    free(s_probes); s_probes = NULL;
+    s_pnx = s_pny = s_pnz = 0;
+    s_baked_have = 0;
+}
+
+int terrain_baked_light_have(void) { return s_baked_have && s_baked_lm_tex; }
+
+int terrain_baked_sunvis_have(void) { return s_baked_sunvis_tex != 0; }
+
+int terrain_baked_probes_have(void) { return s_probes != NULL; }
+
+int terrain_baked_light_load(const WorldState *w)
+{
+    terrain_baked_light_free();
+    unsigned int sz = 0;
+    unsigned char *png = resources_read_file("baked/lightmap.png", &sz);
+    if (!png) return 0;
+    int lw, lh, ch;
+    unsigned char *px = stbi_load_from_memory(png, (int)sz, &lw, &lh, &ch, 3);
+    free(png);
+    if (!px) return 0;
+    glGenTextures(1, &s_baked_lm_tex);
+    glBindTexture(GL_TEXTURE_2D, s_baked_lm_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, lw, lh, 0,
+                 GL_RGB, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    stbi_image_free(px);
+    s_baked_have = 1;
+    SDL_Log("Baked lightmap loaded (%dx%d)", lw, lh);
+
+    // Карта видимости солнца (для дальних теней в режиме 1). Необязательна.
+    unsigned int svsz = 0;
+    unsigned char *svpng = resources_read_file("baked/sunvis.png", &svsz);
+    if (svpng) {
+        int vw, vh, vch;
+        unsigned char *vpx = stbi_load_from_memory(svpng, (int)svsz, &vw, &vh, &vch, 3);
+        free(svpng);
+        if (vpx) {
+            glGenTextures(1, &s_baked_sunvis_tex);
+            glBindTexture(GL_TEXTURE_2D, s_baked_sunvis_tex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, vw, vh, 0,
+                         GL_RGB, GL_UNSIGNED_BYTE, vpx);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            stbi_image_free(vpx);
+            SDL_Log("Baked sunvis loaded (%dx%d)", vw, vh);
+        }
+    }
+
+    // Сетка зондов (не критична: без неё объекты просто освещаются как раньше).
+    unsigned int psz = 0;
+    unsigned char *pb = resources_read_file("baked/probes.bin", &psz);
+    if (pb && psz >= 36) {
+        const unsigned char *p = pb;
+        int32_t magic, ver, dims[3]; float bounds[4];
+        memcpy(&magic, p, 4); p += 4;
+        memcpy(&ver, p, 4); p += 4;
+        memcpy(dims, p, 12); p += 12;
+        memcpy(bounds, p, 16); p += 16;
+        size_t need = (size_t)dims[0] * dims[1] * dims[2] * 4;
+        if (magic == 0x504C5246 && ver == 1 &&
+            dims[0] > 0 && dims[0] <= 4096 &&
+            dims[1] > 0 && dims[1] <= 4096 &&
+            dims[2] > 0 && dims[2] <= 4096 &&
+            psz >= 36 + need * sizeof(float)) {
+            s_probes = malloc(need * sizeof(float));
+            if (s_probes) {
+                memcpy(s_probes, p, need * sizeof(float));
+                s_pnx = dims[0]; s_pny = dims[1]; s_pnz = dims[2];
+                s_pwx = bounds[0]; s_pwz = bounds[1];
+                s_py0 = bounds[2]; s_py1 = bounds[3];
+                SDL_Log("Baked probes loaded (%dx%dx%d)", s_pnx, s_pny, s_pnz);
+            }
+        }
+    }
+    free(pb);
+    (void)w;
+    return 1;
+}
+
+void terrain_baked_probe(float x, float y, float z, float out[4])
+{
+    out[0] = out[1] = out[2] = 0.5f; out[3] = 1.0f;   // нейтраль без сетки
+    if (!s_probes || s_pnx < 2 || s_pnz < 2) return;
+    float fx = (x / (s_pwx > 0 ? s_pwx : 1)) * (s_pnx - 1);
+    float fz = (z / (s_pwz > 0 ? s_pwz : 1)) * (s_pnz - 1);
+    float fy = (s_py1 > s_py0) ? (y - s_py0) / (s_py1 - s_py0) * (s_pny - 1) : 0;
+    if (fx < 0) fx = 0;
+    if (fx > s_pnx - 1) fx = s_pnx - 1;
+    if (fz < 0) fz = 0;
+    if (fz > s_pnz - 1) fz = s_pnz - 1;
+    if (fy < 0) fy = 0;
+    if (fy > s_pny - 1) fy = s_pny - 1;
+    int x0 = (int)fx, y0i = (int)fy, z0 = (int)fz;
+    int x1 = x0 < s_pnx - 1 ? x0 + 1 : x0;
+    int y1i = y0i < s_pny - 1 ? y0i + 1 : y0i;
+    int z1 = z0 < s_pnz - 1 ? z0 + 1 : z0;
+    float tx = fx - x0, ty = fy - y0i, tz = fz - z0;
+    for (int c = 0; c < 4; c++) {
+        #define PB(ix,iy,iz) s_probes[(((size_t)(iz)*s_pny+(iy))*s_pnx+(ix))*4+c]
+        float c00 = PB(x0,y0i,z0) + (PB(x1,y0i,z0) - PB(x0,y0i,z0)) * tx;
+        float c10 = PB(x0,y1i,z0) + (PB(x1,y1i,z0) - PB(x0,y1i,z0)) * tx;
+        float c01 = PB(x0,y0i,z1) + (PB(x1,y0i,z1) - PB(x0,y0i,z1)) * tx;
+        float c11 = PB(x0,y1i,z1) + (PB(x1,y1i,z1) - PB(x0,y1i,z1)) * tx;
+        #undef PB
+        float c0 = c00 + (c10 - c00) * ty;
+        float c1 = c01 + (c11 - c01) * ty;
+        out[c] = c0 + (c1 - c0) * tz;
+    }
+}
+
+
 // текстура видимости неба: RG8. R = 255 = открытое небо
 // (дождь/снег попадают), G = 255 = под крышей (сухо).
 #define WETNESS_MASK_W 512

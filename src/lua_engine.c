@@ -383,6 +383,43 @@ static int l_teleport(lua_State *ls)
     return 0;
 }
 
+// --- Здоровье игрока (HP) ---
+// engine.player_hp() -> hp, max, dead
+static int l_player_hp(lua_State *ls)
+{
+    Game *g = game_instance();
+    Health *h = g ? &g->player.hp : NULL;
+    lua_pushnumber(ls, h ? h->hp : 0.0);
+    lua_pushnumber(ls, h ? h->max : 0.0);
+    lua_pushboolean(ls, h ? h->dead : 0);
+    return 3;
+}
+
+// engine.player_damage(n) — нанести игроку урон n
+static int l_player_damage(lua_State *ls)
+{
+    Game *g = game_instance();
+    if (g) health_damage(&g->player.hp, (float)luaL_checknumber(ls, 1));
+    return 0;
+}
+
+// engine.player_heal(n) — вылечить игрока на n (без n — до полного)
+static int l_player_heal(lua_State *ls)
+{
+    Game *g = game_instance();
+    if (g) health_heal(&g->player.hp,
+                        (float)luaL_optnumber(ls, 1, g->player.hp.max));
+    return 0;
+}
+
+// engine.player_set_max(n) — задать максимум HP (долить до полного)
+static int l_player_set_max(lua_State *ls)
+{
+    Game *g = game_instance();
+    if (g) health_set_max(&g->player.hp, (float)luaL_checknumber(ls, 1), 1);
+    return 0;
+}
+
 // engine.msg(text) — сообщение карты по центру экрана (как у триггеров)
 static int l_msg(lua_State *ls)
 {
@@ -851,6 +888,10 @@ static const luaL_Reg engine_lib[] = {
     { "camera",        l_camera },
     { "terrain_height", l_terrain_height },
     { "teleport",      l_teleport },
+    { "player_hp",     l_player_hp },
+    { "player_damage", l_player_damage },
+    { "player_heal",   l_player_heal },
+    { "player_set_max", l_player_set_max },
     { "after",         l_after },
     { "msg",           l_msg },
     { "time",          l_time },

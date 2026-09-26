@@ -32,6 +32,11 @@ int renderer_vh(void);
 // Устанавливает размер окна в пикселях (вызывать при старте и на ресайз).
 void renderer_set_viewport(int vw, int vh);
 
+// Чтение кадра для скриншотов (RGB, 3 байта/пиксель, снизу вверх).
+// На GLES читает scene-target: default framebuffer у EGL-драйверов
+// отдаёт чёрное, хотя на экран после swap картинка идёт.
+void renderer_read_pixels(unsigned char *px, int vw, int vh);
+
 // --- Жизненный цикл ------------------------------------------------------------
 // Создаёт FBO bloom'а и тумана (размер окна). Вызывать при загрузке мира.
 void renderer_setup(const WorldState *w, int vw, int vh);

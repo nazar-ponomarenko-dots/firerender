@@ -944,6 +944,8 @@ void console_init(void)
                      "масштаб рендера сцены (1 = полное разрешение окна)");
     cvar_register_ex("r_simple_render", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "упрощённый рендер: пакет фпс-ухищрений для слабых GPU");
+    cvar_register_ex("r_baked_light", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "читать запечённый свет карты (map/baked), если он есть");
     cvar_register_ex("r_lowend_profile", 0.0f, 0.0f, 2.0f, CVAR_ARCHIVE,
                      "профиль: 0=balanced, 1=старый смартфон, 2=Celeron iGPU");
     cvar_register_ex("r_dynamic_resolution", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,

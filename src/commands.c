@@ -327,7 +327,7 @@ static void take_shot_png(const char *path, int vw, int vh)
 {
     unsigned char *px = malloc((size_t)vw * vh * 3);
     if (!px) return;
-    glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px);
+    renderer_read_pixels(px, vw, vh);
     // Строки GL идут снизу вверх — переворачиваем для PNG
     size_t row = (size_t)vw * 3;
     unsigned char *flip = malloc(row * (size_t)vh);
@@ -1139,4 +1139,90 @@ void cmd_matlist(const char *args)
                 m->tint[0], m->tint[1], m->tint[2], m->alpha, m->blend,
                 m->tile[0], m->tile[1]);
     }
+}
+
+// --- Здоровье (HP) -------------------------------------------------------------
+void cmd_hp(const char *args)
+{
+    (void)args;
+    Game *g = game_instance();
+    if (!g) return;
+    const Health *h = &g->player.hp;
+    console_print("HP %.0f/%.0f  реген %.0f/с  god %s%s",
+                  h->hp, h->max, h->regen, h->god ? "ON" : "OFF",
+                  h->dead ? "  [МЁРТВ]" : "");
+}
+
+void cmd_hurt(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    float amt = 25.0f;
+    if (args && args[0]) sscanf(args, "%f", &amt);
+    float took = health_damage(&g->player.hp, amt);
+    console_print("hurt %.0f -> HP %.0f", took, g->player.hp.hp);
+}
+
+void cmd_heal(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    float amt = g->player.hp.max;   // без аргумента — до полного
+    if (args && args[0]) sscanf(args, "%f", &amt);
+    health_heal(&g->player.hp, amt);
+    console_print("heal -> HP %.0f", g->player.hp.hp);
+}
+
+void cmd_god(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    if (cvar_get("sv_cheats") < 0.5f) {
+        console_print("god: требуется sv_cheats 1");
+        return;
+    }
+    int on = -1;
+    if (args && args[0]) { int v; if (sscanf(args, "%d", &v) == 1) on = v ? 1 : 0; }
+    g->player.hp.god = (on < 0) ? !g->player.hp.god : on;
+    console_print("god: %s", g->player.hp.god ? "ON" : "OFF");
+}
+
+void cmd_kill(const char *args)
+{
+    (void)args;
+    Game *g = game_instance();
+    if (!g) return;
+    health_kill(&g->player.hp);
+}
+
+void cmd_sethp(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    if (cvar_get("sv_cheats") < 0.5f) {
+        console_print("sethp: требуется sv_cheats 1");
+        return;
+    }
+    float v = 0;
+    if (!args || sscanf(args, "%f", &v) != 1) {
+        console_print("usage: sethp <значение>");
+        return;
+    }
+    Health *h = &g->player.hp;
+    if (h->dead && v > 0.0f) health_revive(h);
+    h->hp = v < 0.0f ? 0.0f : (v > h->max ? h->max : v);
+    console_print("HP = %.0f", h->hp);
+}
+
+void cmd_maxhp(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    float v = 0;
+    if (!args || sscanf(args, "%f", &v) != 1 || v <= 0.0f) {
+        console_print("usage: maxhp <значение>");
+        return;
+    }
+    health_set_max(&g->player.hp, v, 1);
+    console_print("max HP = %.0f (долит до полного)", g->player.hp.max);
 }

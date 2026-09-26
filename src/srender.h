@@ -131,8 +131,41 @@ typedef enum {
     SR_BLEND_ONE_MINUS_SRC_ALPHA,
 } SrBlendFac;
 
+// --- Рендерные API (бэкенды) ---------------------------------------------------
+// Движок работает через sr_* — сами бэкенды подключаются за ним. Сегодня
+// реализован GL/GLES (srender_gl.c); Vulkan и Metal — зачатки: каркас выбора
+// и зонды есть, реализация — поэтапная миграция (см. ROADMAP в заголовке).
+//
+// План подключения нового API (например Vulkan):
+//   1. src/srender_vk.c реализует те же sr_* функции поверх VkInstance/
+//      VkDevice (или переиспользует диспетчер из srender_gl.c, если мы
+//      оставим GL-именование состояний).
+//   2. Шейдеры GLSL 330 компилируются в SPIR-V (glslc/glslangValidator,
+//      цель: --target-env=vulkan1.1); Metal — транслируется MSL-бэкендом
+//      SPIRV-Cross (или MoltenVK, который ест SPIR-V напрямую).
+//   3. Поверхность окна — SDL_Vulkan_CreateSurface / SDL_Metal_CreateView.
+//   4. main.c выбирает API через sr_api_available() + cvar r_backend.
+typedef enum {
+    SR_API_GL = 0,       // desktop OpenGL (сегодня: основной бэкенд)
+    SR_API_GLES,         // OpenGL ES 3.x (сегодня: low-end/Android профиль)
+    SR_API_VULKAN,       // Vulkan 1.1+ (заготовка)
+    SR_API_METAL,        // Metal 2 через MSL или MoltenVK (заготовка)
+    SR_API_NULL,         // no-op заглушка (headless-серверы, тесты логики)
+    SR_API_COUNT
+} SrApi;
+
+// Человекочитаемое имя ("OpenGL", "Vulkan", ...).
+const char *sr_api_name(SrApi api);
+// 1 = API скомпилирован в движок и может быть выбран. Внутри также
+// учитывает платформу (Metal — только __APPLE__ и т.п.).
+int  sr_api_available(SrApi api);
+// SDL_Log-отчёт по всем API (вызывает main.c при старте).
+void sr_api_report(void);
+
 // --- Жизненный цикл ----------------------------------------------------------
 // Создать девайс над ТЕКУЩИМ контекстом (GL-функции уже загружены).
+// Будущее: SrDevice *sr_create_api(SrApi api, void *native_surface) —
+// единая фабрика всех бэкендов; пока GL/GLES создаётся здесь.
 SrDevice *sr_create(void);
 void      sr_destroy(SrDevice *d);
 const SrCaps *sr_caps(const SrDevice *d);

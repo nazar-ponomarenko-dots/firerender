@@ -117,6 +117,13 @@ static const ConCmdDesc s_cmds[] = {
     { "attach", "attach sprite|glb|mesh <N> <кость|-> <файл> [...] | attach list|bones <N>", cmd_attach },
     { "sprite", "sprite <png> [x y z] [w h] [flat] — спрайт в мире", cmd_sprite },
     { "cubemap_capture", "cubemap_capture [x y z] [size] — захват кубомапа отражений (6 PNG в cubemaps/)", cmd_cubemap_capture },
+    { "hp",       "hp — статус здоровья игрока",                cmd_hp },
+    { "hurt",     "hurt [N] — нанести урон (по умолч. 25)",     cmd_hurt },
+    { "heal",     "heal [N] — вылечить (без N — до полного)",   cmd_heal },
+    { "god",      "god [0/1] — бессмертие (нужен sv_cheats)",   cmd_god },
+    { "kill",     "kill — мгновенная смерть игрока",            cmd_kill },
+    { "sethp",    "sethp <N> — задать HP (нужен sv_cheats)",    cmd_sethp },
+    { "maxhp",    "maxhp <N> — задать максимум HP",             cmd_maxhp },
 };
 
 void cmdreg_register_all(void)

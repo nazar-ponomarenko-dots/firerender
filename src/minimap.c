@@ -77,12 +77,10 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
 
 void minimap_node_render(SceneNode *n, float dt)
 {
-    (void)dt;   // обновление привязано к счётчику кадров, а не ко времени
-    // Обновление раз в 3 кадра: маркер игрока и карта почти статичны,
-    // а каждый квад — перезаливка VBO. На глаз — uninterrupted motion.
-    static int s_frame = 0;
-    if (++s_frame < 3) return;
-    s_frame = 0;
+    (void)dt;   // обновление привязано к кадру, не ко времени
+    // Рисуем КАЖДЫЙ кадр: сцена перерисовывается целиком, пропуск кадров
+    // (было «раз в 3») приводил к мерцанию — карта исчезала на пропущенных.
+    // Квад с перезаливкой 16 вершин копеечный, экономить нечего.
     MinimapParams *p = n->params;
     if (!p->visible) return;        // клавиша G — карта скрыта
     const RendererContext *rc = p->rc;

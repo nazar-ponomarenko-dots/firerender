@@ -487,8 +487,12 @@ GlbModel *glb_parse_file(const char *path)
                         float p[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
                         read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, p);
                         mat4_transform_point(world, p, p);
-                        if (an) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
-                        if (au) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
+                        // NORMAL/UV индексируются тем же v, но acc_fits проверял
+                        // их по СВОЕМУ count. Битый GLB с count < POSITION.count
+                        // иначе читал бы за пределами bin-чанка (OOB) — читаем
+                        // атрибут только в пределах его собственного count.
+                        if (an && v < an->count) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
+                        if (au && v < au->count) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
                         // БЕЗ флипа V: stb_image кладёт верхнюю строку
                         // картинки в t=0, glTF v=0 — тоже верх (см. glb_anim)
                         if (!b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1])) {
@@ -912,6 +916,7 @@ void glb_node_render(SceneNode *n, float dt)
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, p->rc);
+    scene_uniforms_probe(&p->su, model[12], model[13], model[14]);
     glUniformMatrix4fv(p->u_model, 1, GL_FALSE, model);
     if (p->u_tex >= 0) glUniform1i(p->u_tex, 0);
 

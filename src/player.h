@@ -13,6 +13,7 @@
 #ifndef PLAYER_H
 #define PLAYER_H
 #include "camera.h"
+#include "health.h"
 
 typedef struct {
     // Стартовая позиция (спавн) — из map.json, для пункта «Новая игра»
@@ -23,6 +24,7 @@ typedef struct {
     float save_yaw, save_pitch;
     char save_map[64];
     int pending_spawn;       // телепорт после загрузки мира (load из меню)
+    Health hp;               // здоровье игрока (health.h)
 } Player;
 
 // Обнуляет состояние, дефолтные спавн-углы (по умолчанию yaw: PI).

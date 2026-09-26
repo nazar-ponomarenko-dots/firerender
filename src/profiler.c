@@ -57,6 +57,7 @@ void prof_reset(void)
         g_prof_draws = 0;
         g_prof_verts = 0;
         g_prof_tris = 0;
+        g_prof_state_skipped = 0;
         s_parity ^= 1;
         return;
     }
@@ -64,6 +65,7 @@ void prof_reset(void)
     g_prof_draws = 0;
     g_prof_verts = 0;
     g_prof_tris = 0;
+    g_prof_state_skipped = 0;
     if (s_gpu_ok < 0) gpu_init();
     // читаем результат query, начатой 2 кадра назад
     int prev = s_parity ^ 1;

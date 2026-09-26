@@ -348,7 +348,7 @@ static int menu_audio(void)
 // тоже дороги (все проходы фуллскрин — цена растёт от пикселей).
 //                 msaa gi  shadow wheat grass dand  ssr  bloom clouds fog  gi_sc gi_rays gi_steps rscale vegvis minpix terrLOD simple falloff cheapfog ldr
 static const float GFX_PRESETS[][21] = {
-    { 0,    0,   3,     15,   1.0f, 0.0f, 0,   0,    0,     2,   0.25f, 4,  6,  1.0f,  0.45f, 3,     60,   1, 0.5f,  1, 1 }, // КАРТОШКА
+    { 0,    0,   3,     15,   1.0f, 0.0f, 0,   0,    0,     2,   0.25f, 4,  6,  1.0f,  0.45f, 4,     60,   1, 0.5f,  1, 1 }, // КАРТОШКА
     { 4,    1,   1,     80,   5.0f, 0.05f, 0,  1,    0.15f, 1,   0.5f,  6,  10, 1.0f,  1.0f,  1,     0,    0, 1.0f,  0, 0 }, // СРЕДНИЕ
     { 8,    1,   1,     140,  10.0f, 0.10f, 1,  1,    0.30f, 1,   0.5f,  8,  12, 1.0f,  1.0f,  1,     0,    0, 1.0f,  0, 0 }, // УЛЬТРА
 };
@@ -366,6 +366,10 @@ static void simple_render_apply(int on)
     cvar_set("r_render_scale", 1.0f);
 #endif
     cvar_set("r_scene_ldr", on ? 1.0f : 0.0f);
+    // Z-prepass травы срезает overdraw в самом дорогом шейдере кадра —
+    // картинка идентична, включаем в пакет «Упрощённый рендер» (КАРТОШКА,
+    // MSAA off). На СРЕДНИХ/УЛЬТРА (MSAA on) сам проход не активируется.
+    cvar_set("r_veg_zprepass", on ? 1.0f : 0.0f);
     if (on) {
 #ifdef __ANDROID__
         // Дико упрощённо, но не пусто: поле редкое, но кусты шире раньше (lod_shift)
@@ -374,15 +378,17 @@ static void simple_render_apply(int on)
         cvar_set("r_terr_detail_dist", 30.0f);
         cvar_set("r_veg_falloff_mult", 0.32f);
         cvar_set("r_veg_regen_budget", 3.0f);
+        cvar_set("r_veg_dyn_mult", 0.6f);   // грузим траву на 60% радиуса
         cvar_set("r_veg_lod_shift", 1.5f);
         cvar_set("r_wheat_density", 6.0f);
         cvar_set("r_grass_density", 0.6f);
 #else
         cvar_set("r_veg_vis_mult", 0.45f);
-        cvar_set("r_veg_minpix", 3.0f);
+        cvar_set("r_veg_minpix", 4.0f);     // отсекаем субпиксельные спрайты жёстче
         cvar_set("r_terr_detail_dist", 60.0f);
         cvar_set("r_veg_falloff_mult", 0.5f);
         cvar_set("r_veg_regen_budget", 6.0f);
+        cvar_set("r_veg_dyn_mult", 0.7f);   // динамическая трава на 70% радиуса (48→34 м)
         cvar_set("r_veg_lod_shift", 0.0f);
 #endif
     } else {
@@ -390,6 +396,7 @@ static void simple_render_apply(int on)
         cvar_set("r_veg_minpix", 1.0f);
         cvar_set("r_terr_detail_dist", 0.0f);
         cvar_set("r_veg_falloff_mult", 1.0f);
+        cvar_set("r_veg_dyn_mult", 1.0f);
         // Плотные чанки Ultra генерируются постепенно: прежние 4096 разрешали
         // всю очередь в одном кадре и давали регулярные стоп-кадры при полёте.
         cvar_set("r_veg_regen_budget", 2.0f);

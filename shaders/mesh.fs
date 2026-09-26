@@ -52,6 +52,9 @@ uniform int uSpotCount;
 uniform vec3 uAmbient;
 uniform vec3 uSkyColor;
 uniform vec3 uGroundColor;
+uniform vec3 uProbeAmb;          // запечённый ambient в точке меша (с переотражениями)
+uniform float uProbeSun;         // запечённая видимость солнца (0..1) от статичных преград
+uniform float uProbeOn;          // 1 = использовать запечённый свет
 uniform vec3 uFogColor;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -84,25 +87,24 @@ float sample_cascade(vec3 wp, int c) {
     return cascade_tap(uShadowMap3, uShadowBias[3], suv);
 }
 
-#define SHADOW_BOX0 4.0f
-#define SHADOW_BOX1 8.0f
-#define SHADOW_BOX2 48.0f
-#define SHADOW_LIMIT 256.0f
+// границы каскадов — uShadowBox[4]: РАДИУС покрытия каскада (половина
+// стороны бокса; бокс центрирован на камере) = {4,8,48,256}.
+uniform float uShadowBox[4];
 
 float mesh_shadow(vec3 wp) {
     if (uShadowOn < 0.5) return 1.0;
     float dist = distance(uCamPos, wp);
-    if (dist >= SHADOW_LIMIT) return 1.0;
-    if (dist < SHADOW_BOX0) {
-        float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
+    if (dist >= uShadowBox[3]) return 1.0;
+    if (dist < uShadowBox[0]) {
+        float t = smoothstep(uShadowBox[0] * 0.8, uShadowBox[0], dist);
         return mix(sample_cascade(wp, 0), sample_cascade(wp, 1), t);
     }
-    if (dist < SHADOW_BOX1) {
-        float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
+    if (dist < uShadowBox[1]) {
+        float t = smoothstep(uShadowBox[1] * 0.8, uShadowBox[1], dist);
         return mix(sample_cascade(wp, 1), sample_cascade(wp, 2), t);
     }
-    if (dist < SHADOW_BOX2) {
-        float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
+    if (dist < uShadowBox[2]) {
+        float t = smoothstep(uShadowBox[2] * 0.8, uShadowBox[2], dist);
         return mix(sample_cascade(wp, 2), sample_cascade(wp, 3), t);
     }
     return sample_cascade(wp, 3);
@@ -141,7 +143,11 @@ void main() {
     }
 
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
+    // запечённый свет: берём ambient из бейка (переотражения+AO), но сохраняем
+    // лёгкую полусферную направленность по нормали (верх чуть светлее низа).
+    if (uProbeOn > 0.5) amb = uProbeAmb * (0.7 + 0.3 * (N.y * 0.5 + 0.5));
     float shadow = mesh_shadow(vWorldPos);
+    float sunvis = (uProbeOn > 0.5) ? uProbeSun : 1.0;
 
     vec3 light = amb * mix(0.25, 1.0, shadow);
     vec3 spec = vec3(0.0);
@@ -152,7 +158,7 @@ void main() {
         // плавный, не режет силуэт жёстким чёрным срезом.
         float half_ = raw * 0.5 + 0.5;
         float d = smoothstep(0.08, 1.0, half_) * (0.55 + 0.45 * max(raw, 0.0));
-        float sh = (i == 0) ? shadow : 1.0;
+        float sh = (i == 0) ? shadow * sunvis : 1.0;
         light += uLightColor[i] * uLightIntensity[i] * d * sh;
         if (uSpecular > 0.001) {
             // Двухступенчатый блик: узкий острый + мягкая широкая часть.

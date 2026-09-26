@@ -38,6 +38,7 @@
 #include "water.h"
 #include "world.h"
 #include "fx.h"
+#include "jobs.h"
 
 #include "stb_image.h"
 #include <limits.h>
@@ -130,6 +131,8 @@ static int veg_pick_kind(unsigned int *rng)
 }
 #define VEG_CHUNK       16.0f     // сторона чанка в метрах
 #define VEG_REGEN_TOL    3.0f     // пересоздать чанк, если плотность сменилась больше
+#define VEG_REGEN_REL    0.25f    // ...или на эту ДОЛЮ плотности (пшеница 140 vs трава 1.2)
+#define VEG_REGEN_MIN    0.30f    // нижний пол относительного допуска (шт/м²)
 // Радиус видимости СТАТИЧЕСКОГО слоя вокруг камеры: дальше спрайты меньше
 // пикселя и не видны, а их "вид" несёт текстура земли (наштампованная
 // трава) и тон поля. С ростом высоты камеры радиус растёт (обзор с горы).
@@ -166,6 +169,32 @@ static int g_chunk_cam[2] = { INT_MAX, INT_MAX };
 // veg_update, остальные — в следующих кадрах. На 2-ядерных CPU пачка
 // пересозданий за один кадр = фриз; добор убирает рывки. >0 = есть хвост.
 static int g_regen_pending = 0;
+// Предиктивная подгрузка: чанки густеют не когда камера ПЕРЕСЕКАЕТ их границу
+// (тогда трава/поле «выскакивают под носом»), а заранее — плотность считается
+// по расстоянию до ОТРЕЗКА пути [камера .. упреждающая точка впереди по
+// движению]. Пока стоим (offset=0) — поведение как раньше. Обновляется в
+// veg_update из скорости камеры.
+static float g_look_bx = 0.0f, g_look_bz = 0.0f;  // упреждающая точка (мир)
+static float g_prev_cam[3] = { 0, 0, 0 };
+static int   g_prev_cam_ok = 0;
+// Расстояние от точки (px,pz) до отрезка [(ax,az)..(bx,bz)] в плоскости XZ.
+// Трава вдоль пути движения густеет заранее, у ног (a) и по бокам — как есть.
+static float veg_path_dist(float px, float pz, float ax, float az,
+                           float bx, float bz)
+{
+    float vx = bx - ax, vz = bz - az;
+    float len2 = vx * vx + vz * vz;
+    if (len2 < 1e-4f) {   // стоим: обычное расстояние до камеры
+        float dx = px - ax, dz = pz - az;
+        return sqrtf(dx * dx + dz * dz);
+    }
+    float t = ((px - ax) * vx + (pz - az) * vz) / len2;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    float cx = ax + vx * t, cz = az + vz * t;
+    float dx = px - cx, dz = pz - cz;
+    return sqrtf(dx * dx + dz * dz);
+}
+
 // VAO растительности и массив спрайтов — нужны теневому проходу (shadow.c)
 static GLuint g_veg_vao[4];
 static GLuint g_veg_tex = 0;
@@ -204,6 +233,7 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc);
 static GLuint s_shadowveg_prog = 0;
 static GLint u_veg_viewproj, u_veg_veg, u_veg_thin, u_veg_time;
 static GLint u_veg_campos, u_veg_dyn, u_veg_walk, u_veg_windboost;
+static GLint u_veg_grassfall = -1, u_veg_grassfloor = -1;
 static GLint u_cull_lodshift = -1;
 static VegParams *s_veg = NULL;
 
@@ -220,6 +250,8 @@ static void veg_prog_init(VegParams *p)
     u_veg_dyn      = glGetUniformLocation(s_shadowveg_prog, "uDyn");
     u_veg_walk     = glGetUniformLocation(s_shadowveg_prog, "uWalk");
     u_veg_windboost = glGetUniformLocation(s_shadowveg_prog, "uWindBoost");
+    u_veg_grassfall = glGetUniformLocation(s_shadowveg_prog, "uGrassFall");
+    u_veg_grassfloor = glGetUniformLocation(s_shadowveg_prog, "uGrassFloorFrac");
 
     scene_uniforms_init(&p->su, prog);
     p->u_dyn      = glGetUniformLocation(prog, "uDyn");
@@ -227,6 +259,10 @@ static void veg_prog_init(VegParams *p)
     p->u_walk     = glGetUniformLocation(prog, "uWalk");
     p->u_windboost = glGetUniformLocation(prog, "uWindBoost");
     p->u_lodshift = glGetUniformLocation(prog, "uLodShift");
+    p->u_depthonly = glGetUniformLocation(prog, "uDepthOnly");
+    p->u_simple   = glGetUniformLocation(prog, "uSimple");
+    p->u_grassfall = glGetUniformLocation(prog, "uGrassFall");
+    p->u_grassfloor = glGetUniformLocation(prog, "uGrassFloorFrac");
 
     // Статичные uniform'ы растительности
     glUseProgram(prog);
@@ -351,13 +387,23 @@ static void veg_gen_chunk(const WorldState *w, int cx, int cy, float camx, float
                           int *gn, int *wn, float *dgo, float *dwo)
 {
     float x0 = (float)cx * VEG_CHUNK, z0 = (float)cy * VEG_CHUNK;
-    float r = static_run ? 1e9f : sqrtf((x0 + 8.0f - camx) * (x0 + 8.0f - camx)
-                                      + (z0 + 8.0f - camz) * (z0 + 8.0f - camz));
+    // Расстояние до пути движения (камера→упреждение), а не только до камеры —
+    // чанки впереди густеют заранее, до подхода.
+    float r = static_run ? 1e9f
+              : veg_path_dist(x0 + 8.0f, z0 + 8.0f, camx, camz,
+                              g_look_bx, g_look_bz);
     // Плотности у камеры — из cvar'ов (меню «Графика»). Одуванчики — своя
     // малая плотность, добавляется СВЕРХ травы (не ест её долю).
-    float dg_g = veg_density(r, cvar_get("r_grass_density"), s_grass_floor);
-    float dg_d = veg_density(r, cvar_get("r_dandelion_density"),
-                             s_dandelion_floor);
+    // ТРАВА: в динамическом слое плотность ПОЛНАЯ по всему радиусу — спад к
+    // краю делает шейдер (wheat.vs, плавный hash-keep по дистанции). Так чанк
+    // не пересобирается при подходе камеры (только загрузка/занятость), и
+    // «ступеньки» подгрузки не видны. Статика (static_run) — как была (floor).
+    float dg_g = static_run
+        ? veg_density(r, cvar_get("r_grass_density"), s_grass_floor)
+        : cvar_get("r_grass_density");
+    float dg_d = static_run
+        ? veg_density(r, cvar_get("r_dandelion_density"), s_dandelion_floor)
+        : cvar_get("r_dandelion_density");
     float dw = veg_density(r, cvar_get("r_wheat_density"), s_wheat_floor);
     float dg = dg_g + dg_d;                      // вся травяная группа
     if (dwo) *dwo = dw;
@@ -474,6 +520,65 @@ static int *g_sc_off_g, *g_sc_off_w;   // префикс-суммы (базы д
 static float *g_sc_cx, *g_sc_cz;       // центры супер-чанков (метры)
 static int g_has_base_instance;        // есть ли ARB_base_instance
 
+// Параллельная генерация статика (jobs): супер-чанки независимы, поэтому
+// оба прохода — счёт и заливка — режутся по индексу супер-чанка на все ядра.
+// Порядок экземпляров внутри супер-чанка (dy,dx) и базы из префикс-сумм те же,
+// что в последовательной версии => буфер БАЙТ-В-БАЙТ идентичен. Каждый вызов
+// fn держит свой scratch (диапазон обрабатывается последовательно внутри fn).
+typedef struct { const WorldState *world; } VegGenCtx;
+
+static void veg_static_count_range(int s0, int s1, void *ud)
+{
+    VegGenCtx *ctx = (VegGenCtx *)ud;
+    float *sg = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+    float *sw = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+    if (!sg || !sw) { free(sg); free(sw); return; }   // счётчики останутся 0
+    for (int s = s0; s < s1; s++) {
+        int sx = s % g_sc_gw, sy = s / g_sc_gw;
+        g_sc_cx[s] = (float)(sx * VEG_SUPER) * VEG_CHUNK + VEG_SUPER * VEG_CHUNK * 0.5f;
+        g_sc_cz[s] = (float)(sy * VEG_SUPER) * VEG_CHUNK + VEG_SUPER * VEG_CHUNK * 0.5f;
+        int g = 0, w = 0;
+        for (int dy = 0; dy < VEG_SUPER; dy++)
+            for (int dx = 0; dx < VEG_SUPER; dx++) {
+                int i = sx * VEG_SUPER + dx, j = sy * VEG_SUPER + dy;
+                if (i >= g_map_w || j >= g_map_d) continue;
+                int gn = 0, wn = 0;
+                veg_gen_chunk(ctx->world, i, j, 0, 0, true, sg, sw, &gn, &wn, NULL, NULL);
+                g += gn; w += wn;
+            }
+        g_sc_cnt_g[s] = g;
+        g_sc_cnt_w[s] = w;
+    }
+    free(sg); free(sw);
+}
+
+static void veg_static_fill_range(int s0, int s1, void *ud)
+{
+    VegGenCtx *ctx = (VegGenCtx *)ud;
+    float *sg = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+    float *sw = malloc((size_t)VEG_CAND_CAP * 12 * sizeof(float));
+    if (!sg || !sw) { free(sg); free(sw); return; }
+    for (int s = s0; s < s1; s++) {
+        int sx = s % g_sc_gw, sy = s / g_sc_gw;
+        int pos_g = g_sc_off_g[s], pos_w = g_sc_off_w[s];   // базы из префикс-сумм
+        for (int dy = 0; dy < VEG_SUPER; dy++)
+            for (int dx = 0; dx < VEG_SUPER; dx++) {
+                int i = sx * VEG_SUPER + dx, j = sy * VEG_SUPER + dy;
+                if (i >= g_map_w || j >= g_map_d) continue;
+                int gn = 0, wn = 0;
+                veg_gen_chunk(ctx->world, i, j, 0, 0, true, sg, sw, &gn, &wn, NULL, NULL);
+                if (gn) memcpy(g_static_g + (size_t)pos_g * 12, sg,
+                               (size_t)gn * 12 * sizeof(float));
+                if (wn) memcpy(g_static_w + (size_t)pos_w * 12, sw,
+                               (size_t)wn * 12 * sizeof(float));
+                pos_g += gn;
+                pos_w += wn;
+            }
+    }
+    free(sg); free(sw);
+}
+
+
 // Статичный слой: вся карта, минимальная плотность. Один раз при старте.
 // Экземпляры раскладываются ПО СУПЕР-ЧАНКАМ (64 м), чтобы рендер мог
 // рисовать только видимые супер-чанки (см. veg_node_render).
@@ -494,28 +599,9 @@ static int veg_static_init(VegParams *p)
         !g_sc_cx || !g_sc_cz || !g_gen_scratch_g || !g_gen_scratch_w)
         return 0;
 
-    // проход 1: считаем растения на каждый супер-чанк
-    for (int sy = 0; sy < g_sc_gh; sy++) {
-        for (int sx = 0; sx < g_sc_gw; sx++) {
-            g_sc_cx[sy * g_sc_gw + sx] = (float)(sx * VEG_SUPER) * VEG_CHUNK
-                                       + VEG_SUPER * VEG_CHUNK * 0.5f;
-            g_sc_cz[sy * g_sc_gw + sx] = (float)(sy * VEG_SUPER) * VEG_CHUNK
-                                       + VEG_SUPER * VEG_CHUNK * 0.5f;
-            int g = 0, w = 0;
-            for (int dy = 0; dy < VEG_SUPER; dy++)
-                for (int dx = 0; dx < VEG_SUPER; dx++) {
-                    int i = sx * VEG_SUPER + dx, j = sy * VEG_SUPER + dy;
-                    if (i >= g_map_w || j >= g_map_d) continue;
-                    int gn = 0, wn = 0;
-                    veg_gen_chunk(p->world, i, j, 0, 0, true,
-                                   g_gen_scratch_g, g_gen_scratch_w,
-                                   &gn, &wn, NULL, NULL);
-                    g += gn; w += wn;
-                }
-            g_sc_cnt_g[sy * g_sc_gw + sx] = g;
-            g_sc_cnt_w[sy * g_sc_gw + sx] = w;
-        }
-    }
+    // проход 1: считаем растения на каждый супер-чанк (параллельно)
+    VegGenCtx gctx = { p->world };
+    jobs_parallel_for(0, g_sc_n, veg_static_count_range, &gctx);
     // префикс-суммы: базы инстансов для glDrawElementsInstancedBaseInstance
     g_sc_off_g[0] = g_sc_off_w[0] = 0;
     for (int s = 0; s < g_sc_n; s++) {
@@ -528,29 +614,9 @@ static int veg_static_init(VegParams *p)
     g_static_w = g_static_wc ? malloc((size_t)g_static_wc * 12 * sizeof(float)) : NULL;
     if ((g_static_gc && !g_static_g) || (g_static_wc && !g_static_w)) return 0;
 
-    // проход 2: заполняем буферы (генерация детерминирована — те же счётчики)
-    int pos_g = 0, pos_w = 0;
-    for (int sy = 0; sy < g_sc_gh; sy++) {
-        for (int sx = 0; sx < g_sc_gw; sx++) {
-            for (int dy = 0; dy < VEG_SUPER; dy++)
-                for (int dx = 0; dx < VEG_SUPER; dx++) {
-                    int i = sx * VEG_SUPER + dx, j = sy * VEG_SUPER + dy;
-                    if (i >= g_map_w || j >= g_map_d) continue;
-                    int gn = 0, wn = 0;
-                    veg_gen_chunk(p->world, i, j, 0, 0, true,
-                                   g_gen_scratch_g, g_gen_scratch_w,
-                                   &gn, &wn, NULL, NULL);
-                    if (gn) memcpy(g_static_g + (size_t)pos_g * 12,
-                                   g_gen_scratch_g,
-                                   (size_t)gn * 12 * sizeof(float));
-                    if (wn) memcpy(g_static_w + (size_t)pos_w * 12,
-                                   g_gen_scratch_w,
-                                   (size_t)wn * 12 * sizeof(float));
-                    pos_g += gn;
-                    pos_w += wn;
-                }
-        }
-    }
+    // проход 2: заполняем буферы (генерация детерминирована — те же счётчики).
+    // Каждый супер-чанк пишет в СВОЙ диапазон [off, off+cnt) => гонок нет.
+    jobs_parallel_for(0, g_sc_n, veg_static_fill_range, &gctx);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo_sg);
     glBufferData(GL_ARRAY_BUFFER, (size_t)g_static_gc * 12 * sizeof(float),
                  g_static_g, GL_STATIC_DRAW);
@@ -616,7 +682,7 @@ static void veg_shadow_build(void)
 // Динамический слой: при переходе камеры пересоздаёт только те чанки,
 // чья плотность заметно изменилась, и заливает их в VBO.
 static void veg_dyn_thin_build(int need[][2], int nn, VegParams *p);
-static void veg_update(const float cam_pos[3], VegParams *p)
+static void veg_update(const float cam_pos[3], float dt, VegParams *p)
 {
     int cx = (int)floorf(cam_pos[0] / VEG_CHUNK);
     int cy = (int)floorf(cam_pos[2] / VEG_CHUNK);
@@ -627,19 +693,52 @@ static void veg_update(const float cam_pos[3], VegParams *p)
     unsigned int occ_now = splat_occupancy_version();
     int occ_dirty = (occ_now != s_occ_seen);
     if (occ_dirty) s_occ_seen = occ_now;
-    if (!occ_dirty && g_regen_pending <= 0 &&
+    // Скорость камеры (XZ) для упреждающей подгрузки. Упреждение = ~0.5 с пути
+    // по направлению движения, 6..40 м. Пока стоим — точка = камера (как было).
+    float vx = 0.0f, vz = 0.0f;
+    if (g_prev_cam_ok && dt > 1e-4f) {
+        vx = (cam_pos[0] - g_prev_cam[0]) / dt;
+        vz = (cam_pos[2] - g_prev_cam[2]) / dt;
+    }
+    float speed = sqrtf(vx * vx + vz * vz);
+    float look = 0.0f;
+    if (speed > 1.0f) {
+        look = speed * 0.5f;
+        if (look < 6.0f) look = 6.0f; else if (look > 40.0f) look = 40.0f;
+        g_look_bx = cam_pos[0] + vx / speed * look;
+        g_look_bz = cam_pos[2] + vz / speed * look;
+    } else {
+        g_look_bx = cam_pos[0];
+        g_look_bz = cam_pos[2];
+    }
+    // Движение с прошлого кадра: если камера сместилась заметно, обновляем
+    // ДАЖЕ внутри той же клетки-чанка — иначе трава/поле «переключаются» лишь
+    // при пересечении границы чанка (выскакивают под носом). Регенерация всё
+    // равно ограничена бюджетом (2/кадр), а VBO перезаливается только при
+    // реальном изменении (флаг dirty) — стойки на месте почти бесплатны.
+    int moving = g_prev_cam_ok &&
+                 (fabsf(cam_pos[0] - g_prev_cam[0]) +
+                  fabsf(cam_pos[2] - g_prev_cam[2])) > 0.05f;
+    g_prev_cam[0] = cam_pos[0]; g_prev_cam[1] = cam_pos[1];
+    g_prev_cam[2] = cam_pos[2]; g_prev_cam_ok = 1;
+    if (!occ_dirty && !moving && g_regen_pending <= 0 &&
         cx == g_chunk_cam[0] && cy == g_chunk_cam[1]) return;
     g_chunk_cam[0] = cx;
     g_chunk_cam[1] = cy;
 
-    float dr2 = s_dyn_r * s_dyn_r;
-    // список нужных чанков (в радиусе), в порядке индексов
+    // r_veg_dyn_mult сжимает РАДИУС загрузки динамических чанков (не кривую
+    // плотности — та на falloff_mult): в «упрощённом» грузим чанки на меньшую
+    // дистанцию, меньше генерации/отрисовки. По умолчанию 1.0 (без изменений).
+    float dyn_r = s_dyn_r * cvar_get("r_veg_dyn_mult");
+    if (dyn_r < 8.0f) dyn_r = 8.0f;
+    float dr2 = dyn_r * dyn_r;
+    // список нужных чанков (в радиусе пути камера→упреждение)
     int need[512][2], nn = 0;
     for (int j = 0; j < g_map_d && nn < 512; j++)
         for (int i = 0; i < g_map_w && nn < 512; i++) {
-            float dx = (float)(i * 16 + 8) - cam_pos[0];
-            float dz = (float)(j * 16 + 8) - cam_pos[2];
-            if (dx*dx + dz*dz <= dr2) { need[nn][0] = i; need[nn][1] = j; nn++; }
+            float pr = veg_path_dist((float)(i * 16 + 8), (float)(j * 16 + 8),
+                                     cam_pos[0], cam_pos[2], g_look_bx, g_look_bz);
+            if (pr * pr <= dr2) { need[nn][0] = i; need[nn][1] = j; nn++; }
         }
     // выгружаем чанки, вышедшие из радиуса
     int dirty = 0;
@@ -655,18 +754,20 @@ static void veg_update(const float cam_pos[3], VegParams *p)
             dirty = 1;
         }
     }
-    // Ближние чанки — первыми (бюджет может срезать дальние до следующего
-    // кадра; у ног растительность должна появляться сразу)
+    // Ближние к пути (камера→упреждение) чанки — первыми: бюджет тратится на
+    // коридор впереди по движению, растительность там успевает загрузиться до
+    // подхода; у ног она уже плотная и в регене не нуждается.
     for (int a = 1; a < nn; a++) {
         int bi = need[a][0], bj = need[a][1];
-        float bd = (float)(bi * 16 + 8) - cam_pos[0];
-        float bz = (float)(bj * 16 + 8) - cam_pos[2];
-        float br2 = bd * bd + bz * bz;
+        float br2 = veg_path_dist((float)(bi * 16 + 8), (float)(bj * 16 + 8),
+                                  cam_pos[0], cam_pos[2], g_look_bx, g_look_bz);
+        br2 = br2 * br2;
         int b2 = a - 1;
         while (b2 >= 0) {
-            float ddx = (float)(need[b2][0] * 16 + 8) - cam_pos[0];
-            float ddz = (float)(need[b2][1] * 16 + 8) - cam_pos[2];
-            if (ddx * ddx + ddz * ddz <= br2) break;
+            float dd = veg_path_dist((float)(need[b2][0] * 16 + 8),
+                                     (float)(need[b2][1] * 16 + 8),
+                                     cam_pos[0], cam_pos[2], g_look_bx, g_look_bz);
+            if (dd * dd <= br2) break;
             need[b2 + 1][0] = need[b2][0];
             need[b2 + 1][1] = need[b2][1];
             b2--;
@@ -683,12 +784,12 @@ static void veg_update(const float cam_pos[3], VegParams *p)
     for (int k = 0; k < nn; k++) {
         int i = need[k][0], j = need[k][1];
         VegChunk *c = &g_veg_chunks[j * g_map_w + i];
-        float dx = (float)(i * 16 + 8) - cam_pos[0];
-        float dz = (float)(j * 16 + 8) - cam_pos[2];
-        float r = sqrtf(dx*dx + dz*dz);
-        float tgd = veg_density(r, cvar_get("r_grass_density"), s_grass_floor)
-                  + veg_density(r, cvar_get("r_dandelion_density"),
-                                s_dandelion_floor);
+        float r = veg_path_dist((float)(i * 16 + 8), (float)(j * 16 + 8),
+                                cam_pos[0], cam_pos[2], g_look_bx, g_look_bz);
+        // Цель плотности ДИНАМИЧЕСКОЙ травы не зависит от расстояния (шейдер
+        // сам прореживает по дистанции): чанк не пересобирается при подходе
+        // камеры — только при загрузке/смене занятости. Пшеница — как была.
+        float tgd = cvar_get("r_grass_density") + cvar_get("r_dandelion_density");
         float twd = veg_density(r, cvar_get("r_wheat_density"), s_wheat_floor);
         // ВАЖНО: та же формула плотности, что пишет veg_gen_chunk (травяная
         // группа = трава + одуванчики, из cvar'ов). Раньше цель считалась
@@ -696,9 +797,18 @@ static void veg_update(const float cam_pos[3], VegParams *p)
         // cvar'ов — из-за рассогласования КАЖДЫЙ чанк не проходил допуск, и
         // вся растительность пересоздавалась на каждом переходе чанка
         // (regen storm).
+        // ОТНОСИТЕЛЬНЫЙ допуск: пшеница у камеры 140 шт/м², трава 1.2 —
+        // абсолютный TOL=3 заставлял пшеницу пересоздаваться почти на каждом
+        // переходе чанка (десятки крестов порога 140→1), а трава (Δ<3) не
+        // обновлялась вовсе и «выгружалась/загружалась» рывком на кольце.
+        // Порог = доля от плотности (нижний пол VEG_REGEN_MIN): пшеница
+        // обновляется редкими крупными шагами (бюджет успевает — не «криво»),
+        // трава — мягкими шагами по мере подхода, оба вида когерентно.
+        float tol_g = tgd * VEG_REGEN_REL; if (tol_g < VEG_REGEN_MIN) tol_g = VEG_REGEN_MIN;
+        float tol_w = twd * VEG_REGEN_REL; if (tol_w < VEG_REGEN_MIN) tol_w = VEG_REGEN_MIN;
         bool need_gen = (!c->g && !c->w) || occ_dirty ||
-                        fabsf(c->dg_d - tgd) > VEG_REGEN_TOL ||
-                        fabsf(c->dw_d - twd) > VEG_REGEN_TOL;
+                        fabsf(c->dg_d - tgd) > tol_g ||
+                        fabsf(c->dw_d - twd) > tol_w;
         if (need_gen) {
             if (changed >= budget) {   // хвост — в следующих кадрах
                 g_regen_pending = 1;
@@ -870,7 +980,9 @@ static void veg_dyn_thin_build(int need[][2], int nn, VegParams *p)
 // супер-чанкам/чанкам внутри бокса каскада (логика переехала из shadow.c).
 static void veg_shadow_draw(const RendererContext *rc)
 {
-    if (cvar_get("r_simple_render") > 0.5f && rc->shadow_cascade > 0) return;
+    // Растительность пишется во ВСЕ каскады. Каскады 2/3 дёшевы: куллинг
+    // по супер-чанкам (ниже) оставляет внутри бокса единицы чанков, а кэш
+    // статических матриц (shadow.c) перерисовывает их только на шаге снапа.
     glDisable(GL_CULL_FACE);     // биллборды — с двух сторон
     glUseProgram(s_shadowveg_prog);
     glUniformMatrix4fv(u_veg_viewproj, 1, GL_FALSE, rc->shadow_vp);
@@ -879,54 +991,69 @@ static void veg_shadow_draw(const RendererContext *rc)
     glUniform3f(u_veg_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
     glUniform1f(u_veg_walk, rc->cam_fly ? 0.0f : 1.0f);
     glUniform1f(u_veg_windboost, rc->wetness);   // тени синхронны с ветром
+    // Тень травы прореживается по дистанции так же, как видимая трава —
+    // иначе тень гуще растения. Значения те же, что в основном проходе.
+    if (u_veg_grassfall >= 0)
+        glUniform1f(u_veg_grassfall, s_dyn_r * cvar_get("r_veg_falloff_mult"));
+    if (u_veg_grassfloor >= 0) {
+        float d0 = cvar_get("r_grass_density") + cvar_get("r_dandelion_density");
+        float ff = d0 > 1e-4f ? (s_grass_floor + s_dandelion_floor) / d0 : 0.0f;
+        glUniform1f(u_veg_grassfloor, ff);
+    }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, g_veg_tex);
     glUniform1i(u_veg_thin, 0);    // прореживание уже сделано на CPU
 
-    // Статика: полный LOD (в т.ч. lod2). Только супер-чанки внутри бокса.
+    // вылет длинной тени: растение до ~1 м при низком солнце даёт тень
+    // в стороны на height*slope метров — чанк за пределами бокса всё ещё
+    // может её бросить (как у объектов в objects.c)
+    float reach = rc->shadow_slope * 1.5f;
+
+    // Статика: полный LOD (в т.ч. lod2). Каскад 3 (512 м, тексель 25 см) —
+    // только пшеница: травяной пучок там меньше двух текселей и рассыпается
+    // в рябь при перестройке карты, а широкие lod2-квады поля читаются
+    // до горизонта (тени поля — до ~256 м).
     glUniform1f(u_veg_dyn, 0.0f);
     if (rc->shadow_static && g_shadow_veg) {
-        if (rc->shadow_cull && g_has_base_instance) {
-            // бокс + полудиагональ супер-чанка (64 м: 32*1.414 ≈ 45.3)
-            float r2 = (45.3f + rc->shadow_box_cur * 0.7071f) *
-                       (45.3f + rc->shadow_box_cur * 0.7071f);
-            float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
-            for (int s = 0; s < g_sc_n; s++) {
-                int cnt = g_sc_shcnt[0][s];
-                if (cnt <= 0) continue;
-                float dx = g_sc_cx[s] - pcx;
-                float dz = g_sc_cz[s] - pcz;
-                if (dx*dx + dz*dz > r2) continue;
+        // q: 0=трава (g_static_g), 1=пшеница (g_static_w). Каскад 3 — ТОЛЬКО
+        // пшеница (qstart=1): травяной пучок там < двух текселей и рассыпается
+        // в рябь; ближние каскады рисуют оба вида.
+        int qstart = rc->shadow_cascade >= 3 ? 1 : 0;
+        for (int q = qstart; q < 2; q++) {
+            if (rc->shadow_cull && g_has_base_instance) {
+                // бокс + полудиагональ супер-чанка (64 м: 32*1.414 ≈ 45.3)
+                float r = 45.3f + rc->shadow_box_cur * 0.7071f + reach;
+                float r2 = r * r;
+                float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
+                for (int s = 0; s < g_sc_n; s++) {
+                    int cnt = g_sc_shcnt[q][s];
+                    if (cnt <= 0) continue;
+                    float dx = g_sc_cx[s] - pcx;
+                    float dz = g_sc_cz[s] - pcz;
+                    if (dx*dx + dz*dz > r2) continue;
+                    glBindVertexArray(g_veg_shadow_vao[q]);
+                    glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
+                            GL_UNSIGNED_INT, NULL, cnt,
+                            (GLuint)g_sc_shoff[q][s]);
+                }
+            } else if (q == 0) {
                 glBindVertexArray(g_veg_shadow_vao[0]);
-                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                        GL_UNSIGNED_INT, NULL, cnt, (GLuint)g_sc_shoff[0][s]);
-            }
-            for (int s = 0; s < g_sc_n; s++) {
-                int cnt = g_sc_shcnt[1][s];
-                if (cnt <= 0) continue;
-                float dx = g_sc_cx[s] - pcx;
-                float dz = g_sc_cz[s] - pcz;
-                if (dx*dx + dz*dz > r2) continue;
+                glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
+                                        g_veg_shadow_cnt[0]);
+            } else {
                 glBindVertexArray(g_veg_shadow_vao[1]);
-                glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6,
-                        GL_UNSIGNED_INT, NULL, cnt, (GLuint)g_sc_shoff[1][s]);
+                glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
+                                        g_veg_shadow_cnt[1]);
             }
-        } else {
-            glBindVertexArray(g_veg_shadow_vao[0]);
-            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
-                                    g_veg_shadow_cnt[0]);
-            glBindVertexArray(g_veg_shadow_vao[1]);
-            glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL,
-                                    g_veg_shadow_cnt[1]);
         }
     }
     // Динамика: только lod0/lod1 (без lod2). Чанки внутри бокса.
     glUniform1f(u_veg_dyn, 1.0f);
     if (rc->shadow_dyn && g_shadow_veg) {
         if (rc->shadow_cull && g_has_base_instance) {
-            // бокс + полудиагональ чанка (16 м: 11.3)
-            float r2 = (11.3f + rc->shadow_box_cur * 0.7071f) *
-                       (11.3f + rc->shadow_box_cur * 0.7071f);
+            // бокс + полудиагональ чанка (16 м: 11.3) + вылет длинной тени
+            float r = 11.3f + rc->shadow_box_cur * 0.7071f + reach;
+            float r2 = r * r;
             float pcx = rc->cam_pos[0], pcz = rc->cam_pos[2];
             for (int k = 0; k < g_dyn_sh_n; k++) {
                 float dx = g_dyn_sh_x[k] - pcx;
@@ -957,78 +1084,12 @@ static void veg_shadow_draw(const RendererContext *rc)
     glEnable(GL_CULL_FACE);
 }
 
-void veg_node_render(SceneNode *n, float dt)
+// Инстансный фолбэк-проход: статика (супер-чанки в радиусе + frustum) и
+// динамика. Вынесен, чтобы вызвать ДВАЖДЫ при z-prepass (глубина, затем
+// цвет с GL_EQUAL) без дублирования кода. Uniform'ы/текстура/frustum
+// уже настроены вызывающим (veg_node_render).
+static void veg_draw_main_instances(VegParams *p, const RendererContext *rc)
 {
-    (void)dt;
-    // Полное отключение травы одной галкой — раньше floor=1.0 оставлял поле при density 0
-    if (cvar_get("r_wheat_density") < 0.01f && cvar_get("r_grass_density") < 0.01f &&
-        cvar_get("r_dandelion_density") < 0.01f) {
-        return;
-    }
-    VegParams *p = n->params;
-    const RendererContext *rc = p->rc;
-    if (rc->pass == RP_SHADOW) {
-        veg_shadow_draw(rc);
-        return;
-    }
-    g_veg_time += dt * (1.0f + fx_wetness());
-    // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
-    // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
-    {
-        static float s_prev_w = -1.0f, s_prev_g = -1.0f, s_prev_d = -1.0f,
-                     s_prev_fo = -1.0f;
-        float w = cvar_get("r_wheat_density");
-        float g = cvar_get("r_grass_density");
-        float d = cvar_get("r_dandelion_density");
-        float fo = cvar_get("r_veg_falloff_mult");
-        if (w != s_prev_w || g != s_prev_g || d != s_prev_d ||
-            fo != s_prev_fo) {
-            s_prev_w = w; s_prev_g = g; s_prev_d = d; s_prev_fo = fo;
-            g_chunk_cam[0] = g_chunk_cam[1] = INT_MAX;
-            SDL_Log("Veg density changed: wheat %.0f, grass %.1f, dandelion %.2f",
-                    w, g, d);
-        }
-    }
-    veg_update(rc->cam_pos, p);
-    if (g_static_gc + g_static_wc + g_dyn_gc + g_dyn_wc <= 0) return;
-    if (!g_veg_visible) return;
-    glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);             // биллборды видны с обеих сторон
-    glUseProgram(p->prog);
-    // MSAA не сглаживает alpha-cutout края спрайтов (discard) — включаем
-    // alpha-to-coverage: полупрозрачная кромка текселя даёт частичное
-    // покрытие сэмплов и край сглаживается. На теневую карту не влияет.
-    int a2c = bloom_msaa_active() > 0;
-    if (a2c) glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
-    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
-    scene_uniforms_bind(&p->su, rc);
-    // Растения: свои bias/градиент (shadow_bias_veg из map.json — тени
-    // вплотную к растениям, без слан-терма: нормаль биллборда бессмысленна)
-    for (int c = 0; c < SHADOW_CASCADES; c++) {
-        if (p->su.u_shadowbias[c] >= 0)
-            glUniform1f(p->su.u_shadowbias[c], rc->shadow_bias_veg[c]);
-        if (p->su.u_shadowgrad[c] >= 0)
-            glUniform1f(p->su.u_shadowgrad[c], rc->shadow_grad_veg[c]);
-    }
-    glUniform1f(p->u_time, g_veg_time);
-    glUniform1f(p->u_walk, rc->cam_fly ? 0.0f : 1.0f);
-    glUniform1f(p->u_windboost, rc->wetness);
-    if (p->u_lodshift >= 0) glUniform1f(p->u_lodshift, cvar_get("r_veg_lod_shift"));
-    // Frustum-отсечение статики: 6 плоскостей конуса из viewproj (метод
-    // Gribb-Hartmann, матрицы column-major — строки m[c*4+r]).
-    frustum_extract(rc->viewproj);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, p->tex);
-
-    // GPU-driven (compute-cull + indirect): вершины ограничены видимыми
-    // пикселями, а не плотностью. Затраты «миллиард» ≈ «1».
-    if (g_veg_gpudriven && (int)cvar_get("r_veg_gpudriven") > 0.5f) {
-        veg_gpu_draw(p, rc);
-        glEnable(GL_CULL_FACE);
-        if (a2c) glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
-        return;
-    }
-
-    // Иначе — инстансный фолбэк (старый путь).
     // Статика: только супер-чанки в радиусе видимости (вместо всей карты).
     // Дальше спрайты меньше пикселя — их вид несёт текстура земли. При
     // подъёме камеры радиус растёт, чтобы обзор с горы не пустел.
@@ -1070,6 +1131,119 @@ void veg_node_render(SceneNode *n, float dt)
         glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL, g_dyn_gc);
         glBindVertexArray(p->vao_dw);
         glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL, g_dyn_wc);
+    }
+}
+
+void veg_node_render(SceneNode *n, float dt)
+{
+    (void)dt;
+    // Полное отключение травы одной галкой — раньше floor=1.0 оставлял поле при density 0
+    if (cvar_get("r_wheat_density") < 0.01f && cvar_get("r_grass_density") < 0.01f &&
+        cvar_get("r_dandelion_density") < 0.01f) {
+        return;
+    }
+    VegParams *p = n->params;
+    const RendererContext *rc = p->rc;
+    if (rc->pass == RP_SHADOW) {
+        veg_shadow_draw(rc);
+        return;
+    }
+    g_veg_time += dt * (1.0f + fx_wetness());
+    // Плотности из cvar'ов изменились (меню «Графика») — перегенерить чанки:
+    // сброс позиции камеры-чанка заставляет veg_update пересоздать всё.
+    {
+        static float s_prev_w = -1.0f, s_prev_g = -1.0f, s_prev_d = -1.0f,
+                     s_prev_fo = -1.0f;
+        float w = cvar_get("r_wheat_density");
+        float g = cvar_get("r_grass_density");
+        float d = cvar_get("r_dandelion_density");
+        float fo = cvar_get("r_veg_falloff_mult");
+        if (w != s_prev_w || g != s_prev_g || d != s_prev_d ||
+            fo != s_prev_fo) {
+            s_prev_w = w; s_prev_g = g; s_prev_d = d; s_prev_fo = fo;
+            g_chunk_cam[0] = g_chunk_cam[1] = INT_MAX;
+            SDL_Log("Veg density changed: wheat %.0f, grass %.1f, dandelion %.2f",
+                    w, g, d);
+        }
+    }
+    veg_update(rc->cam_pos, dt, p);
+    if (g_static_gc + g_static_wc + g_dyn_gc + g_dyn_wc <= 0) return;
+    if (!g_veg_visible) return;
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);             // биллборды видны с обеих сторон
+    glUseProgram(p->prog);
+    // MSAA не сглаживает alpha-cutout края спрайтов (discard) — включаем
+    // alpha-to-coverage: полупрозрачная кромка текселя даёт частичное
+    // покрытие сэмплов и край сглаживается. На теневую карту не влияет.
+    int a2c = bloom_msaa_active() > 0;
+    if (a2c) glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
+    scene_uniforms_bind(&p->su, rc);
+    // Растения: свои bias/градиент (shadow_bias_veg из map.json — тени
+    // вплотную к растениям, без слан-терма: нормаль биллборда бессмысленна)
+    for (int c = 0; c < SHADOW_CASCADES; c++) {
+        if (p->su.u_shadowbias[c] >= 0)
+            glUniform1f(p->su.u_shadowbias[c], rc->shadow_bias_veg[c]);
+        if (p->su.u_shadowgrad[c] >= 0)
+            glUniform1f(p->su.u_shadowgrad[c], rc->shadow_grad_veg[c]);
+    }
+    glUniform1f(p->u_time, g_veg_time);
+    glUniform1f(p->u_walk, rc->cam_fly ? 0.0f : 1.0f);
+    glUniform1f(p->u_windboost, rc->wetness);
+    if (p->u_lodshift >= 0) glUniform1f(p->u_lodshift, cvar_get("r_veg_lod_shift"));
+    if (p->u_simple >= 0) glUniform1f(p->u_simple, cvar_get("r_simple_render"));
+    // ТРАВА прореживается по дистанции в шейдере (плавно), а не подгрузкой
+    // чанков: динамика генерится полной плотностью, шейдер убирает лишнее к
+    // краю. uGrassFall — та же дистанция спада, что в veg_density (C).
+    if (p->u_grassfall >= 0)
+        glUniform1f(p->u_grassfall, s_dyn_r * cvar_get("r_veg_falloff_mult"));
+    if (p->u_grassfloor >= 0) {
+        float d0 = cvar_get("r_grass_density") + cvar_get("r_dandelion_density");
+        float ff = d0 > 1e-4f ? (s_grass_floor + s_dandelion_floor) / d0 : 0.0f;
+        glUniform1f(p->u_grassfloor, ff);
+    }
+    frustum_extract(rc->viewproj);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, p->tex);
+
+    // GPU-driven (compute-cull + indirect): вершины ограничены видимыми
+    // пикселями, а не плотностью. Затраты «миллиард» ≈ «1».
+    if (g_veg_gpudriven && (int)cvar_get("r_veg_gpudriven") > 0.5f) {
+        veg_gpu_draw(p, rc);
+        glEnable(GL_CULL_FACE);
+        if (a2c) glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        return;
+    }
+
+    // Иначе — инстансный фолбэк (старый путь).
+    // Z-PREPASS (только когда MSAA/alpha-to-coverage ВЫКЛ): сначала дешёвый
+    // проход глубины (только альфа-тест, без света), потом цветной проход с
+    // glDepthFunc(GL_EQUAL) и depthMask off — каждый видимый пиксель шейдится
+    // РОВНО ОДИН раз, overdraw в тяжёлом шейдере срезан. Тот же квад и тот же
+    // discard => глубина совпадает точно, картинка идентична. При a2c грани
+    // сглаживаются частичным покрытием сэмплов — там prepass не берём, чтобы
+    // не спорить с GL_EQUAL (СРЕДНИЕ/УЛЬТРА и так на сильном железе).
+    int zprepass = !a2c && p->u_depthonly >= 0 &&
+                   cvar_get("r_veg_zprepass") > 0.5f;
+    if (zprepass) {
+        // 1) Глубина: пишем Z, цвет замаскирован, обычный GL_LESS.
+        glUniform1f(p->u_depthonly, 1.0f);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glDepthMask(GL_TRUE);
+        glDepthFunc(GL_LESS);
+        veg_draw_main_instances(p, rc);
+        // 2) Цвет: шейдим только ближайший фрагмент (Z уже финальный),
+        // depthMask off — ранний тест отбрасывает проигравших до шейдера.
+        glUniform1f(p->u_depthonly, 0.0f);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(GL_FALSE);
+        glDepthFunc(GL_EQUAL);
+        veg_draw_main_instances(p, rc);
+        // Восстановить обычное состояние глубины для последующих проходов.
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+    } else {
+        if (p->u_depthonly >= 0) glUniform1f(p->u_depthonly, 0.0f);
+        veg_draw_main_instances(p, rc);
     }
     glEnable(GL_CULL_FACE);
     if (a2c) glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
@@ -1265,6 +1439,7 @@ static void veg_gpu_draw(VegParams *p, const RendererContext *rc)
     // --- PASS 2: indirect-отрисовка выживших ------------------------------
     glUseProgram(p->prog);
     if (p->u_lodshift >= 0) glUniform1f(p->u_lodshift, cvar_get("r_veg_lod_shift"));
+    if (p->u_simple >= 0) glUniform1f(p->u_simple, cvar_get("r_simple_render"));
     for (int q = 0; q < 4; q++) {
         if (g_veg_src_cnt[q] <= 0) continue;
         if ((q < 2 && !g_draw_static_main) || (q >= 2 && !g_draw_dyn_main)) continue;
@@ -1314,6 +1489,9 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
         cvar_register_ex("r_veg_regen_budget", 4096.0f, 1.0f, 4096.0f,
                          CVAR_ARCHIVE, "чанков регенерации за кадр (меньше = "
                          "меньше рывков CPU, дорисовывается в следующих)");
+        cvar_register_ex("r_veg_dyn_mult", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
+                         "множитель радиуса динамических чанков (<1 = грузим "
+                         "траву ближе, меньше генерации/отрисовки)");
         SDL_Log("Veg cfg: wheat %.0f/m2, grass %.1f/m2, dandelion %.2f/m2, "
                 "dyn %.0fm, vis %.0fm",
                 s_wheat_density, s_grass_density, s_dandelion_density,
@@ -1475,6 +1653,8 @@ SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc)
     cvar_register("r_veg_gpudriven", 1.0f, "GPU-driven compute-cull травы (0=фолбэк)");
     cvar_register_ex("r_veg_minpix", 1.0f, 0.0f, 8.0f, CVAR_ARCHIVE,
                      "мин. экранный след травинки, px (0 = не отсекать)");
+    cvar_register_ex("r_veg_zprepass", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "z-prepass травы: срезать overdraw (только при MSAA off)");
     if (g_veg_gpudriven) {
         veg_gpu_init(p);
         veg_gpu_src_upload(0, g_static_g, g_static_gc);

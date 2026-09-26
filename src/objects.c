@@ -612,6 +612,9 @@ void objects_node_render(SceneNode *n, float dt)
         glUniform2f(l->u_objsize, it->width, it->height);
         if (l->u_objslope >= 0)
             glUniform2f(l->u_objslope, it->slope[0], it->slope[1]);
+        // Запечённый свет: сэмплим пробу в середине высоты объекта (крона).
+        scene_uniforms_probe(&l->su, it->pos[0], it->pos[1] + it->height * 0.5f,
+                             it->pos[2]);
         // Ось ширины квада:
         //  - биллборд: перпендикуляр к направлению на камеру (квад к ней);
         //  - крест: статичный выбор грани по углу обзора.

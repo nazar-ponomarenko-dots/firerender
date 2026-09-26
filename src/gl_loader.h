@@ -163,6 +163,8 @@
     F(void,             glFrontFace,             (GLenum))                        \
     F(void,             glBlendFunc,             (GLenum, GLenum))                \
     F(void,             glDepthMask,             (GLboolean))                     \
+    F(void,             glDepthFunc,             (GLenum))                        \
+    F(void,             glColorMask,             (GLboolean, GLboolean, GLboolean, GLboolean)) \
     F(void,             glGenQueries,            (GLsizei, GLuint *))             \
     F(void,             glDeleteQueries,         (GLsizei, const GLuint *))       \
     F(void,             glBeginQuery,            (GLenum, GLuint))                \
@@ -197,9 +199,9 @@ extern int g_gl_gpu_driven;
 #define glAttachShader            p_glAttachShader
 #define glLinkProgram             p_glLinkProgram
 #define glDeleteShader            p_glDeleteShader
-#define glDeleteProgram           p_glDeleteProgram
+#define glDeleteProgram           fr_glDeleteProgram
 #define glGenVertexArrays         p_glGenVertexArrays
-#define glBindVertexArray         p_glBindVertexArray
+#define glBindVertexArray         fr_glBindVertexArray
 #define glGenBuffers              p_glGenBuffers
 #define glBindBuffer              p_glBindBuffer
 #define glBufferData              p_glBufferData
@@ -244,15 +246,15 @@ extern int g_gl_gpu_driven;
 #define glDrawElementsIndirect       p_glDrawElementsIndirect
 #define glMultiDrawElementsIndirect  p_glMultiDrawElementsIndirect
 #define glEnableVertexAttribArray p_glEnableVertexAttribArray
-#define glUseProgram              p_glUseProgram
+#define glUseProgram              fr_glUseProgram
 #define glDrawArrays              fr_glDrawArrays
 #define glDrawArraysInstanced     fr_glDrawArraysInstanced
-#define glDeleteVertexArrays      p_glDeleteVertexArrays
+#define glDeleteVertexArrays      fr_glDeleteVertexArrays
 #define glDeleteBuffers           p_glDeleteBuffers
-#define glActiveTexture           p_glActiveTexture
+#define glActiveTexture           fr_glActiveTexture
 #define glGenTextures             p_glGenTextures
-#define glDeleteTextures          p_glDeleteTextures
-#define glBindTexture             p_glBindTexture
+#define glDeleteTextures          fr_glDeleteTextures
+#define glBindTexture             fr_glBindTexture
 #define glTexParameteri           p_glTexParameteri
 #define glGenerateMipmap          p_glGenerateMipmap
 #define glTexImage2D              p_glTexImage2D
@@ -278,6 +280,8 @@ extern int g_gl_gpu_driven;
 #define glFrontFace               p_glFrontFace
 #define glBlendFunc               p_glBlendFunc
 #define glDepthMask               p_glDepthMask
+#define glDepthFunc               p_glDepthFunc
+#define glColorMask               p_glColorMask
 #define glGenQueries              p_glGenQueries
 #define glDeleteQueries           p_glDeleteQueries
 #define glBeginQuery              p_glBeginQuery
@@ -303,5 +307,20 @@ void fr_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
 void fr_glDrawElementsInstancedBaseInstance(GLenum mode, GLsizei count,
                                             GLenum type, const void *indices,
                                             GLsizei primcount, GLuint baseinstance);
+
+// --- Отсев избыточных смен GL-состояния ------------------------------------
+// Тонкий кэш поверх настоящих указателей: пропускает bind/use, если ресурс
+// уже привязан к этому слоту (аналог GL_Bind в xash — единственная воронка,
+// через которую идут ВСЕ модули). Чистая экономия CPU/драйвера, картинка
+// байт-в-байт та же. FR_GLCACHE=0 отключает (для A/B). g_prof_state_skipped —
+// число отсеянных вызовов за кадр (сбрасывает prof_reset()).
+extern int g_prof_state_skipped;
+void fr_glUseProgram(GLuint prog);
+void fr_glBindVertexArray(GLuint vao);
+void fr_glActiveTexture(GLenum texture);
+void fr_glBindTexture(GLenum target, GLuint tex);
+void fr_glDeleteTextures(GLsizei n, const GLuint *textures);
+void fr_glDeleteProgram(GLuint prog);
+void fr_glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
 
 #endif

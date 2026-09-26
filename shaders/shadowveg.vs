@@ -25,6 +25,8 @@ uniform vec3 uCamPos;                  // игрок (для прогиба ра
 uniform float uWalk;                   // 1 = ходьба (сильнее раздвигаем)
 uniform float uDyn;                    // 1 = динамический слой (вокруг камеры)
 uniform float uWindBoost;              // мокрость 0..1: в дождь ветер сильнее
+uniform float uGrassFall;              // дистанция спада плотности травы (м)
+uniform float uGrassFloorFrac;         // доля floor/полная — к чему прорежается трава к краю
 
 out vec2 vUV;
 flat out float vLayer;   // LOD целый для всего квада (не интерполировать)
@@ -87,19 +89,35 @@ void main() {
             return;
         }
     }
+    // ТРАВА динамики: тот же плавный спад по дистанции, что в wheat.vs, —
+    // тень травы обязана совпадать с видимой травой (иначе тень гуще).
+    float gscale = 1.0;
+    if (layer <= WHEAT_MARK && uDyn > 0.5 && uGrassFall > 0.01) {
+        float dist = length(iPos.xz - uCamPos.xz);
+        float tg = clamp(dist / uGrassFall, 0.0, 1.0);
+        tg = tg * tg * (3.0 - 2.0 * tg);
+        float keepg = mix(1.0, uGrassFloorFrac, tg);
+        float hg = fract(sin(dot(iPos.xz + vec2(0.71, 0.13),
+                                 vec2(12.9898, 78.233))) * 43758.5453);
+        gscale = smoothstep(hg - 0.12, hg, keepg);
+        if (gscale <= 0.001) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+    }
     float wmul = wx / 128.0;
     // база на рельефе — как в wheat.vs (углы квада по уклону земли)
-    float hw = aPos.x * iAttr.y * wmul;
+    float hw = aPos.x * iAttr.y * wmul * gscale;
     vec3 wp = iPos + hvec * hw;
     wp.y = iPos.y + (iSlope.x * hvec.x + iSlope.y * hvec.z) * hw;
     // пшеница (вид 4+) вытянута в высоту в 3 раза — как в wheat.vs
-    float ht = iAttr.y * (iAttr.w > WHEAT_MARK ? 3.0 : 1.0);
+    float ht = iAttr.y * (iAttr.w > WHEAT_MARK ? 3.0 : 1.0) * gscale;
     // квад укорочен до непрозрачной части картинки — как в wheat.vs, иначе
     // силуэт тени был бы выше самого растения
     float cf = veg_content_frac(layer);
     float vis = ht * cf;
     float lc = cos(iLean), ls = sin(iLean);
-    vec3 lt = hvec * (aPos.y * ls * iAttr.y * wmul)
+    vec3 lt = hvec * (aPos.y * ls * iAttr.y * wmul * gscale)
             + up  * (aPos.y * lc * vis);
     wp += lt;
     // тот же ветер и прогиб под игроком, что в wheat.vs, — тени не
