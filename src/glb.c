@@ -353,7 +353,10 @@ GlbModel *glb_parse_file(const char *path)
         unsigned int clen, ctype;
         memcpy(&clen, file + off, 4); memcpy(&ctype, file + off + 4, 4);
         off += 8;
-        if (off + clen > filesz) break;
+        // clen приходит из файла: off+clen может завернуться по 32 биту и
+        // пропустить проверку, после чего bin_len станет ложно огромным и
+        // acc_fits/bv_fits валидировали бы по нему, а не по реальному буферу.
+        if (clen > filesz - off) break;
         if (ctype == 0x4E4F534A) { json_data = file + off; json_len = clen; }
         else if (ctype == 0x004E4942) { bin = file + off; bin_len = clen; }
         off += clen;
@@ -382,6 +385,7 @@ GlbModel *glb_parse_file(const char *path)
     }
 
     GlbBv *bvs = calloc((size_t)(bv_n ? bv_n : 1), sizeof *bvs);
+    if (!bvs) { json_free(); free(file); return NULL; }
     for (int i = 0; i < bv_n; i++) {
         const JsonNode *b = json_array_get(bv_arr, i);
         bvs[i].byteOffset = (long)json_num(json_find(b, "byteOffset"), 0);
@@ -389,6 +393,7 @@ GlbModel *glb_parse_file(const char *path)
         bvs[i].byteStride = (int)json_num(json_find(b, "byteStride"), 0);
     }
     GlbAcc *accs = calloc((size_t)(acc_n ? acc_n : 1), sizeof *accs);
+    if (!accs) { free(bvs); json_free(); free(file); return NULL; }
     for (int i = 0; i < acc_n; i++) {
         const JsonNode *a = json_array_get(acc_arr, i);
         accs[i].bufferView = (int)json_num(json_find(a, "bufferView"), -1);
@@ -463,16 +468,21 @@ GlbModel *glb_parse_file(const char *path)
                     if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "нет POSITION"; break; }
                     GlbAcc *ap = &accs[ipos];
                     // Защита от OOB: акцессор обязан укладываться в bin-чанк.
-                    if (!acc_fits(ap, bvs, bv_n, (long)bin_len)) {
-                        SDL_Log("glb: %s — POSITION акцессор вне буфера, примитив пропущен", path);
+                    // vec проверяем здесь же: read_vertex копирует vec float'ов
+                    // в p[3], поэтому POSITION обязан быть ровно VEC3.
+                    if (!acc_fits(ap, bvs, bv_n, (long)bin_len) || ap->vec != 3) {
+                        SDL_Log("glb: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен", path);
                         continue;
                     }
                     if (ap->count > 16L * 1024 * 1024) {
                         SDL_Log("glb: %s — POSITION count %ld слишком велик, примитив пропущен", path, ap->count);
                         continue;
                     }
-                    GlbAcc *an = (inrm >= 0 && inrm < acc_n && acc_fits(&accs[inrm], bvs, bv_n, (long)bin_len)) ? &accs[inrm] : NULL;
-                    GlbAcc *au = (iuv >= 0 && iuv < acc_n && acc_fits(&accs[iuv], bvs, bv_n, (long)bin_len)) ? &accs[iuv] : NULL;
+                    // NORMAL ровно VEC3 и UV не шире VEC2 — иначе read_vertex
+                    // затронул бы n[3]/u[2] больше их размера. Не подходит —
+                    // атрибут просто не читается (нормаль остаётся {0,1,0}, uv {0,0}).
+                    GlbAcc *an = (inrm >= 0 && inrm < acc_n && accs[inrm].vec == 3 && acc_fits(&accs[inrm], bvs, bv_n, (long)bin_len)) ? &accs[inrm] : NULL;
+                    GlbAcc *au = (iuv >= 0 && iuv < acc_n && accs[iuv].vec <= 2 && acc_fits(&accs[iuv], bvs, bv_n, (long)bin_len)) ? &accs[iuv] : NULL;
                     GlbAcc *ai = (iidx >= 0 && iidx < acc_n && acc_fits(&accs[iidx], bvs, bv_n, (long)bin_len)) ? &accs[iidx] : NULL;
                     long nv = ap->count;
 

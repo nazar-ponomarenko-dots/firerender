@@ -361,10 +361,8 @@ static void renderer_ctx_fill(Game *g)
     rc->view_vp[1] = 0;
     rc->view_vp[2] = s_rsw;
     rc->view_vp[3] = s_rsh;
-    // Кубомап отражений — статический: загружается из cubemaps/ при старте.
-    // refl_cubemap_dirty оставлен для совместимости, но не используется.
-    if (g->cam && g->world_loaded)
-        rc->refl_cubemap_dirty = 0;
+    // Кубомап отражений — статический: загружается из cubemaps/ при старте,
+    // переписывается только командой cubemap_capture.
     // Каскадные тени: текстуры и производные (матрицы свежит shadow.c)
     {
         const float boxes[SHADOW_CASCADES] = {
@@ -1039,8 +1037,8 @@ void renderer_frame(Game *g, float dt, int draw_3d)
 void renderer_read_pixels(unsigned char *px, int vw, int vh)
 {
     int rw = vw, rh = vh;
-    GLuint prev = 0;
 #ifdef USE_GLES_PATH
+    GLuint prev = 0;   // обратно восстанавливаем binding только на GLES-пути
     rw = s_rsw < vw ? s_rsw : vw;
     rh = s_rsh < vh ? s_rsh : vh;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, (GLint *)&prev);

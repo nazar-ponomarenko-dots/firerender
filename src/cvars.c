@@ -37,7 +37,12 @@ static Cvar *cvar_slot_new(void)
         s_cvars = n;
         s_cap = ncap;
     }
-    return &s_cvars[s_count++];
+    Cvar *c = &s_cvars[s_count++];
+    // Слот из realloc — с мусором. Обнуляем целиком: иначе str/def_str
+    // читаются как строка (cvar_save_config) у переменной, которая стала
+    // CVAR_STRING уже после создания слота.
+    memset(c, 0, sizeof *c);
+    return c;
 }
 
 int cvar_index(const char *name)

@@ -151,13 +151,14 @@ win:
 		-lshell32 -lversion -luuid -lsetupapi -lws2_32 -ldwmapi -lbcrypt \
 		-static -static-libgcc
 
-# Пакет для Windows: ОДИН exe — все данные (map/, img/, shaders/) вшиты
-# в бинарник (см. tools/embed_data.py), файлы рядом не нужны.
+# Пакет для Windows: exe + папки данных рядом (map/, img/, shaders/, lua/, audio/).
+# Вшитых данных в движке нет — ресурсы ищутся в pak-zip карты, затем на диске
+# (см. resources.c: pak -> диск -> base_dir -> ../).
 winpkg: win
 	rm -rf build/win
 	mkdir -p build/win
 	cp build/firerender.exe build/win/
-	@echo "Готово: build/win/firerender.exe — самодостаточный (запускайте откуда угодно)"
+	@echo "Готово: build/win/firerender.exe — нужны папки ресурсов рядом или выше"
 
 # Пересобрать карту в maps/<имя>.zip (по умолчанию map1): map.json, map.png,
 # все ресурсы карты. Карту выбирают в меню или командой map <имя>.

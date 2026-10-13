@@ -171,7 +171,10 @@ AnimGlb *glb_anim_parse(const char *path)
     const unsigned char*json_data=NULL,*bin=NULL; unsigned int json_len=0,bin_len=0;
     unsigned int off=12;
     while(off+8<=filesz){ unsigned int clen,ctype; memcpy(&clen,file+off,4); memcpy(&ctype,file+off+4,4); off+=8;
-        if(off+clen>filesz)break;
+        // clen из файла: off+clen способно завернуться по 32 биту и закрыть
+        // проверку; тогда bin_len станет ложно огромным и acc_fits валидировал
+        // бы по нему, а не по реальному буферу -> чтение за его пределами.
+        if(clen>filesz-off)break;
         if(ctype==0x4E4F534A){json_data=file+off;json_len=clen;}
         else if(ctype==0x004E4942){bin=file+off;bin_len=clen;}
         off+=clen; }
@@ -190,11 +193,13 @@ AnimGlb *glb_anim_parse(const char *path)
     if(node_n==0){ SDL_Log("glb_anim: %s нет nodes",path); json_free(); free(file); return NULL; }
 
     GB* bvs=calloc((size_t)(bv_n?bv_n:1),sizeof* bvs);
+    if(!bvs){ json_free(); free(file); return NULL; }
     for(int i=0;i<bv_n;i++){const JsonNode*b=json_array_get(bv_a,i);
         bvs[i].byteOffset=(long)json_num(json_find(b,"byteOffset"),0);
         bvs[i].byteLength=(long)json_num(json_find(b,"byteLength"),0);
         bvs[i].byteStride=(int)json_num(json_find(b,"byteStride"),0);}
     GA* accs=calloc((size_t)(acc_n?acc_n:1),sizeof* accs);
+    if(!accs){ free(bvs); json_free(); free(file); return NULL; }
     for(int i=0;i<acc_n;i++){const JsonNode*a=json_array_get(acc_a,i);
         accs[i].bufferView=(int)json_num(json_find(a,"bufferView"),-1);
         accs[i].byteOffset=(long)json_num(json_find(a,"byteOffset"),0);
@@ -207,8 +212,10 @@ AnimGlb *glb_anim_parse(const char *path)
         accs[i].stride=(bv_i>=0&&bv_i<bv_n&&bvs[bv_i].byteStride>0)?bvs[bv_i].byteStride:elem_sz;}
 
     AnimGlb*out=calloc(1,sizeof* out);
+    if(!out){ json_free(); free(bvs); free(accs); free(file); return NULL; }
     out->nodes=calloc((size_t)node_n,sizeof* out->nodes);
-    if(!out||(node_n>0&&!out->nodes)){ SDL_Log("glb_anim: %s — нехватка памяти",path); free(out); free(file); return NULL; }
+    if(!out->nodes){ SDL_Log("glb_anim: %s — нехватка памяти",path);
+        json_free(); free(bvs); free(accs); free(out); free(file); return NULL; }
     out->nnode=node_n;
     for(int i=0;i<node_n;i++) out->nodes[i].parent=-1;
     // родители и дети
@@ -236,9 +243,12 @@ AnimGlb *glb_anim_parse(const char *path)
     // кожи
     int nskin=sk_a&&sk_a->type==JSON_ARRAY?json_array_len(sk_a):0;
     if(nskin>0){
-        out->skins=calloc((size_t)nskin,sizeof* out->skins); out->nskin=nskin;
+        out->skins=calloc((size_t)nskin,sizeof* out->skins);
         out->skin_of_node=calloc((size_t)node_n,sizeof* out->skin_of_node);
-        if(!out->skins||(node_n>0&&!out->skin_of_node)){ out->nskin=0; }
+        if(!out->skins||!out->skin_of_node){
+            free(out->skins); free(out->skin_of_node);
+            out->skins=NULL; out->skin_of_node=NULL; out->nskin=0; nskin=0;
+        } else out->nskin=nskin;
         for(int i=0;i<node_n;i++)out->skin_of_node[i]=-1;
         for(int s=0;s<nskin;s++){const JsonNode*sk=json_array_get(sk_a,s);
             const JsonNode*jn=json_find(sk,"joints"); int jc=jn&&jn->type==JSON_ARRAY?json_array_len(jn):0;
@@ -263,6 +273,9 @@ AnimGlb *glb_anim_parse(const char *path)
     int mesh_n=ms_a&&ms_a->type==JSON_ARRAY?json_array_len(ms_a):0;
     int*mesh_pstart=calloc((size_t)(mesh_n?mesh_n:1),sizeof(int));
     int*mesh_pcount=calloc((size_t)(mesh_n?mesh_n:1),sizeof(int));
+    if(!out->skin_nodes||!mesh_pstart||!mesh_pcount){
+        SDL_Log("glb_anim: %s — нехватка памяти",path);
+        json_free(); free(bvs); free(accs); glb_anim_free(out); free(file); return NULL; }
     for(int mi=0;mi<mesh_n;mi++){const JsonNode*mesh=json_array_get(ms_a,mi);
         const JsonNode*prims=json_find(mesh,"primitives");
         mesh_pstart[mi]=out->nprim;
@@ -286,14 +299,17 @@ AnimGlb *glb_anim_parse(const char *path)
             if(ipos<0||ipos>=acc_n)continue;
             GA*ap=&accs[ipos];
             // Защита от OOB: акцессор обязан укладываться в bin-чанк файла.
-            if(!acc_fits(ap,bvs,bv_n,(long)bin_len)){
-                SDL_Log("glb_anim: %s — POSITION акцессор вне буфера, примитив пропущен",path);
+            // vec проверяем сразу здесь: rvv копирует vec float'ов в p[3].
+            if(!acc_fits(ap,bvs,bv_n,(long)bin_len)||ap->vec!=3){
+                SDL_Log("glb_anim: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен",path);
                 continue;
             }
-            GA*an=(inrm>=0&&inrm<acc_n&&acc_fits(&accs[inrm],bvs,bv_n,(long)bin_len))?&accs[inrm]:NULL;
-            GA*au=(iuv>=0&&iuv<acc_n&&acc_fits(&accs[iuv],bvs,bv_n,(long)bin_len))?&accs[iuv]:NULL;
-            GA*aj=(ijo>=0&&ijo<acc_n&&acc_fits(&accs[ijo],bvs,bv_n,(long)bin_len))?&accs[ijo]:NULL;
-            GA*aw=(iwe>=0&&iwe<acc_n&&acc_fits(&accs[iwe],bvs,bv_n,(long)bin_len))?&accs[iwe]:NULL;
+            // Остальные атрибуты читаются в стековые приёмники фиксированного
+            // размера (n[3]/u[2]/ji[4]/we[4]) — не подходит по vec = не читаем.
+            GA*an=(inrm>=0&&inrm<acc_n&&accs[inrm].vec==3&&acc_fits(&accs[inrm],bvs,bv_n,(long)bin_len))?&accs[inrm]:NULL;
+            GA*au=(iuv>=0&&iuv<acc_n&&accs[iuv].vec<=2&&acc_fits(&accs[iuv],bvs,bv_n,(long)bin_len))?&accs[iuv]:NULL;
+            GA*aj=(ijo>=0&&ijo<acc_n&&accs[ijo].vec==4&&acc_fits(&accs[ijo],bvs,bv_n,(long)bin_len))?&accs[ijo]:NULL;
+            GA*aw=(iwe>=0&&iwe<acc_n&&accs[iwe].vec==4&&acc_fits(&accs[iwe],bvs,bv_n,(long)bin_len))?&accs[iwe]:NULL;
             GA*ai=(iidx>=0&&iidx<acc_n&&acc_fits(&accs[iidx],bvs,bv_n,(long)bin_len))?&accs[iidx]:NULL;
             long nv=ap->count;
             // Разумный потолок на вершины примитива (защита от count~1e9 из JSON)
@@ -435,14 +451,19 @@ AnimGlb *glb_anim_parse(const char *path)
     // анимации
     int nclip=an_a&&an_a->type==JSON_ARRAY?json_array_len(an_a):0;
     if(nclip>0){
-        out->clips=calloc((size_t)nclip,sizeof* out->clips); out->nclip=nclip;
+        out->clips=calloc((size_t)nclip,sizeof* out->clips);
+        if(!out->clips){ out->nclip=0; nclip=0; } else out->nclip=nclip;
         for(int c=0;c<nclip;c++){const JsonNode*cl=json_array_get(an_a,c); AnimClip*C=&out->clips[c];
             const char*cname=json_str(json_find(cl,"name"),"");
             snprintf(C->name,sizeof C->name,"%s",cname[0]?cname:"unnamed");
             const JsonNode*ch_a=json_find(cl,"channels"); int nch=ch_a&&ch_a->type==JSON_ARRAY?json_array_len(ch_a):0;
             const JsonNode*sp_a=json_find(cl,"samplers");  int nsp=sp_a&&sp_a->type==JSON_ARRAY?json_array_len(sp_a):0;
-            C->channels=calloc((size_t)(nch?nch:1),sizeof* C->channels); C->nch=nch;
-            C->samplers=calloc((size_t)(nsp?nsp:1),sizeof* C->samplers); C->ns=nsp;
+            C->channels=calloc((size_t)(nch?nch:1),sizeof* C->channels);
+            if(!C->channels) nch=0;
+            C->nch=nch;
+            C->samplers=calloc((size_t)(nsp?nsp:1),sizeof* C->samplers);
+            if(!C->samplers) nsp=0;
+            C->ns=nsp;
             float dur=0;
             for(int s=0;s<nsp;s++){const JsonNode*sp=json_array_get(sp_a,s); AnimSampler*Samp=&C->samplers[s];
                 int inp=(int)json_num(json_find(sp,"input"),-1),outp=(int)json_num(json_find(sp,"output"),-1);
@@ -464,6 +485,11 @@ AnimGlb *glb_anim_parse(const char *path)
                     int per=(Samp->interp==ANIM_CUBIC)?3*Samp->comp:Samp->comp;
                     Samp->times=malloc((size_t)(nk?nk:1)*sizeof(float));
                     Samp->values=malloc((size_t)(nk?(size_t)nk*per:1)*sizeof(float));
+                    if(!Samp->times||!Samp->values){
+                        free(Samp->times); free(Samp->values);
+                        Samp->times=NULL; Samp->values=NULL; Samp->nkeys=0;
+                        continue;
+                    }
                     long tb=ti->bufferView>=0?bvs[ti->bufferView].byteOffset+ti->byteOffset:0;
                     long vb=vo->bufferView>=0?bvs[vo->bufferView].byteOffset+vo->byteOffset:0;
                     for(int k=0;k<nk;k++)Samp->times[k]=rfv(bin,tb,ti,k,0);
@@ -498,11 +524,14 @@ AnimGlb *glb_anim_parse(const char *path)
     int ninst=0;
     for(int i=0;i<node_n;i++){int m=out->nodes[i].mesh;
         if(m>=0&&m<mesh_n)ninst+=mesh_pcount[m];}
-    out->instances=calloc((size_t)(ninst?ninst:1),sizeof* out->instances); out->ninst=ninst;
+    out->instances=calloc((size_t)(ninst?ninst:1),sizeof* out->instances);
+    if(!out->instances) out->ninst=0; else {
+    out->ninst=ninst;
     for(int i=0,k=0;i<node_n;i++){int m=out->nodes[i].mesh;
         if(m<0||m>=mesh_n)continue;
         for(int p=0;p<mesh_pcount[m];p++)
             out->instances[k++]=(AnimInstance){i,mesh_pstart[m]+p,out->skin_of_node[i]};}
+    }
     free(mesh_pstart); free(mesh_pcount);
 
     free(bvs); free(accs);
@@ -1425,6 +1454,7 @@ int glb_anim_bone_find(SceneNode *n, const char *name)
 
 static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int skin,int node,const float*snow){
     AnimDrawItem*d=calloc(1,sizeof* d);
+    if(!d) return NULL;
     d->skin=skin; d->has_skin=has_skin; d->node=node;
     snprintf(d->mtl_name,sizeof d->mtl_name,"%s",P->matname);
     // per-primitive remap: какие кости кожи реально используются (≤ MAX_BONES).
@@ -1510,13 +1540,16 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     if(!a)return NULL;
     GLuint prog=make_program("shaders/skinned.vs","shaders/mesh.fs");
     if(!prog){glb_anim_free(a);return NULL;}
-    AnimParams*p=calloc(1,sizeof* p); p->rc=rc; p->scale=scale>0?scale:1; p->prog=prog; p->data=a;
+    AnimParams*p=calloc(1,sizeof* p);
+    if(!p){ glb_anim_free(a); return NULL; }
+    p->rc=rc; p->scale=scale>0?scale:1; p->prog=prog; p->data=a;
     snprintf(p->path,sizeof p->path,"%s",path); p->enabled=1;
     scene_uniforms_init(&p->su,prog);
     p->u_model=glGetUniformLocation(prog,"uModel"); p->u_tex=glGetUniformLocation(prog,"uTex");
     p->u_specular=glGetUniformLocation(prog,"uSpecular"); p->u_bones=glGetUniformLocation(prog,"uBones");
     p->u_hasskin=glGetUniformLocation(prog,"uHasSkin"); p->u_uvtile=glGetUniformLocation(prog,"uUvTile");
-    p->items=calloc((size_t)(a->ninst?a->ninst:1),sizeof* p->items); p->count=a->ninst;
+    p->items=calloc((size_t)(a->ninst?a->ninst:1),sizeof* p->items);
+    p->count=p->items?a->ninst:0;
     p->radius=0.0f;
     // Per-vertex "открыто небу сверху" по всей модели (все примитивы файла):
     // крыша/капот получат снег, пол/сиденья под крышей — нет.
@@ -1524,20 +1557,24 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     int*vc=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vc);
     const unsigned**ip=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ip);
     int*ic=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ic);
-    for(int pr=0;pr<a->nprim;pr++){
-        vp[pr]=a->prims[pr].verts; vc[pr]=a->prims[pr].vcount;
-        ip[pr]=a->prims[pr].indices; ic[pr]=a->prims[pr].index_count;
-    }
     int snow_total=0;
-    float*snow_mask=snow_mask_compute(vp,vc,ip,ic,a->nprim,&snow_total);
+    float*snow_mask=NULL;
+    if(vp&&vc&&ip&&ic){
+        for(int pr=0;pr<a->nprim;pr++){
+            vp[pr]=a->prims[pr].verts; vc[pr]=a->prims[pr].vcount;
+            ip[pr]=a->prims[pr].indices; ic[pr]=a->prims[pr].index_count;
+        }
+        snow_mask=snow_mask_compute(vp,vc,ip,ic,a->nprim,&snow_total);
+    }
     free(vp); free(vc); free(ip); free(ic);
     int*prim_off=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*prim_off);
-    { int acc=0; for(int pr=0;pr<a->nprim;pr++){ prim_off[pr]=acc; acc+=a->prims[pr].vcount; } }
-    for(int i=0;i<a->ninst;i++){
+    if(prim_off){ int acc=0; for(int pr=0;pr<a->nprim;pr++){ prim_off[pr]=acc; acc+=a->prims[pr].vcount; } }
+    for(int i=0;i<p->count;i++){
         AnimInstance*it=&a->instances[i]; AnimPrim*P=&a->prims[it->prim];
         int hs=(P->bone_idx&&it->skin>=0&&it->skin<a->nskin)?1:0;
         AnimDrawItem*bi=build_item(P,prog,hs,it->skin,it->node,
-                                   snow_mask? snow_mask+prim_off[it->prim] : NULL);
+                                   (snow_mask&&prim_off)? snow_mask+prim_off[it->prim] : NULL);
+        if(!bi) continue;
         p->items[i]=*bi; free(bi);   // структура скопирована — обёртку освободить
         for(int v=0;v<P->vcount;v++){
             float dx=P->verts[3*v+0], dy=P->verts[3*v+1], dz=P->verts[3*v+2];

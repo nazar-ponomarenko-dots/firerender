@@ -165,6 +165,7 @@ static void font_rasterize(HudFont *f, int cp, unsigned char *atlas,
 static void font_rasterize_all(HudFont *f, int atlas_w, int atlas_h, int pad)
 {
     unsigned char *atlas = calloc((size_t)atlas_w * atlas_h, 1);
+    if (!atlas) return;            // f->ok останется 0: растеризовать некуда
     int cx = pad, cy = pad, row_h = 0;
     for (int c = FONT_ASCII_FIRST; c <= FONT_ASCII_LAST; c++)
         font_rasterize(f, c, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);
