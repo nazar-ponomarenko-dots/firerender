@@ -13,6 +13,7 @@
 #include "cvars.h"
 #include "linalg.h"     // M_PI для расчёта крутизны склона
 #include "objects.h"    // objects_collide — коллизия с объектами карты
+#include "phys_body.h"  // phys_body_push — игрок толкает твёрдые тела
 #include "water.h"      // water_surface_at / water_flow_at
 
 #include <math.h>
@@ -218,6 +219,16 @@ void movement_update(Camera *cam, const WorldState *w, float dt)
         // Радиус персонажа = половина ширины/глубины коллизии (1 м -> 0.5 м,
         // см. camera.h PLAYER_HALF_W); пшеница раздвигается отдельно в wheat.vs.
         objects_collide(&cam->pos[0], &cam->pos[2], PLAYER_HALF_W);
+
+        // Тела (phys_body): игрок толкает сферу/ящики поясом — импульс от
+        // горизонтальной скорости. Только в ветке ходьбы: в fly/noclip
+        // коллизий нет по контракту (см. src/movement.c:107).
+        {
+            float vel[3] = { cam->vx, 0.0f, cam->vz };
+            float lim = cvar_get("phys_push_speed");
+            if (lim <= 0.0f) lim = 4.0f;
+            phys_body_push(cam->pos, vel, PLAYER_HALF_W, lim);
+        }
 
         float gravity = cvar_get("sv_gravity");
         if (gravity <= 0.0f) gravity = GRAVITY;

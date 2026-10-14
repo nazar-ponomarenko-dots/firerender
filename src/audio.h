@@ -11,6 +11,8 @@
 #define AUDIO_H
 
 typedef struct Sound Sound;
+struct WorldState;   // неполный тип: звуку нужен только указатель на карту
+typedef struct WorldState WorldState;   // те же типы, что в world.h
 
 // Инициализация звука: открывает устройство. Без звука движок работает
 // (если нет устройства/файлов). Вызывать один раз после SDL_Init.
@@ -52,6 +54,23 @@ void audio_3d_stop_all(void);
 
 // Слушатель (позиция камеры): вызывать каждый кадр из главного цикла.
 void audio_set_listener(const float pos[3]);
+
+// Мир для окклюзии: без него звук «всегда проходит насквозь». NULL — выкл.
+void audio_set_world(const struct WorldState *w);
+
+// Множитель громкости от перекрытия прямой видимости СЛУШАТЕЛЬ -> to
+// (1 = открыто, меньше = за холмом/стеной). Наружу — для консоли и тестов.
+float audio_occlusion_at(const float to[3]);
+
+// Консольная команда: snd_occlude <x> <y> <z> (регистрация — в cmdreg.c).
+void cmd_snd_occlude(const char *args);
+
+// Самопроверка окклюзии на синтетической стене (FR_TEST 'Z'). Число провалов.
+int audio_selftest(void);
+
+// То же на реальной карте: лог множителя для каждого звука map.json.
+// Вызывать после загрузки мира (нужны высоты и позиция игрока).
+void audio_selftest_world(const WorldState *w, const float listener[3]);
 
 // Отладка: перечисляет звуки, играющие прямо сейчас (имена через пробел).
 // Возвращает число звуков. buf — строка, size — её размер.

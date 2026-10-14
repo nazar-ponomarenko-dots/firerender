@@ -17,8 +17,8 @@
 #ifndef PHYSICS_H
 #define PHYSICS_H
 
-#define PHYS_MAX_PARTS  256
-#define PHYS_MAX_LINKS  512
+#define PHYS_MAX_PARTS  512
+#define PHYS_MAX_LINKS  2048
 
 typedef struct {
     float pos[3];        // текущая позиция

@@ -90,6 +90,28 @@ float sample_height(const WorldState *w, float wx, float wz)
     return vx0 + (vx1 - vx0) * ty;
 }
 
+float world_line_open(const WorldState *w, const float from[3], const float to[3])
+{
+    if (!w || !w->heights || !from || !to) return 1.0f;
+    float dx = to[0] - from[0];
+    float dy = to[1] - from[1];
+    float dz = to[2] - from[2];
+    float len = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (len < 2.0f) return 1.0f;      // короче шага замера — перекрывать нечем
+    // Шаг 2.5 м: мельче пикселя карты (1 м) проверять бессмысленно, а на
+    // 400 м это 160 билинейных выборок на канал — доли миллисекунды.
+    int steps = (int)(len / 2.5f);
+    if (steps < 2) steps = 2;
+    int under = 0;
+    for (int i = 1; i < steps; i++) {   // края отрезка не считаем: своя высота
+        float t = (float)i / (float)steps;
+        float y = from[1] + dy * t;
+        if (sample_height(w, from[0] + dx * t, from[2] + dz * t) > y + 0.5f)
+            under++;
+    }
+    return 1.0f - (float)under / (float)(steps - 1);
+}
+
 // Сглаживание высот: сепарабельный box-blur. Радиус — в пикселях (1 пиксель =
 // 1 метр). Сделан через префиксные суммы — O(N) на проход независимо от радиуса,
 // поэтому широкими окнами (десятки метров) можно разглаживать переходы дёшево.

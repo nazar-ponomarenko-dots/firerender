@@ -51,6 +51,9 @@
 #include "cmdreg.h"
 #include "shadow.h"          // FR_TEST: shadow_toggle, g_shadow_*
 #include "vegetation.h"      // FR_TEST: veg_* тумблеры
+#include "ecs.h"             // ECS-ядро: cvar ecs_enable, команды, selftest
+#include "ecs_scene.h"       // мост сцена<->ECS: init/enable на boot
+#include "phys_body.h"       // твёрдые тела: шаг, команды, selftest
 #include "voxfog.h"          // FR_TEST: voxfog_set
 #include "terrain.h"         // sync_cvars: terrain_shadows_bake
 #include "sun.h"             // (SunParams*)g->sun_node->params
@@ -213,6 +216,11 @@ static void boot_init(Game *g)
     audio_init();                // звук: устройство + каналы
     binds_init();                // дефолтные привязки клавиш (HL-стиль)
     fx_init_console();           // пресеты эффектов (команды fx_* — у cmdreg)
+    // ECS: мост регистрирует свои компоненты, cvar — общий рубильник слоя.
+    ecs_scene_init();
+    cvar_register("ecs_enable", 0.0f,
+                  "ECS-слой: синхронизация сцены и системы (0=выключен)");
+    phys_body_init();                // твёрдые тела: cvar'ы + пустой реестр
     // Все статические команды — из одного центрального реестра (cmdreg.c).
     cmdreg_register_all();
     hud_shared_init();           // шрифт/атласы + рендер текста для меню и консоли
@@ -227,7 +235,12 @@ static void boot_init(Game *g)
 // Флаги: x — селфтест консоли; s — тени; v/p/q/c/e/f — выкл. подсистем;
 // o — воксельный туман; t/k — без рельефа/неба; m — burst частиц у игрока
 // (пресет "fire"); d — декаль; a — дождь-эмиттер; n — снег-эмиттер;
-// y — взрыв. Требует мир: грузим сразу и входим в игру. 0 — успех,
+// y — взрыв; E — включить ECS-слой и прогнать ecs_test при старте;
+// V — ECS-мост + verify связности на первом тике;
+// u — самотест твёрдых тел; U — включить тела и налить стопку ящиков;
+// O — выключить окклюзию позиционного звука (A/B-пара к snd_occlusion 1);
+// Z — самотест окклюзии звука на синтетической стене;
+// Требует мир: грузим сразу и входим в игру. 0 — успех,
 // -1 — мир не загрузился.
 static int fr_test_apply(Game *g)
 {
@@ -235,6 +248,12 @@ static int fr_test_apply(Game *g)
     if (!fr_test) return 0;
     if (strchr(fr_test, 'x')) console_selftest();
     if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
+    if (strchr(fr_test, 'O')) cvar_set("snd_occlusion", 0.0f);  // глушение звуком off (A/B)
+    if (strchr(fr_test, 'Z')) {
+        int fails = audio_selftest();
+        SDL_Log("FR_TEST Z: audio_selftest %s (провалов %d)",
+                fails ? "FAIL" : "OK", fails);
+    }
     if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // кэш статических каскадов off
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
     if (strchr(fr_test, 'p')) g_shadow_terrain = 0;
@@ -242,6 +261,24 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'c')) g_shadow_cull = 0;
     if (strchr(fr_test, 'e')) veg_set_static_main(0);
     if (strchr(fr_test, 'f')) veg_set_dyn_main(0);
+    if (strchr(fr_test, 'E')) {
+        cvar_set("ecs_enable", 1.0f);   // ECS-слой активен с первого тика
+        int fails = ecs_selftest();
+        SDL_Log("FR_TEST E: ecs_selftest %s (провалов %d)",
+                fails ? "FAIL" : "OK", fails);
+        ecs_scene_new_generation();     // чистое поколение после теста
+    }
+    if (strchr(fr_test, 'V')) {
+        cvar_set("ecs_enable", 1.0f);
+        ecs_scene_verify_once();        // verify моста на первом же тике
+    }
+    if (strchr(fr_test, 'u')) {
+        cvar_set("phys_bodies", 1.0f);
+        int fails = phys_body_selftest();
+        SDL_Log("FR_TEST u: phys_body_selftest %s (провалов %d)",
+                fails ? "FAIL" : "OK", fails);
+        phys_body_kill_all(physics_world());   // тест ничего не оставляет
+    }
     if (game_load_world(g) != 0) {
         SDL_Log("FR_TEST: world load failed");
         return -1;
@@ -270,6 +307,15 @@ static int fr_test_apply(Game *g)
                         fx, fz, g->cam->cam.yaw, g->cam->cam.pitch);
             }
         }
+    }
+    // Z — после load_world/FR_POS: слушатель и карта готовы, есть что мерить.
+    if (strchr(fr_test, 'Z')) audio_selftest_world(&g->world, g->cam->cam.pos);
+    // U — стопка ящиков перед камерой. Позже load_world и FR_POS: тело
+    // ставится относительно камеры, а камера рождается (и телепортируется)
+    // только там, иначе «стопка» висит в пустоте до спавна игрока.
+    if (strchr(fr_test, 'U')) {
+        cvar_set("phys_bodies", 1.0f);  // тела активны с первого тика
+        cmd_phys_props("8");
     }
     // t/k — отключить рельеф/небо (нужны узлы, поэтому после load_world)
     if (strchr(fr_test, 't')) g->terr_node->render = NULL;
@@ -670,7 +716,9 @@ int main(int argc, char *argv[])
                     game_update(&game, step);   // мир: узлы, триггеры/use, туман
                     ST_ACC(s_st_gu);
                     physics_set_ground(phys_ground);
-                    physics_step(physics_world(), step);   // мини-физика (Verlet)
+                    phys_body_enable(cvar_get("phys_bodies") != 0.0f);
+                    phys_body_step(physics_world(), step);  // тела+верёвки,
+                                        // физика-поверх-physics_step (phys_body.c)
                     glb_anim_ragdoll_step_all(step);       // рэгдоллы аним-моделей
                     ST_ACC(s_st_phys);
                     audio_update();             // фоновые петли и 3D-источники

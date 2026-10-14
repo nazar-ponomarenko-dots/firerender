@@ -38,13 +38,14 @@ main.c: SDL-инициализация -> окно/GL-контекст -> boot_i
 | 1 | `resources_init()` — кеш ресурсов **до** любых загрузок |
 | 2 | `console_init()` — cvar'ы, команды, вывод `SDL_Log` в консоль |
 | 3 | `audio_init()`, `binds_init()`, `fx_init_console()` |
-| 4 | `cmdreg_register_all()` — все статические команды из одного реестра |
-| 5 | `hud_shared_init()` — шрифт/атласы (нужны меню и консоли) |
-| 6 | `app_init()` — фон `img/menu.png` |
-| 7 | `console_autoload()` — `config.cfg` (cvar'ы и бинды пользователя) |
-| 8 | `game_map_config_load()` — выбранная карта |
-| 9 | `lua_engine_init()` — `lua/main.lua` |
-| 10 | `app_set_state(APP_MENU)` (или `APP_PLAY` при `FR_TEST`) |
+| 4 | `ecs_scene_init()` (компоненты моста) + cvar `ecs_enable`, `phys_body_init()` (cvar'ы тел, пустой реестр статиков) |
+| 5 | `cmdreg_register_all()` — все статические команды из одного реестра |
+| 6 | `hud_shared_init()` — шрифт/атласы (нужны меню и консоли) |
+| 7 | `app_init()` — фон `img/menu.png` |
+| 8 | `console_autoload()` — `config.cfg` (cvar'ы и бинды пользователя) |
+| 9 | `game_map_config_load()` — выбранная карта |
+| 10 | `lua_engine_init()` — `lua/main.lua` |
+| 11 | `app_set_state(APP_MENU)` (или `APP_PLAY` при `FR_TEST`) |
 
 **Состояния (`src/app.h:13-18`):** `APP_BOOT → APP_MENU ⇄ APP_PLAY ⇄ APP_PAUSE`.
 Мир заморожен вне `APP_PLAY`; `AppState` отдаёт действия главному циклу
@@ -53,6 +54,14 @@ main.c: SDL-инициализация -> окно/GL-контекст -> boot_i
 **Такт:** фиксированный шаг логики — 100 Гц на десктопе (максимум 8 тиков за кадр),
 60 Гц на Android (максимум 4) — `src/main.c:638-650`. Рендер идёт столько раз в
 секунду, сколько успевает GPU; логика не зависит от FPS.
+
+Внутри тика порядок тоже зафиксирован: `game_update` — игрок, сущности,
+триггеры (`game.c:769-802`), затем `ecs_scene_frame` (`game.c:815`: pull
+трансформов дерева, системы ECS, push обратно только изменённых; при
+`ecs_enable 0` слой ничего не делает), затем `node_update_transforms`
+(`game.c:825`). После `game_update` — `phys_body_step` (`main.c:703`: Verlet-шаг
+плюс коллизии тел; он же шагает глобальный мир, поэтому верёвки и рэгдоллы
+работают и при выключенных телах) и `glb_anim_ragdoll_step_all` (`main.c:705`).
 
 ---
 
@@ -117,6 +126,8 @@ partial-rollback; выгрузка (`game_unload_world`, `src/game.c:700`) — �
 | `jobs.c` | мини-пул рабочих потоков |
 | `events.c` | событийная шина |
 | `entity.c` | сущности: слоты, хэндлы `serial<<16|num` |
+| `ecs.c` | ECS-ядро: id + стабильные слоты, разреженные POD-компоненты, системы по `all`-маске, отложенный kill |
+| `ecs_scene.c` | мост сцена<->ECS: поколения против висячих указателей, pull/системы/push трансформов |
 | `scene.c` | дерево сцены: создание узлов, трансформы, обход |
 | `selection.c` | рамки выделения 3D-узлов |
 | `profiler.c` | тайминги по модулям + GPU-запросы; счётчики ведёт `gl_loader.c` |
@@ -198,6 +209,7 @@ partial-rollback; выгрузка (`game_unload_world`, `src/game.c:700`) — �
 | `playerbox.c` | бокс коллизий персонажа от 3-го лица |
 | `health.c` | HP, смерть, киллкемера |
 | `physics.c` | мини-движок тел (Verlet): верёвки, рэгдолл |
+| `phys_body.c` | надстройка над тем же Verlet-миром: твёрдые тела (сфера/бокс), статические коллайдеры карты, коллизии частица-частица, толчок игроком |
 | `linalg.c` | векторы и матрицы для камеры и проецирования |
 | `lua_engine.c` | Lua-скрипты движка: песочница, `engine.*`, события |
 | `audio.c` | звук: устройство, каналы, позиционные источники |

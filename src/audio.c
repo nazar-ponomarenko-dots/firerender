@@ -8,7 +8,10 @@
 #include "audio.h"
 
 #include "cvars.h"
+#include "console.h"
+#include "mapdata.h"
 #include "resources.h"
+#include "world.h"
 
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -61,6 +64,7 @@ typedef struct {
 } Audio3D;
 static Audio3D s_3d[AUDIO_3D_CHANNELS];
 static float s_listener[3] = { 0, 0, 0 };
+static const struct WorldState *s_world = NULL;   // окклюзия: карта высот
 
 // Кеш звуков
 #define AUDIO_CACHE 16
@@ -241,6 +245,114 @@ void audio_set_listener(const float pos[3])
     s_listener[2] = pos[2];
 }
 
+void audio_set_world(const struct WorldState *w)
+{
+    s_world = w;
+}
+
+// Множитель громкости из-за перекрытия линии слушатель->источник.
+// 1 = прямо слышно; ниже — часть пути под землёй. snd_occlusion — сила
+// эффекта (0 = выключено, поведение старших сборок), snd_occlusion_min —
+// пол: даже полностью заслонённый источник остаётся едва слышным (дифракция
+// вокруг холма), иначе за холмом наступала бы абсолютная тишина.
+float audio_occlusion_at(const float to[3])
+{
+    float k = cvar_get("snd_occlusion");
+    if (k <= 0.0f || !s_world || !to) return 1.0f;
+    float open = world_line_open(s_world, s_listener, to);
+    float fmin = cvar_get("snd_occlusion_min");
+    if (fmin < 0.0f) fmin = 0.0f;
+    if (fmin > 1.0f) fmin = 1.0f;
+    float f = 1.0f - k * (1.0f - open) * (1.0f - fmin);
+    return f < fmin ? fmin : f;
+}
+
+void cmd_snd_occlude(const char *args)
+{
+    float p[3];
+    if (!args || sscanf(args, "%f %f %f", &p[0], &p[1], &p[2]) != 3) {
+        console_print("использование: snd_occlude <x> <y> <z>");
+        return;
+    }
+    float f = audio_occlusion_at(p);
+    console_print("snd_occlude: %.2f (snd_occlusion %.2f, пол %.2f)",
+                  f, cvar_get("snd_occlusion"), cvar_get("snd_occlusion_min"));
+    // console_print виден только на экране — лог даёт то же число из headless.
+    SDL_Log("snd_occlude: (%.0f %.0f %.0f) -> %.2f", p[0], p[1], p[2], f);
+}
+
+// --- Самопроверка (FR_TEST 'Z') ------------------------------------------------
+// Рельеф синтетический (сетка 8x8 м со стеной 10 м в столбце x=4): тест не
+// должен зависеть от высот конкретной карты.
+int audio_selftest(void)
+{
+    static float h[8 * 8];
+    for (int i = 0; i < 8 * 8; i++) h[i] = (i % 8 == 4) ? 10.0f : 0.0f;
+    WorldState w;
+    memset(&w, 0, sizeof w);
+    w.heights = h;
+    w.tex_w = w.tex_h = 8;
+    w.world_w = w.world_d = 7.0f;
+
+    const float from[3]   = { 0.0f, 0.0f, 3.0f };
+    const float behind[3] = { 7.0f, 0.0f, 3.0f };    // за стеной, на уровне земли
+    const float above[3]  = { 7.0f, 20.0f, 3.0f };   // та же точка, но над стеной
+    int fails = 0;
+    if (world_line_open(&w, from, behind) > 0.1f) {
+        SDL_Log("audio selftest FAIL: стена не перекрыла прямую");
+        fails++;
+    }
+    if (world_line_open(&w, from, above) < 0.99f) {
+        SDL_Log("audio selftest FAIL: путь над стеной считается закрытым");
+        fails++;
+    }
+    // Громкость: выключенная окклюзия = 1.0, включённая — до самого пола.
+    float k0 = cvar_get("snd_occlusion"), m0 = cvar_get("snd_occlusion_min");
+    audio_set_world(&w);
+    audio_set_listener(from);
+    cvar_set("snd_occlusion", 0.0f);
+    if (audio_occlusion_at(behind) < 0.99f) {
+        SDL_Log("audio selftest FAIL: snd_occlusion 0 всё равно глушит");
+        fails++;
+    }
+    cvar_set("snd_occlusion", 1.0f);
+    cvar_set("snd_occlusion_min", 0.25f);
+    float full = audio_occlusion_at(behind);
+    if (full > 0.26f || full < 0.24f) {
+        SDL_Log("audio selftest FAIL: за стеной %.2f, ожидался пол 0.25", full);
+        fails++;
+    }
+    if (audio_occlusion_at(above) < 0.99f) {
+        SDL_Log("audio selftest FAIL: над стеной глуше, чем нужно");
+        fails++;
+    }
+    cvar_set("snd_occlusion", k0);
+    cvar_set("snd_occlusion_min", m0);
+    audio_set_world(NULL);
+    return fails;
+}
+
+// То же на реальной карте: множитель для каждого sounds[] из map.json.
+// Без этого синтетический тест не доказывает, что на Ферме между игроком
+// и источником вообще есть холм.
+void audio_selftest_world(const WorldState *w, const float listener[3])
+{
+    if (!w || !listener) return;
+    audio_set_world(w);
+    audio_set_listener(listener);
+    for (int i = 0; i < mapdata_sound_count(); i++) {
+        const MapSound3D *s = mapdata_sound(i);
+        if (!s) continue;
+        SDL_Log("FR_TEST Z: звук %d (%.0f %.0f %.0f) -> %.2f", i,
+                s->pos[0], s->pos[1], s->pos[2], audio_occlusion_at(s->pos));
+    }
+    // Контрольная точка: источник в 50 м ПОД ногами обязан быть заглушён —
+    // иначе высоты не читаются (пустой мир), и все «1.00» выше ничего не значат.
+    float under[3] = { listener[0], listener[1] - 50.0f, listener[2] };
+    SDL_Log("FR_TEST Z: контрольно, под ногами -> %.2f", audio_occlusion_at(under));
+    audio_set_world(NULL);
+}
+
 // Заливает в эхо-поток: тишина (задержка) + звук — паттерн реверба
 static void echo_fill(SDL_AudioStream *st, Sound *s, int delay_ms)
 {
@@ -380,8 +492,12 @@ void audio_update(void)
             continue;
         }
         float gain = 0.0f;
+        float occ = 1.0f;
         if (t < 1.0f) {
-            gain = a->vol * sfx * (1.0f - t) * (1.0f - t);   // квадратичное затухание
+            // Окклюзия считается только для слышимого канала: это ~160
+            // выборок высоты на источник, а не на все 8 каналов.
+            occ = audio_occlusion_at(a->pos);
+            gain = a->vol * sfx * (1.0f - t) * (1.0f - t) * occ;   // квадратичное затухание
             if (a->loop) {
                 int queued = SDL_GetAudioStreamQueued(a->stream);
                 if (queued < (int)a->snd->len / 2)
@@ -397,7 +513,7 @@ void audio_update(void)
         for (int e = 0; e < AUDIO_ECHO_N; e++) {
             float eg = 0.0f;
             if (t < 1.0f)
-                eg = a->vol * sfx * (0.10f + t * (e == 0 ? 0.25f : 0.12f));
+                eg = a->vol * sfx * (0.10f + t * (e == 0 ? 0.25f : 0.12f)) * occ;
             SDL_SetAudioStreamGain(a->echo[e], eg);
             if (eg > 0.0f && a->loop) {
                 Uint32 delay_bytes = (Uint32)(a->snd->spec.freq * bps *

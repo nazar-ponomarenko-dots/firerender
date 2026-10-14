@@ -22,6 +22,8 @@
 #include "console.h"
 #include "cvars.h"
 #include "decals.h"
+#include "ecs.h"
+#include "ecs_scene.h"
 #include "entity.h"
 #include "fauna.h"
 #include "field.h"
@@ -660,6 +662,7 @@ static void audio_stop_map(void)
 static void scene_teardown(Game *g)
 {
     renderer_teardown();         // ~ renderer_setup (создавался последним)
+    ecs_scene_shutdown();        // ~ ecs-пары узлов (до освобождения дерева)
     entity_shutdown();           // ~ entity_* (kill освобождает свои узлы)
     hud_cleanup(g->hud_node);    // ~ hud_make_node (последний из узлов)
     minimap_cleanup(g->mm_node); // ~ minimap_make_node
@@ -797,6 +800,20 @@ void game_update(Game *g, float dt)
             g->field_node->pos[2] = g->cam->cam.pos[2];
         }
         map_actions_update(g);      // триггеры + взаимодействие (E)
+
+        // ECS-слой: pull трансформов узлов -> системы -> push в изменённые
+        // узлы. ПОСЛЕ всей логики и ДО node_update_transforms — мировые
+        // матрицы рендеру считаются уже от финальных позиций.
+        {
+            static int s_ecs_was_on = -1;
+            int on = cvar_get("ecs_enable") != 0.0f;
+            if (on && s_ecs_was_on == 0) ecs_scene_new_generation();
+            // Без нового gen включение «на лету» плодило бы дубли: пул
+            // помнит пары прошлого прогона, а pull создал бы новые.
+            s_ecs_was_on = on;
+            ecs_scene_enable(on);
+            if (on) ecs_scene_frame(g->root, dt);
+        }
     } else {
         // Камера пересчитывает матрицы и в меню/паузе (ввод заблокирован):
         // FOV из меню применяется сразу, а не только при входе в игру.
@@ -808,6 +825,7 @@ void game_update(Game *g, float dt)
     node_update_transforms(g->root);
     voxfog_update(g->cam->cam.pos);
     audio_set_listener(g->cam->cam.pos);
+    audio_set_world(&g->world);   // окклюзия звука рельефом (heights==NULL — ок)
     // Таймер сообщения карты (message из триггеров/use)
     if (g->ui_msg_t > 0.0f && app_state() == APP_PLAY)
         g->ui_msg_t -= dt;

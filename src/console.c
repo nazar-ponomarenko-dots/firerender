@@ -978,6 +978,10 @@ void console_init(void)
     cvar_register_ex("snd_sfx", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость звуков (шаги, эффекты)");
     cvar_register_ex("snd_dialog", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость диалогов");
     cvar_register_ex("snd_music", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "громкость музыки");
+    cvar_register_ex("snd_occlusion", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "заглушение позиционного звука за холмом (0 = выкл)");
+    cvar_register_ex("snd_occlusion_min", 0.25f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "пол глушения: минимальная громкость полностью заслонённого источника");
     // Строковая переменная (как name в GoldSrc): значение в c->str.
     cvar_register_string("name", "player", "имя игрока (строка)");
 

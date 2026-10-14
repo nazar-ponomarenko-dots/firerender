@@ -23,6 +23,7 @@
 #include "linalg.h"
 #include "mapdata.h"
 #include "material.h"
+#include "phys_body.h"
 #include "resources.h"
 #include "shader.h"
 #include "shadow.h"
@@ -81,14 +82,31 @@ typedef struct {
 } ObjectsParams;
 
 // Цилиндры коллизий объектов (для camera.c — выталкивание игрока)
-static struct { float x, z, r; } s_col[OBJECT_MAX];
+struct ObjCol { float x, z, r; float base, h; };   // base..base+h — для тел
+static struct ObjCol s_col[OBJECT_MAX];
 static int s_col_n = 0;
 // Квадраты коллизий из collisions[] (XZ-прямоугольники)
-static struct { float x, z, hw, hz; } s_box[OBJECT_MAX];
+struct ObjBox { float x, z, hw, hz; float base, h; };
+static struct ObjBox s_box[OBJECT_MAX];
 static int s_box_n = 0;
 static ObjectsParams *s_objs = NULL;   // для hot-reload (shader_on_reshade)
 // Время (для анимации UV)
 static float s_time = 0.0f;
+
+// Те же цилиндры/квадраты, из которых выталкивается игрок, отдают объём и
+// твёрдым телам (phys_body): без этого ящик пролетает сквозь дерево насквозь.
+static void objects_sync_phys_statics(void)
+{
+    for (int i = 0; i < s_col_n; i++)
+        phys_static_add_cylinder(s_col[i].x, s_col[i].z, s_col[i].r,
+                                 s_col[i].base, s_col[i].base + s_col[i].h);
+    for (int i = 0; i < s_box_n; i++) {
+        float c[3] = { s_box[i].x, s_box[i].base + s_box[i].h * 0.5f,
+                       s_box[i].z };
+        float e[3] = { s_box[i].hw, s_box[i].h * 0.5f, s_box[i].hz };
+        phys_static_add_box(c, e);
+    }
+}
 
 // Заполняет локации uniform'ов программы (необязательные = -1)
 static ObjLocs obj_locs(GLenum prog)
@@ -223,6 +241,7 @@ static void objects_params_release(ObjectsParams *p)
     if (s_objs == p) s_objs = NULL;
     s_col_n = 0;
     s_box_n = 0;
+    phys_static_clear();   // объекты разобраны — их коллайдеры больше не живые
     for (int i = 0; i < p->count; i++) {
         if (p->inst[i].tex_custom)
             glDeleteTextures(1, &p->inst[i].tex_custom);
@@ -253,6 +272,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     if (n > OBJECT_MAX) n = OBJECT_MAX;
     s_col_n = 0;
     s_box_n = 0;
+    phys_static_clear();   // новая карта — новая статика для тел
     for (int i = 0; i < n; i++) {
         const MapObject *o = mapdata_object(i);
         if (!o || !o->model[0]) continue;
@@ -313,6 +333,8 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
             s_col[s_col_n].x = it->pos[0];
             s_col[s_col_n].z = it->pos[2];
             s_col[s_col_n].r = it->radius;
+            s_col[s_col_n].base = it->pos[1];
+            s_col[s_col_n].h = it->height;
             s_col_n++;
         }
         p->count++;
@@ -352,11 +374,18 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         s_box[s_box_n].z = z;
         s_box[s_box_n].hw = c->size[0] * 0.5f;
         s_box[s_box_n].hz = c->size[1] * 0.5f;
+        // Игрок блокируется по XZ (высота ему безразлична), а телам нужен
+        // объём: base — рельеф под квадратом, h — height из JSON (0 = заглушка).
+        s_box[s_box_n].base = sample_height(ws, x, z);
+        s_box[s_box_n].h = c->height > 0.01f ? c->height : 2.0f;
         s_box_n++;
         SDL_Log("Collision: box at %.0f,%.0f size %.0fx%.0f%s%s", x, z,
                 c->size[0], c->size[1],
                 c->object[0] ? " -> " : "", c->object[0] ? c->object : "");
     }
+
+    // Коллизии карты → статические тела физики (после обоих реестров).
+    objects_sync_phys_statics();
 
     // --- Шейдеры ---
     p->prog = make_program("shaders/object.vs", "shaders/object.fs");

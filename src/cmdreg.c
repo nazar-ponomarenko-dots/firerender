@@ -12,12 +12,16 @@
 #include "cmdreg.h"
 
 #include "actions.h"     // g_act + ActionId
+#include "audio.h"       // cmd_snd_occlude
 #include "attach.h"      // cmd_attach / cmd_sprite
 #include "commands.h"    // команды-действия
 #include "material.h"    // (cmd_matlist в commands.c)
 #include "fx.h"          // команды эффектов
 #include "glb.h"         // cmd_glb
 #include "glb_anim.h"    // cmd_glbanim + auto-выбор в cmd_glb
+#include "ecs.h"         // cmd_ecs_*
+#include "ecs_scene.h"   // cmd_ecs_verify
+#include "phys_body.h"   // cmd_phys_sphere/box/props/bodies
 
 // --- +/- команды действия (ставят флаг g_act) ---------------------------------
 #define DEF_ACTION(id, name)                                                    \
@@ -88,7 +92,12 @@ static const ConCmdDesc s_cmds[] = {
     { "firstperson",   "вид от первого лица",        cmd_firstperson },
     { "ent_create",    "ent_create <класс> [x y z]", cmd_ent_create },
     { "ent_list",      "список сущностей",           cmd_ent_list },
+    { "ecs_list",      "список ECS-сущностей/компонентов/систем", cmd_ecs_list },
+    { "ecs_stats",     "счётчики ECS: сущности, компоненты, системы, мост", cmd_ecs_stats },
+    { "ecs_test",      "самотест ядра ECS (провалы -> FAIL в консоли)", cmd_ecs_test },
+    { "ecs_verify",    "проверка связности моста сцена<->ECS", cmd_ecs_verify },
     { "snd_test",      "проиграть все звуки подряд", cmd_snd_test },
+    { "snd_occlude",   "snd_occlude <x> <y> <z> — множитель глушения от слушателя до точки", cmd_snd_occlude },
     { "screenshot",    "сохранить кадр в PNG (F12)", cmd_screenshot },
     { "save",          "сохранить позицию игрока (F5)", cmd_save },
     { "load",          "загрузить сохранение (F9)",  cmd_load },
@@ -103,6 +112,10 @@ static const ConCmdDesc s_cmds[] = {
     { "phys_push",     "phys_push [сила] — толкнуть конец верёвки",   cmd_phys_push },
     { "phys_clear",    "phys_clear — убрать физический мир",          cmd_phys_clear },
     { "phys_ragdoll",  "phys_ragdoll [hang] [kick] — рэгдолл на аним-модели", cmd_phys_ragdoll },
+    { "phys_sphere",   "phys_sphere [радиус] — сфера у камеры (тела вкл)", cmd_phys_sphere },
+    { "phys_box",      "phys_box [размер] — ящик у камеры (тела вкл)",   cmd_phys_box },
+    { "phys_props",    "phys_props [n] — стопка ящиков (<=32) перед камерой", cmd_phys_props },
+    { "phys_bodies",   "статистика тел: сколько, где, сон",              cmd_phys_bodies },
     { "glb",           "glb <glb> [x y z] [scale] — меш (.glb), скиннинг если есть", cmd_glb },
     { "glbanim",       "glbanim <glb> [x y z] [scale] — анимир. меш (skinning)", cmd_glbanim },
     { "glbclips",      "glbclips [имя-узла] — список клипов анимации", cmd_glbclips },

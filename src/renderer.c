@@ -28,6 +28,7 @@
 #include "sky.h"
 #include "ssr.h"
 #include "physics.h"
+#include "phys_body.h"      // окраска частиц твёрдых тел на отладных точках
 #include "glb_anim.h"       // отладка частиц рэгдолла
 #include "terrain.h"
 #include "voxfog.h"
@@ -1128,6 +1129,9 @@ void renderer_end(Game *g, float dt)
                 float col[4] = { 0.3f, 0.9f, 1.0f, 0.9f };   // свободная
                 if (w->part[i].inv_mass <= 0.0f) {
                     col[0] = 1.0f; col[1] = 0.6f; col[2] = 0.2f;   // прибитая
+                } else if (phys_body_index_of_part(i) >= 0) {
+                    // частица твёрдого тела: иначе ящик неотличим от верёвки
+                    col[0] = 0.9f; col[1] = 0.3f; col[2] = 0.9f;
                 }
                 hud_rect_draw(s_vw, s_vh, sx - 3.0f, sy - 3.0f, 6.0f, 6.0f, col);
             }
