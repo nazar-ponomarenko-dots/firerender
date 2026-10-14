@@ -1,161 +1,161 @@
-# Схема `map.json`
+# `map.json` schema
 
-Каждая карта описывается одним JSON-файлом `map/map.json` — внутри zip-пака
-`maps/<карта>.zip` или в dev-папке `map/` (порядок разрешения ресурсов:
-pak → диск → `base_dir` → `../`). Парсер — `src/mapdata.c:753-1056`;
-структуры и лимиты — `src/mapdata.h`.
+Every map is described by a single JSON file `map/map.json` — inside the zip pak
+`maps/<map>.zip` or in the dev folder `map/` (resource resolution order:
+pak → disk → `base_dir` → `../`). Parser — `src/mapdata.c:753-1056`;
+structures and limits — `src/mapdata.h`.
 
-Правила разбора:
+Parsing rules:
 
-- **Каждая карта разбирается с чистого состояния.** Снимок встроенных
-  дефолтов восстанавливается в начале (`mapdata_reset_defaults`,
-  `mapdata.c:132-151`), поэтому отсутствующая секция не наследует параметры
-  предыдущей карты.
-- **Неизвестное имя ключа молча игнорируется**, неизвестное *значение*
-  перечислимого поля (тип света/воды/дороги/материала) — запись пропускается
-  с сообщением в лог.
-- **Массив `[x, y, z]`** читается поэлементно; недостающий элемент = дефолт
-  поля (`parse_vec3`, `mapdata.c:167-172`).
-- Числа всегда `float` (JSON-число), флаги — `true`/`false`.
+- **Every map is parsed from a clean state.** The built-in defaults
+  snapshot is restored at the start (`mapdata_reset_defaults`,
+  `mapdata.c:132-151`), so a missing section never inherits
+  parameters from the previous map.
+- **An unknown key name is silently ignored**; an unknown *value*
+  of an enumerated field (light/water/road/material type) — the
+  record is skipped with a message in the log.
+- **Array `[x, y, z]`** is read element by element; a missing
+  element = the field's default (`parse_vec3`, `mapdata.c:167-172`).
+- Numbers are always `float` (JSON number), flags are `true`/`false`.
 
-Корневых ключей 24: `map`, `field`, `player`, `fog`, `terrain`, `veg`, `sky`,
+There are 24 root keys: `map`, `field`, `player`, `fog`, `terrain`, `veg`, `sky`,
 `bloom`, `shadows`, `surfaces`, `paints[]`, `roads[]`, `info`, `ambient`,
 `music`, `cvars`, `commands`, `lights[]`, `objects[]`, `collisions[]`,
 `sounds[]`, `triggers[]`, `fauna[]`, `waters[]`.
 
 ---
 
-## `map` — карта высот
+## `map` — height map
 
-| Поле | Тип | Дефолт | Комментарий |
+| Field | Type | Default | Comment |
 |---|---|---|---|
-| `image` | строка | `map.png` | Путь к PNG высот, относительно папки карты. Нет поля — берётся `map.png` с предупреждением |
+| `image` | string | `map.png` | Path to the height PNG, relative to the map folder. Field missing — `map.png` is used with a warning |
 
-## `field` — поле растительности
+## `field` — vegetation field
 
-| Поле | Тип | Дефолт | Комментарий |
+| Field | Type | Default | Comment |
 |---|---|---|---|
-| `center` | `[x, z]` | центр мира | Оба поля (`center` и `size`) обязательны, иначе секция не считается заданной |
-| `size` | `[w, d]` | — | Метры |
-| `attached` | bool | `false` | Поле следует за игроком (бесконечное поле) |
+| `center` | `[x, z]` | world center | Both fields (`center` and `size`) are required, otherwise the section is not considered specified |
+| `size` | `[w, d]` | — | Meters |
+| `attached` | bool | `false` | The field follows the player (infinite field) |
 
-## `player` — старт
+## `player` — start
 
-| Поле | Тип | Дефолт |
+| Field | Type | Default |
 |---|---|---|
-| `pos` | `[x, y, z]` | — (секция применяется, только если `pos` присутствует) |
-| `yaw` | float | `3.14159` (радианы) |
-| `pitch` | float | `-0.5` (радианы) |
+| `pos` | `[x, y, z]` | — (the section applies only if `pos` is present) |
+| `yaw` | float | `3.14159` (radians) |
+| `pitch` | float | `-0.5` (radians) |
 | `fov` | float | `60` |
 
-## `fog` — воксельный объёмный туман
+## `fog` — volumetric voxel fog
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `enabled` | 1 | Туман вкл |
-| `strength` | 0.9 | Общая сила |
-| `density_ground` / `ground_height` | 0.020 / 5.0 | Приземный слой |
-| `density_field` / `field_height` | 0.032 / 8.0 | Слой над полем |
-| `density_water` / `water_height` | 0.030 / 4.0 | Слой над водой |
-| `color` | `[0.52, 0.56, 0.60]` | Базовый цвет дымки |
-| `color_sun` | `[0.85, 0.62, 0.45]` | Тёплый оттенок к солнцу |
-| `glare` | 0.20 | Свечение вокруг солнца |
-| `ray_strength` | 1.4 | Лучи (god rays) |
+| `enabled` | 1 | Fog on |
+| `strength` | 0.9 | Overall strength |
+| `density_ground` / `ground_height` | 0.020 / 5.0 | Ground layer |
+| `density_field` / `field_height` | 0.032 / 8.0 | Layer above the field |
+| `density_water` / `water_height` | 0.030 / 4.0 | Layer above water |
+| `color` | `[0.52, 0.56, 0.60]` | Base haze color |
+| `color_sun` | `[0.85, 0.62, 0.45]` | Warm tint toward the sun |
+| `glare` | 0.20 | Glow around the sun |
+| `ray_strength` | 1.4 | Rays (god rays) |
 
-Переключатель режима — cvar `r_fog_mode`
-([cvars.md](cvars.md#туман)).
+The mode toggle is the cvar `r_fog_mode`
+([cvars.md](cvars.md#fog)).
 
-## `terrain` — рельеф
+## `terrain` — terrain
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `min_height` / `max_height` | -100 / 400 | Диапазон высот, м |
-| `band_t0` / `band_t1` | 0.16 / 0.40 | Полоса нормализованных высот PNG (0..1), которой отдаётся весь играбельный диапазон |
-| `band_h0` / `band_h1` | -50 / 200 | Метры на концах этой полосы (`world.c:37-50`) |
-| `blur` | 2 | Проходов сглаживания |
-| `blur_radius` | 4 | Радиус сглаживания, тексели |
-| `erosion` | 40 | Итераций эрозии |
-| `erosion_slope` | 35.0 | Угол, с которого эрозия работает, ° |
-| `ground_tex` | `img/ground.png` | Базовая текстура грунта |
-| `tex_scale` | 6.4 | Метров на тайл |
-| `field_color` | `[0.68, 0.57, 0.33]` | Цвет поля |
-| `field_blend` | 0.85 | Смешение цвета поля с грунтом |
-| `fog_start` / `fog_end` | 0.75 / 1.60 | Дистанции тумана (доли размера мира) |
+| `min_height` / `max_height` | -100 / 400 | Height range, m |
+| `band_t0` / `band_t1` | 0.16 / 0.40 | Normalized PNG height band (0..1) that is mapped to the whole playable range |
+| `band_h0` / `band_h1` | -50 / 200 | Meters at the ends of that band (`world.c:37-50`) |
+| `blur` | 2 | Smoothing passes |
+| `blur_radius` | 4 | Smoothing radius, texels |
+| `erosion` | 40 | Erosion iterations |
+| `erosion_slope` | 35.0 | Angle from which erosion starts working, ° |
+| `ground_tex` | `img/ground.png` | Base ground texture |
+| `tex_scale` | 6.4 | Meters per tile |
+| `field_color` | `[0.68, 0.57, 0.33]` | Field color |
+| `field_blend` | 0.85 | Blend of the field color into the ground |
+| `fog_start` / `fog_end` | 0.75 / 1.60 | Fog distances (fractions of world size) |
 
-## `veg` — растительность
+## `veg` — vegetation
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `grass_density` | 1.2 | шт/м² |
-| `wheat_density` | 140 | шт/м² |
-| `dandelion_density` | 0.05 | шт/м² сверх травы |
-| `grass_floor` / `wheat_floor` / `dandelion_floor` | 0.012 / 1.0 / 0.002 | Минимальная плотность (шт/м²) вне поля: ниже неё поле не режется, чтобы карта не была лысой |
-| `dyn_radius` | 48 | Радиус динамических (вокруг игрока) чанков, м |
-| `vis_radius` | 220 | Радиус прорисовки, м |
-| `falloff` | 16 | Плавность спада плотности к краю |
+| `grass_density` | 1.2 | items/m² |
+| `wheat_density` | 140 | items/m² |
+| `dandelion_density` | 0.05 | items/m² on top of grass |
+| `grass_floor` / `wheat_floor` / `dandelion_floor` | 0.012 / 1.0 / 0.002 | Minimum density (items/m²) outside the field: below it the field is not clipped, so the map is not bare |
+| `dyn_radius` | 48 | Radius of dynamic (around the player) chunks, m |
+| `vis_radius` | 220 | Draw radius, m |
+| `falloff` | 16 | Smoothness of the density falloff toward the edge |
 
-Это дефолты секции; пользовательские множители — cvar'ы `r_*_density`,
+These are the section defaults; user multipliers are the cvars `r_*_density`,
 `r_veg_*`.
 
 ## `sky`, `bloom`, `shadows`
 
-| Секция | Поле | Дефолт | Смысл |
+| Section | Field | Default | Meaning |
 |---|---|---|---|
-| `sky` | `tint` | `[1, 1, 1]` | Тонировка панорамы |
-| `sky` | `tex` | `img/skybox.png` | Панорама (equirect) |
-| `bloom` | `threshold` | 0.75 | Порог bright-pass |
-| `bloom` | `intensity` | 1.0 | Сила ярких пикселей |
-| `bloom` | `strength` | 0.425 | Сила свечения в композите |
-| `shadows` | `size` | 2048 | Сторона карты теней, тексели |
+| `sky` | `tint` | `[1, 1, 1]` | Panorama tint |
+| `sky` | `tex` | `img/skybox.png` | Panorama (equirect) |
+| `bloom` | `threshold` | 0.75 | Bright-pass threshold |
+| `bloom` | `intensity` | 1.0 | Strength of bright pixels |
+| `bloom` | `strength` | 0.425 | Glow strength in the composite |
+| `shadows` | `size` | 2048 | Shadow map side, texels |
 
-## `surfaces` — слои splat-карты
+## `surfaces` — splat map layers
 
-Порядок слоёв фиксирован: `dirt`, `sand`, `gravel`, `asphalt`
-(`SPLAT_DIRT/SAND/GRAVEL/ASPHALT`). Для каждого слоя:
+The layer order is fixed: `dirt`, `sand`, `gravel`, `asphalt`
+(`SPLAT_DIRT/SAND/GRAVEL/ASPHALT`). For each layer:
 
-| Поле | Дефолт dirt / sand / gravel / asphalt |
+| Field | Default dirt / sand / gravel / asphalt |
 |---|---|
 | `tex` | `img/dirt.png` / `img/sand.png` / `img/gravel.png` / `img/asphalt.png` |
-| `scale` | 3.0 / 2.5 / 2.0 / 4.0 (метров на тайл) |
-| `grass` | 0.25 / 0 / 0 / 0 (множитель плотности травы; 0 = травы нет) |
+| `scale` | 3.0 / 2.5 / 2.0 / 4.0 (meters per tile) |
+| `grass` | 0.25 / 0 / 0 / 0 (grass density multiplier; 0 = no grass) |
 
-Общие поля секции: `resolution` (1.0 — текселей splat-карты на метр) и
-`slope_rock` (42.0° — круче которого проступает камень).
+Section-wide fields: `resolution` (1.0 — splat map texels per meter) and
+`slope_rock` (42.0° — above which rock shows through).
 
-## `paints[]` — покраска поверхности
+## `paints[]` — surface painting
 
-Элемент:
+Element:
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `material` | обязателен | `dirt`/`soil`, `sand`, `gravel`/`rock`, `asphalt`/`road`. Неизвестное имя → запись пропущена |
-| `shape` | авто | `circle` / `rect` / `path`. Без поля: ≥2 точек → `path`, `size` > 0 → `rect`, иначе `circle` |
-| `pos` | `[0, 0]` | Центр (x, z) |
-| `radius` | `path`/`rect`: 0; `circle`: 8 если ≤ 0.01 | Радиус круга |
-| `size` | `[0, 0]` | Полуразмеры прямоугольника |
-| `points` | — | `[[x, z], …]`, до 64 точек (`MAP_PAINT_MAX_POINTS`) |
-| `width` | 4.0 | Ширина мазка `path` |
-| `edge` | 2.0 | Мягкость края |
-| `strength` | 1.0 | Непрозрачность мазка |
+| `material` | required | `dirt`/`soil`, `sand`, `gravel`/`rock`, `asphalt`/`road`. Unknown name → record skipped |
+| `shape` | auto | `circle` / `rect` / `path`. Without the field: ≥2 points → `path`, `size` > 0 → `rect`, otherwise `circle` |
+| `pos` | `[0, 0]` | Center (x, z) |
+| `radius` | `path`/`rect`: 0; `circle`: 8 if ≤ 0.01 | Circle radius |
+| `size` | `[0, 0]` | Rectangle half-extents |
+| `points` | — | `[[x, z], …]`, up to 64 points (`MAP_PAINT_MAX_POINTS`) |
+| `width` | 4.0 | Stroke width of the `path` |
+| `edge` | 2.0 | Edge softness |
+| `strength` | 1.0 | Stroke opacity |
 
-Максимум записей — 64 (`MAP_MAX_PAINTS`).
+Maximum records — 64 (`MAP_MAX_PAINTS`).
 
-## `roads[]` — дороги
+## `roads[]` — roads
 
-Элемент: обязательны `type` (или дефолт `dirt`) и `points` (≥2 точки, до 64).
+Element: `type` (or default `dirt`) and `points` (≥2 points, up to 64) required.
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
-| `name` | Имя для лога |
-| `type` | `auto`/`asphalt` → асфальт с щебневой обочиной, `dirt`/`ground` → грунтовка с колеями, `gravel` → щебень, `path`/`trail` → тропинка. Неизвестный тип → пропуск |
-| `material`, `shoulder_material` | Переопределение слоёв (имена как в `paints`) |
-| `width`, `shoulder`, `edge` | Geometry: полоса, обочина, мягкость края |
-| `flatten` / `flatten_extra` | Насколько дорога выпрямляет рельеф и на сколько шире полосы |
-| `ruts` | Колеи |
-| `veg_clear` | true — убирать траву с дороги |
-| `points` | `[[x, z], …]` осевая линия |
+| `name` | Name for the log |
+| `type` | `auto`/`asphalt` → asphalt with a gravel shoulder, `dirt`/`ground` → dirt road with ruts, `gravel` → gravel, `path`/`trail` → trail. Unknown type → skip |
+| `material`, `shoulder_material` | Layer override (names as in `paints`) |
+| `width`, `shoulder`, `edge` | Geometry: strip, shoulder, edge softness |
+| `flatten` / `flatten_extra` | How much the road flattens the terrain and how much wider than the strip |
+| `ruts` | Ruts |
+| `veg_clear` | true — remove grass from the road |
+| `points` | `[[x, z], …]` centerline |
 
-Пресеты по типу (`mapdata.c:586-607`):
+Presets per type (`mapdata.c:586-607`):
 
 | type | material / shoulder | width | shoulder | edge | flatten | flatten_extra | ruts |
 |---|---|---|---|---|---|---|---|
@@ -164,133 +164,133 @@ pak → диск → `base_dir` → `../`). Парсер — `src/mapdata.c:753-
 | `dirt` | dirt / dirt | 4.0 | 1.0 | 1.2 | 0.65 | 3.0 | 0.6 |
 | `path` | dirt / dirt | 1.3 | 0.4 | 0.6 | 0.30 | 1.5 | 0.15 |
 
-Максимум дорог — 32 (`MAP_MAX_ROADS`).
+Maximum roads — 32 (`MAP_MAX_ROADS`).
 
-## `lights[]` — источники света
+## `lights[]` — light sources
 
-До 16 записей (`MAP_MAX_LIGHTS`).
+Up to 16 records (`MAP_MAX_LIGHTS`).
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `type` | `directional` | `directional` / `point` / `spot`; неизвестный → пропуск |
-| `name` | `""` | Имя (для `attached`-света и отладки) |
-| `pos` | `[0, 0, 0]` | Позиция (для направленного не используется) |
-| `dir` | `[0, 0, 0]` | Направление |
-| `color` | `[1, 1, 1]` | Цвет |
-| `intensity` | 1.0 | Сила |
-| `range` | 20.0 | Радиус для point/spot, м |
-| `angle` | 0.6 | Полуугол конуса, радианы |
-| `attached` | false | Свет следует за игроком (фонарь) |
-| `shadow.enabled` | true | Тени от источника |
-| `shadow.bias` | 4.0 | Смещение, латеральные тексели |
-| `shadow.bias_veg` | 2.0 | То же для травы |
+| `type` | `directional` | `directional` / `point` / `spot`; unknown → skip |
+| `name` | `""` | Name (for `attached` lights and debugging) |
+| `pos` | `[0, 0, 0]` | Position (unused for a directional light) |
+| `dir` | `[0, 0, 0]` | Direction |
+| `color` | `[1, 1, 1]` | Color |
+| `intensity` | 1.0 | Strength |
+| `range` | 20.0 | Radius for point/spot, m |
+| `angle` | 0.6 | Cone half-angle, radians |
+| `attached` | false | Light follows the player (flashlight) |
+| `shadow.enabled` | true | Shadows from this source |
+| `shadow.bias` | 4.0 | Bias, lateral texels |
+| `shadow.bias_veg` | 2.0 | Same for grass |
 
-Point/spot рисуются через Forward+ кластеры (`lights.c`, cvar `r_clustered`).
+Point/spot lights are drawn through Forward+ clusters (`lights.c`, cvar `r_clustered`).
 
-## `objects[]` — модели и пропи
+## `objects[]` — models and props
 
-До 256 записей (`MAP_MAX_OBJECTS`).
+Up to 256 records (`MAP_MAX_OBJECTS`).
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `name` | `""` | Имя объекта; им привязываются `collisions[]` |
-| `model` | `""` | Путь к PNG (биллборд) / `.obj` / `.glb` |
-| `class` | `prop_static` | Класс сущности для entity-системы |
-| `pos` | `[0, 0, 0]` | Позиция, метры |
-| `rot` | `[0, 0, 0]` | Разбирается и хранится в радианах, но рендер объектов поворот не применяет (`objects.c:299-322`) |
-| `scale` | `[1, 1, 1]` | Только массив из 3 чисел, иначе единичный; значение ≤ 0.01 трактуется как 1 |
-| `billboard` | false | Всегда лицом к камере (иначе — крест из двух квадов) |
-| `collision` | false | Непроходимый цилиндр вокруг базы объекта (игрок и твёрдые тела) |
-| `radius` | 1.5 | Радиус коллизии |
-| `shader` | `default` | Строка `default`/`billboard`/`flat` **или** объект `{ "vs": "shaders/x.vs", "fs": "shaders/x.fs" }`; `fs` обязателен для кастомного |
-| `render` | — | Блок отображения (см. ниже) |
-| `use` | — | Взаимодействие по `+use` (см. ниже) |
+| `name` | `""` | Object name; `collisions[]` attach by it |
+| `model` | `""` | Path to a PNG (billboard) / `.obj` / `.glb` |
+| `class` | `prop_static` | Entity class for the entity system |
+| `pos` | `[0, 0, 0]` | Position, meters |
+| `rot` | `[0, 0, 0]` | Parsed and stored in radians, but the object renderer does not apply the rotation (`objects.c:299-322`) |
+| `scale` | `[1, 1, 1]` | Only an array of 3 numbers, otherwise identity; a value ≤ 0.01 is treated as 1 |
+| `billboard` | false | Always faces the camera (otherwise — a cross of two quads) |
+| `collision` | false | Impassable cylinder around the object base (player and solid bodies) |
+| `radius` | 1.5 | Collision radius |
+| `shader` | `default` | String `default`/`billboard`/`flat` **or** object `{ "vs": "shaders/x.vs", "fs": "shaders/x.fs" }`; `fs` is required for a custom one |
+| `render` | — | Display block (see below) |
+| `use` | — | Interaction via `+use` (see below) |
 
 ### `render = { … }`
 
-Значения по умолчанию при наличии блока: tint `[1,1,1]`, alpha 1,
+Defaults when the block is present: tint `[1,1,1]`, alpha 1,
 `blend` = alphatest, `cull` = none, `depth_write` = true, `wrap` = clamp,
 `filter` = linear, tile `[1,1]`, offset/scroll `[0,0]`.
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
 | `tint` | `[r, g, b]` |
-| `alpha` | Прозрачность |
-| `blend` | `alphatest` (по умолчанию) / `alpha` / `additive` / `opaque` |
+| `alpha` | Transparency |
+| `blend` | `alphatest` (default) / `alpha` / `additive` / `opaque` |
 | `cull` | `none` / `back` / `front` |
 | `depth_write` | bool |
 | `texture.wrap` | `clamp` / `repeat` / `mirror` |
 | `texture.filter` | `linear` / `nearest` / `mipmap` |
-| `texture.tile` / `texture.offset` / `texture.scroll` | `[u, v]` — прокрутка UV анимирует текстуру |
-| `size` | `{ "width": N, "height": M }` — фиксированный размер в метрах (по умолчанию 5×5) |
+| `texture.tile` / `texture.offset` / `texture.scroll` | `[u, v]` — animating UV scrolls the texture |
+| `size` | `{ "width": N, "height": M }` — fixed size in meters (default 5×5) |
 
 ### `use = { … }`
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
-| `commands` | Массив консольных команд (до 8, `MAP_ACTIONS_MAX`) |
-| `message` | Сообщение по центру экрана |
-| `sound` | Звук |
-| `once` | Срабатывать один раз |
+| `commands` | Array of console commands (up to 8, `MAP_ACTIONS_MAX`) |
+| `message` | Message in the center of the screen |
+| `sound` | Sound |
+| `once` | Fire only once |
 
-## `collisions[]` — коллайдеры-параллелепипеды
+## `collisions[]` — AABB colliders
 
-До 256 (`MAP_MAX_COLLISIONS`). Поля: `object` (имя объекта-владельца),
-`pos` `[x, y, z]`, `size` `[w, d]` (1×1 по умолчанию), `height` (4.0).
+Up to 256 (`MAP_MAX_COLLISIONS`). Fields: `object` (owning object name),
+`pos` `[x, y, z]`, `size` `[w, d]` (1×1 by default), `height` (4.0).
 
-Игрок блокируется по XZ (`objects_collide`), а `height` задаёт верх box-коллайдера
-твёрдых тел (`phys_body`): без него ящик проваливался бы сквозь постройку.
-`height <= 0` → 2 м.
+The player is blocked on XZ (`objects_collide`), while `height` sets the top of
+the solid box collider (`phys_body`): without it a box would fall through the
+structure. `height <= 0` → 2 m.
 
-## `sounds[]` — позиционные звуки
+## `sounds[]` — positional sounds
 
-До 16 (`MAP_MAX_SOUNDS`). Пустое `sound` → запись игнорируется.
-Поля: `sound` (путь), `pos`, `volume` (0.7), `radius` (25).
+Up to 16 (`MAP_MAX_SOUNDS`). An empty `sound` → the record is ignored.
+Fields: `sound` (path), `pos`, `volume` (0.7), `radius` (25).
 
-## `triggers[]` — триггеры
+## `triggers[]` — triggers
 
-До 64 (`MAP_MAX_TRIGGERS`).
+Up to 64 (`MAP_MAX_TRIGGERS`).
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `name` | `""` | Имя |
-| `pos` | `[0, 0, 0]` | Центр |
-| `size` | `[1, 1]` | Полуразмеры по X/Z |
-| `once` | false | Однократный |
-| `on_enter` | — | Массив команд (до 8) |
-| `message` | `""` | Сообщение на экране |
-| `sound` | `""` | Звук при входе |
-| `teleport` | — | `[x, y, z]` — телепорт игрока |
+| `name` | `""` | Name |
+| `pos` | `[0, 0, 0]` | Center |
+| `size` | `[1, 1]` | Half-extents along X/Z |
+| `once` | false | One-shot |
+| `on_enter` | — | Array of commands (up to 8) |
+| `message` | `""` | Message shown on screen |
+| `sound` | `""` | Sound on enter |
+| `teleport` | — | `[x, y, z]` — teleport the player |
 
-## `fauna[]` — живность
+## `fauna[]` — creatures
 
-До 8 (`MAP_MAX_FAUNA`).
+Up to 8 (`MAP_MAX_FAUNA`).
 
-| Поле | Дефолт | Смысл |
+| Field | Default | Meaning |
 |---|---|---|
-| `type` | обязателен | `fireflies` / `butterflies` / `birds`; неизвестный → пропуск |
-| `area` | `[0, 0]` | Центр зоны (x, z) |
-| `size` | `[50, 50]` | Размер зоны |
-| `count` | 40 (светлячки) / 12 (остальные) | Особей |
-| `height` | 2.5 (40 для птиц) | Высота полёта, м |
+| `type` | required | `fireflies` / `butterflies` / `birds`; unknown → skip |
+| `area` | `[0, 0]` | Zone center (x, z) |
+| `size` | `[50, 50]` | Zone size |
+| `count` | 40 (fireflies) / 12 (the rest) | Individuals |
+| `height` | 2.5 (40 for birds) | Flight height, m |
 
-## `waters[]` — вода
+## `waters[]` — water
 
-До 32 (`MAP_MAX_WATERS`). Тип задаёт пресет вида, затем любое поле можно
-переопределить.
+Up to 32 (`MAP_MAX_WATERS`). The type sets the look preset, then any field can
+be overridden.
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
-| `type` | `puddle` / `lake` / `river` / `sea`; неизвестный → пропуск |
-| `name` | Имя для лога |
-| `pos` | `[x, z]` — центр круга (лужа/озеро) |
-| `radius` | 3.0 лужа / 40.0 озеро / иначе 0 |
-| `points` | Осевая линия реки, `[[x, z], …]` до 16 точек (`MAP_WATER_MAX_POINTS`); река без ≥2 точек пропускается |
-| `width` | 8.0 — ширина русла |
-| `level` | -60.0 — уровень воды; у `sea` это глобальный уровень |
-| `depth` / `color` / `alpha` / `wave_amp` / `wave_speed` / `flow_speed` / `flow` / `foam` | Вид воды |
+| `type` | `puddle` / `lake` / `river` / `sea`; unknown → skip |
+| `name` | Name for the log |
+| `pos` | `[x, z]` — center of the circle (puddle/lake) |
+| `radius` | 3.0 puddle / 40.0 lake / otherwise 0 |
+| `points` | River centerline, `[[x, z], …]` up to 16 points (`MAP_WATER_MAX_POINTS`); a river without ≥2 points is skipped |
+| `width` | 8.0 — channel width |
+| `level` | -60.0 — water level; for `sea` this is the global level |
+| `depth` / `color` / `alpha` / `wave_amp` / `wave_speed` / `flow_speed` / `flow` / `foam` | Water look |
 
-Пресеты вида по типам (`mapdata.c:391-425`):
+Look presets per type (`mapdata.c:391-425`):
 
 | type | depth | color | alpha | wave_amp | wave_speed | flow_speed | foam |
 |---|---|---|---|---|---|---|---|
@@ -299,34 +299,34 @@ Point/spot рисуются через Forward+ кластеры (`lights.c`, cv
 | `river` | 2.0 | 0.10/0.24/0.26 | 0.85 | 0.05 | 1.4 | 1.2 | 0.5 |
 | `sea` | 6.0 | 0.04/0.16/0.22 | 0.94 | 0.18 | 0.8 | 0 | 0.6 |
 
-Если у реки нет `flow`, направление считается по цепочке точек.
+If a river has no `flow`, the direction is computed from the chain of points.
 
 ## `info`, `ambient`, `music`
 
-| Секция | Поле | Дефолт | Смысл |
+| Section | Field | Default | Meaning |
 |---|---|---|---|
-| `info` | `name` / `author` / `description` | `""` | Показывается в меню выбора карт |
-| `ambient` | `sound` | `""` (секция не применяется) | Петля фонового звука |
+| `info` | `name` / `author` / `description` | `""` | Shown in the map selection menu |
+| `ambient` | `sound` | `""` (the section does not apply) | Looping background sound |
 | `ambient` | `volume` | 0.5 | |
-| `music` | `sound` / `volume` | как выше | Трек карты |
+| `music` | `sound` / `volume` | as above | Map track |
 
-## `cvars` и `commands` — настройки внутри карты
+## `cvars` and `commands` — map-local settings
 
 ```json
 "cvars":    { "r_gi": 0, "fov": 75 },
 "commands": [ "weather rain 120", "matlist" ]
 ```
 
-- `cvars` — объект «имя: число», до 64 пар (`MAP_MAX_CVARS`). Применяется при
-  загрузке мира.
-- `commands` — массив строк, до 64 (`MAP_MAX_COMMANDS`, 256 символов на
-  команду). Выполняются после загрузки карты.
-- Незарегистрированное имя в `cvars` создаёт переменную как
-  «map/lua-переменная» без `CVAR_ARCHIVE`; когда позже модуль зарегистрирует
-  это же имя, слот усыновляется (обновятся дефолт/диапазон/флаги, значение
-  сохранится).
+- `cvars` — an object of "name: number", up to 64 pairs (`MAP_MAX_CVARS`).
+  Applied on world load.
+- `commands` — an array of strings, up to 64 (`MAP_MAX_COMMANDS`, 256 characters
+  per command). Executed after the map loads.
+- An unregistered name in `cvars` creates the variable as a
+  "map/lua variable" without `CVAR_ARCHIVE`; when a module later registers the
+  same name, the slot is adopted (default/range/flags are updated, the value is
+  kept).
 
-## Минимальный пример
+## Minimal example
 
 ```json
 {
@@ -342,7 +342,7 @@ Point/spot рисуются через Forward+ кластеры (`lights.c`, cv
 }
 ```
 
-## См. также
+## See also
 
-- [cvars.md](cvars.md) — что можно настроить из карты
-- [lua-api.md](lua-api.md) — скрипт карты `lua/maps/<имя>.lua`
+- [cvars.md](cvars.md) — what can be tuned from the map
+- [lua-api.md](lua-api.md) — the map script `lua/maps/<name>.lua`

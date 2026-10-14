@@ -1,254 +1,254 @@
-# Архитектура firerender
+# firerender architecture
 
-Карта дерева исходников и основные потоки. Для агентов: прежде чем править,
-найдите свой модуль здесь и прочитайте его шапку (первые 5–8 строк каждого
-`src/*.c` — точное описание назначения).
-
----
-
-## 1. Три идеи архитектуры
-
-1. **Дерево сцен в духе Godot.** `SceneNode` (`src/scene.h:25-58`) — имя, тип
-   строкой, трансформ (`pos/rot/scl` + мировая `world[16]`), `params`, и два
-   function-поинтера: `update(node, dt)` и `render(node)`. Обход —
-   `node_update_tree` + `node_update_transforms` перед рендером.
-2. **Консоль и cvar'ы в духе GoldSrc/Source.** `src/cvars.c` (реестр, клэмп,
-   `CVAR_ARCHIVE`/`CVAR_CHEAT`/`CVAR_STRING`), `src/console.c` (ввод, история,
-   автодополнение), единый реестр команд `src/cmdreg.c:42-127`, бинды
-   `src/binds.c:14-36`, действия `+/-` в `src/actions.c`.
-3. **Разрешение ресурсов в духе Source.** `src/resources.c:85-164`: пак карты
-   (zip) → диск → `base_dir` → `../`, отсутствующая картинка — `img/notfound.png`.
-   Вшитых данных нет, всё читается с диска или из zip-пака.
-
-Весь GPU-ход идёт через собственный RHI `sr_*` (`src/srender.h`) — смена API не
-трогает рендер-логику.
+Source tree map and the main flows. For agents: before editing, find your module
+here and read its header banner (the first 5–8 lines of each `src/*.c` — an exact
+description of its purpose).
 
 ---
 
-## 2. Каркас приложения
+## 1. Three architectural ideas
+
+1. **A Godot-style scene tree.** `SceneNode` (`src/scene.h:25-58`) — name, type
+   as a string, transform (`pos/rot/scl` + world `world[16]`), `params`, and two
+   function pointers: `update(node, dt)` and `render(node)`. Traversal —
+   `node_update_tree` + `node_update_transforms` before rendering.
+2. **A GoldSrc/Source-style console and cvars.** `src/cvars.c` (registry, clamping,
+   `CVAR_ARCHIVE`/`CVAR_CHEAT`/`CVAR_STRING`), `src/console.c` (input, history,
+   autocompletion), a single command registry `src/cmdreg.c:46-140`, key binds
+   `src/binds.c:14-36`, `+/-` actions in `src/actions.c`.
+3. **A Source-style resource resolution.** `src/resources.c:85-164`: map pack
+   (zip) → disk → `base_dir` → `../`, a missing image — `img/notfound.png`.
+   No embedded data, everything is read from disk or from a zip pack.
+
+All GPU work goes through the in-house `sr_*` RHI (`src/srender.h`) — swapping the
+API does not touch the render logic.
+
+---
+
+## 2. Application skeleton
 
 ```
-main.c: SDL-инициализация -> окно/GL-контекст -> boot_init() -> главный цикл
+main.c: SDL init -> window/GL context -> boot_init() -> main loop
 ```
 
-**`boot_init` (`src/main.c:209-224`)** — порядок имеет значение:
+**`boot_init` (`src/main.c:212-233`)** — the order matters:
 
-| Шаг | Что поднимается |
+| Step | What is brought up |
 |---|---|
-| 1 | `resources_init()` — кеш ресурсов **до** любых загрузок |
-| 2 | `console_init()` — cvar'ы, команды, вывод `SDL_Log` в консоль |
+| 1 | `resources_init()` — resource cache **before** any loads |
+| 2 | `console_init()` — cvars, commands, `SDL_Log` output into the console |
 | 3 | `audio_init()`, `binds_init()`, `fx_init_console()` |
-| 4 | `ecs_scene_init()` (компоненты моста) + cvar `ecs_enable`, `phys_body_init()` (cvar'ы тел, пустой реестр статиков) |
-| 5 | `cmdreg_register_all()` — все статические команды из одного реестра |
-| 6 | `hud_shared_init()` — шрифт/атласы (нужны меню и консоли) |
-| 7 | `app_init()` — фон `img/menu.png` |
-| 8 | `console_autoload()` — `config.cfg` (cvar'ы и бинды пользователя) |
-| 9 | `game_map_config_load()` — выбранная карта |
+| 4 | `ecs_scene_init()` (bridge components) + cvar `ecs_enable`, `phys_body_init()` (body cvars, empty static-collider registry) |
+| 5 | `cmdreg_register_all()` — all static commands from the single registry |
+| 6 | `hud_shared_init()` — font/atlas (needed by the menu and the console) |
+| 7 | `app_init()` — `img/menu.png` background |
+| 8 | `console_autoload()` — `config.cfg` (user cvars and binds) |
+| 9 | `game_map_config_load()` — the selected map |
 | 10 | `lua_engine_init()` — `lua/main.lua` |
-| 11 | `app_set_state(APP_MENU)` (или `APP_PLAY` при `FR_TEST`) |
+| 11 | `app_set_state(APP_MENU)` (or `APP_PLAY` under `FR_TEST`) |
 
-**Состояния (`src/app.h:13-18`):** `APP_BOOT → APP_MENU ⇄ APP_PLAY ⇄ APP_PAUSE`.
-Мир заморожен вне `APP_PLAY`; `AppState` отдаёт действия главному циклу
+**States (`src/app.h:13-18`):** `APP_BOOT → APP_MENU ⇄ APP_PLAY ⇄ APP_PAUSE`.
+The world is frozen outside `APP_PLAY`; `AppState` hands actions to the main loop
 (`APP_ACT_START/RESUME/MAIN/QUIT`).
 
-**Такт:** фиксированный шаг логики — 100 Гц на десктопе (максимум 8 тиков за кадр),
-60 Гц на Android (максимум 4) — `src/main.c:638-650`. Рендер идёт столько раз в
-секунду, сколько успевает GPU; логика не зависит от FPS.
+**Tick:** a fixed logic step — 100 Hz on desktop (at most 8 ticks per frame),
+60 Hz on Android (at most 4) — `src/main.c:768-777`. Rendering runs as often as
+the GPU allows; logic does not depend on FPS.
 
-Внутри тика порядок тоже зафиксирован: `game_update` — игрок, сущности,
-триггеры (`game.c:769-802`), затем `ecs_scene_frame` (`game.c:815`: pull
-трансформов дерева, системы ECS, push обратно только изменённых; при
-`ecs_enable 0` слой ничего не делает), затем `node_update_transforms`
-(`game.c:825`). После `game_update` — `phys_body_step` (`main.c:703`: Verlet-шаг
-плюс коллизии тел; он же шагает глобальный мир, поэтому верёвки и рэгдоллы
-работают и при выключенных телах) и `glb_anim_ragdoll_step_all` (`main.c:705`).
+The order inside a tick is also fixed: `game_update` — player, entities,
+triggers (`game.c:764-802`), then `ecs_scene_frame` (`game.c:817`: pulls scene
+transforms, runs ECS systems, pushes back only the changed ones; with
+`ecs_enable 0` the layer does nothing), then `node_update_transforms`
+(`game.c:827`). After `game_update` — `phys_body_step` (`main.c:783`: Verlet step
+plus collisions; it also steps the global world, which is why ropes and ragdolls
+work even with bodies disabled) and `glb_anim_ragdoll_step_all` (`main.c:785`).
 
 ---
 
-## 3. Загрузка мира и откат
+## 3. World loading and rollback
 
-`game_load_world` (`src/game.c:585`) собирается из фаз, каждая — со своим
-partial-rollback; выгрузка (`game_unload_world`, `src/game.c:700`) — строгий
-инверс порядка создания (`src/game.c:15`):
+`game_load_world` (`src/game.c:585`) is assembled from phases, each with its own
+partial rollback; unloading (`game_unload_world`, `src/game.c:700`) is a strict
+inverse of the creation order (`src/game.c:15`):
 
-| Фаза | Функция | Что происходит |
+| Phase | Function | What happens |
 |---|---|---|
-| 1. Геометрия | `world_load_geometry` (`src/game.c:326`) | открытие zip-пака (`maps/<имя>.zip` или `../maps/…`), `mapdata_load("map.json")`, `world_load` — высоты/нормали/текстуры, поле пшеницы |
-| 2. Сцена | `scene_build` (`:410`) | `shadow_init`, построение дерева узлов, сущности, FBO рендера, первый кадр |
-| 3. Применение карты | `map_apply` (`:529`) | cvar'ы и команды из `map.json` — **поверх** `config.cfg` |
-| 4. Звук карты | `audio_load_map` (`:549`) | музыка, ambient/ветер, позиционные источники (wav из zip карты) |
+| 1. Geometry | `world_load_geometry` (`src/game.c:326`) | opens the zip pack (`maps/<name>.zip` or `../maps/…`), `mapdata_load("map.json")`, `world_load` — heights/normals/textures, the wheat field |
+| 2. Scene | `scene_build` (`:410`) | `shadow_init`, scene node tree, entities, render FBO, first frame |
+| 3. Map overrides | `map_apply` (`:529`) | cvars and commands from `map.json` — **on top of** `config.cfg` |
+| 4. Map audio | `audio_load_map` (`:549`) | music, ambient/wind, positional sources (wav from the map zip) |
 
-Ошибка любой фазы — выход с `-1` и освобождением только того, что создано
-предыдущими шагами. Поэтому парсеры обязаны быть fail-soft и не оставлять
-висячих узлов в дереве.
+Failure of any phase returns `-1` and frees only what the previous steps created.
+Therefore parsers must be fail-soft and must not leave dangling nodes in the tree.
 
 ---
 
-## 4. Порядок проходов кадра
+## 4. Per-frame pass order
 
-Оркестратор — `renderer_frame` (`src/renderer.c:881-1035`), единый контекст кадра
-заполняется один раз: `renderer_ctx_fill(g)` (`:883`) кладёт в `RendererContext`
-(`src/render_ctx.h`) камеру, мир, время, солнце, туман, водоём/подводье, wetness.
+The orchestrator is `renderer_frame` (`src/renderer.c:881-1035`); the single
+per-frame context is filled once: `renderer_ctx_fill(g)` (`:883`) puts camera,
+world, time, sun, fog, water/underwater, wetness into `RendererContext`
+(`src/render_ctx.h`).
 
 ```
-1. подводный тинт / время волн                            (renderer.c:889-904)
-2. CSM-тени: shadow_render(world, &rc)                   (:920)  — shadow.c
-3. сцена в FBO (r_render_scale, MSAA если включён)       (:759)
-4. bloom_resolve(need_depth) — резолв + нужен ли depth   (:938-945)
-5. GI: gi_render(...) -> своя color-текстура             (:954-958)  — gi.c
+1. underwater tint / wave time                            (renderer.c:889-904)
+2. CSM shadows: shadow_render(world, &rc)                (:920)  — shadow.c
+3. scene into FBO (r_render_scale, MSAA if enabled)      (:759)
+4. bloom_resolve(need_depth) — resolve + is depth needed (:938-945)
+5. GI: gi_render(...) -> own color texture               (:954-958)  — gi.c
 6. SSR: ssr_render(...) -> ssr_tex                       (:968-979)  — ssr.c
-7. воксельный туман + bloom-композит                     (:984-997)  — voxfog.c, bloom.c
-8. present: bloom_present (r_present_blit) или
-   fullscreen-grade в backbuffer (ES/EGL)                (:1006-1017)
-9. 2D-оверлеи: миникарта, HUD, прицел, консоль, меню     (renderer.c, hud.c, ui.c)
-10. lowend_profile_frame(dt) — адаптивное разрешение     (:1084)     — lowend_profile.c
+7. voxel fog + bloom composite                           (:984-997)  — voxfog.c, bloom.c
+8. present: bloom_present (r_present_blit) or
+   fullscreen grade into the backbuffer (ES/EGL)         (:1006-1017)
+9. 2D overlays: minimap, HUD, crosshair, console, menu   (renderer.c, hud.c, ui.c)
+10. lowend_profile_frame(dt) — adaptive resolution       (:1084)     — lowend_profile.c
 ```
 
-`need_depth` (`:940-944`) — ленивое условие: глубина резолвится только если
-включён GI, мокрый/силовой SSR или воксельный туман (не «дешёвый» `r_cheap_fog`).
-Это типичный для проекта паттерн: **проход не выполняется, если его выключили**, а
-не выполняется «для постоянства».
+`need_depth` (`:940-944`) is a lazy condition: depth is resolved only if GI,
+wet/forced SSR, or voxel fog is enabled (not the "cheap" `r_cheap_fog`). This is
+the typical project pattern: **a pass is skipped when it is turned off**, rather
+than always run "for consistency".
 
 ---
 
-## 5. Карта модулей `src/`
+## 5. Map of `src/` modules
 
-Назначения взяты из шапок файлов (строка 2 каждого `.c`).
+Purposes are taken from the file header banners (line 2 of each `.c`).
 
-### Ядро и цикл
+### Core and loop
 
-| Модуль | О чём |
+| Module | What it is |
 |---|---|
-| `main.c` | точка входа, `boot_init`, главный цикл, вся `FR_TEST`/`FR_BENCH`-обвязка |
-| `game.c` | игровое состояние: загрузка/выгрузка мира (фазы + rollback), апдейт |
-| `app.c` | менеджер состояний и экраны меню, пресеты качества, `FR_MSAA` |
-| `loading.c` | экран загрузки уровня (прогресс фаз) |
-| `jobs.c` | мини-пул рабочих потоков |
-| `events.c` | событийная шина |
-| `entity.c` | сущности: слоты, хэндлы `serial<<16|num` |
-| `ecs.c` | ECS-ядро: id + стабильные слоты, разреженные POD-компоненты, системы по `all`-маске, отложенный kill |
-| `ecs_scene.c` | мост сцена<->ECS: поколения против висячих указателей, pull/системы/push трансформов |
-| `scene.c` | дерево сцены: создание узлов, трансформы, обход |
-| `selection.c` | рамки выделения 3D-узлов |
-| `profiler.c` | тайминги по модулям + GPU-запросы; счётчики ведёт `gl_loader.c` |
-| `lowend_profile.c` | профиль low-end: пакет ухищрений, адаптивное разрешение |
+| `main.c` | entry point, `boot_init`, main loop, all `FR_TEST`/`FR_BENCH` scaffolding |
+| `game.c` | game state: world load/unload (phases + rollback), update |
+| `app.c` | state manager and menu screens, quality presets, `FR_MSAA` |
+| `loading.c` | level loading screen (per-phase progress) |
+| `jobs.c` | small worker-thread pool |
+| `events.c` | event bus |
+| `entity.c` | entities: slots, `serial<<16|num` handles |
+| `ecs.c` | ECS core: id + stable slots, sparse POD components, systems by `all` mask, deferred kill |
+| `ecs_scene.c` | scene<->ECS bridge: generations against dangling pointers, transform pull/systems/push |
+| `scene.c` | scene tree: node creation, transforms, traversal |
+| `selection.c` | selection outlines for 3D nodes |
+| `profiler.c` | per-module timings + GPU queries; the counters live in `gl_loader.c` |
+| `lowend_profile.c` | low-end profile: a package of tricks, adaptive resolution |
 
-### Консоль, ввод, UI
+### Console, input, UI
 
-| Модуль | О чём |
+| Module | What it is |
 |---|---|
-| `cvars.c` | реестр cvar'ов (регистрация, клэмп, флаги, config.cfg) |
-| `console.c` | консоль разработчика: ввод, история, автодополнение, `console_selftest` |
-| `cmdreg.c` | единая таблица статических команд |
-| `commands.c` | обработчики команд-действий (в т.ч. `screenshot`) |
-| `binds.c` | привязки клавиш, дефолты |
-| `actions.c` | `+/-`-действия (`g_act[]`) |
-| `input.c` | события главного цикла, режим мыши |
-| `gamepad.c`, `touch.c` | геймпад и сенсор (джойстик + кнопки) |
+| `cvars.c` | cvar registry (registration, clamping, flags, config.cfg) |
+| `console.c` | developer console: input, history, autocompletion, `console_selftest` |
+| `cmdreg.c` | single table of static commands |
+| `commands.c` | action command handlers (incl. `screenshot`) |
+| `binds.c` | key bindings, defaults |
+| `actions.c` | `+/-` actions (`g_act[]`) |
+| `input.c` | main-loop events, mouse mode |
+| `gamepad.c`, `touch.c` | gamepad and touch (joystick + buttons) |
 | `ui.c` | immediate-mode UI |
-| `hud.c` | дебаг-HUD (позиция, FPS, скорость), шрифт-атласы |
-| `minimap.c` | мини-карта |
-| `json.c` | мини-парсер JSON (дерево узлов в арене) |
-| `png.c` | сохранение RGB-кадра в PNG через miniz |
+| `hud.c` | debug HUD (position, FPS, speed), font atlases |
+| `minimap.c` | minimap |
+| `json.c` | mini JSON parser (node tree in an arena) |
+| `png.c` | saving an RGB frame to PNG via miniz |
 
-### Рендер и RHI
+### Renderer and RHI
 
-| Модуль | О чём |
+| Module | What it is |
 |---|---|
-| `render_ctx.h` | `RendererContext` — единый набор данных сцены на кадр |
-| `renderer.c` | оркестрация проходов кадра, `r_render_scale`, масштаб/FBO |
-| `srender.h` + `srender_gl.c` | RHI `sr_*` на OpenGL/GLES (единственный полный бэкенд) |
-| `srender_vk.c` | каркас Vulkan: поднятие device, остальное заглушки (`make vulkan`) |
-| `srender_metal.c` | каркас Metal для macOS (`make metal`) |
-| `srender_stub.c` | выбор рендерного API и заглушки будущих бэкендов |
-| `gl_loader.c` | загрузка GL-функций через `SDL_GL_GetProcAddress`; `g_gl_gpu_driven` |
-| `gpu_gl.c` | тонкие обёртки старого RHI (`gpu.h`) над `sr_*` |
-| `shader.c` | чтение файлов шейдеров, подстановка `#version`, сборка программ, hot-reload |
-| `assets.c` | создание текстур (загрузка — через `resources.c`) |
-| `material.c` | материал поверхности: состояние GL и uniform'ы |
-| `bloom.c` | постобработка glow + резолв/композит/present |
-| `gi.c` | экранное глобальное освещение с темпоральным накоплением |
-| `ssr.c` | Screen Space Reflections (маска мокрости) |
-| `voxfog.c` | воксельный объёмный туман (3 R8 3D-каскада + история) |
-| `shadow.c` | каскадные карты теней, режимы статических/запечённых/«пятен» |
-| `frustum.c` | отсечение фрустумом |
+| `render_ctx.h` | `RendererContext` — the single set of scene data per frame |
+| `renderer.c` | orchestration of per-frame passes, `r_render_scale`, scale/FBO |
+| `srender.h` + `srender_gl.c` | the `sr_*` RHI on OpenGL/GLES (the only complete backend) |
+| `srender_vk.c` | Vulkan skeleton: device bring-up only, the rest are stubs (`make vulkan`) |
+| `srender_metal.c` | Metal skeleton for macOS (`make metal`) |
+| `srender_stub.c` | render API selection and stubs for future backends |
+| `gl_loader.c` | loads GL functions via `SDL_GL_GetProcAddress`; `g_gl_gpu_driven` |
+| `gpu_gl.c` | thin wrappers of the old RHI (`gpu.h`) over `sr_*` |
+| `shader.c` | reading shader files, `#version` substitution, program linking, hot-reload |
+| `assets.c` | texture creation (loading goes through `resources.c`) |
+| `material.c` | surface material: GL state and uniforms |
+| `bloom.c` | glow postprocessing + resolve/composite/present |
+| `gi.c` | screen-space global illumination with temporal accumulation |
+| `ssr.c` | Screen Space Reflections (wetness mask) |
+| `voxfog.c` | voxel volumetric fog (3 R8 3D cascades + history) |
+| `shadow.c` | cascaded shadow maps, static/baked/"blob" modes |
+| `frustum.c` | frustum culling |
 
-### Мир и содержимое
+### World and content
 
-| Модуль | О чём |
+| Module | What it is |
 |---|---|
-| `world.c` | карта высот, расчёт нормалей, чанки |
-| `mapdata.c` | `map.json`: поле, свет, объекты, триггеры, воды, фауна (:769-1056) |
-| `resources.c` | менеджер ресурсов: pak → диск → `base_dir` → `../`, кеширование |
-| `terrain.c` | рельеф: сетка из карты высот, материал земли, рендер с тенями |
-| `splat.c` | поверхности: splat-маска, дороги, карта занятости |
-| `snowmask.c` | пометка вершин «открыто небу сверху» (снег на GLB) |
-| `field.c` | рамка поля пшеницы (замкнутая линия на рельефе) |
-| `vegetation.c` | растительность: статичный слой карты + динамический |
-| `objects.c` | объекты из `map.json`: биллборды (деревья и пр.) |
-| `mesh.c` | статичные меши (`prop_static`): `.obj`-загрузчик + узел |
-| `glb.c` | бинарный glTF 2.0: парсер + `GlbInstance3D`-узел |
-| `glb_anim.c` | скелетная анимация (skinning), клипы, инстансы |
-| `attach.c` | крепление узлов к моделям/костям + узел `Sprite3D` |
-| `fauna.c` | живая карта: светлячки, бабочки, птицы |
-| `water.c` | вода: лужи, озёра, реки, моря; подводный тинт |
-| `sky.c` | небосвод из панорамы: узел `Skybox3D` + цвет тумана горизонта |
-| `sun.c` | солнце: замороженный направленный источник |
-| `lights.c` | Forward+: раскладка источников по фрокселям (кластерам) |
-| `particles.c` | система частиц: instanced-спрайты с CPU-обновлением |
-| `fx.c` | эффекты: именованные пресеты и непрерывные эмиттеры, погода |
-| `decals.c` | декали на рельефе |
+| `world.c` | heightmap, normal computation, chunks |
+| `mapdata.c` | `map.json`: field, lights, objects, triggers, waters, fauna (:769-1056) |
+| `resources.c` | resource manager: pak → disk → `base_dir` → `../`, caching |
+| `terrain.c` | terrain: grid from the heightmap, ground material, shadowed render |
+| `splat.c` | surfaces: splat mask, roads, occupancy map |
+| `snowmask.c` | marks vertices "open to the sky from above" (snow on GLB) |
+| `field.c` | wheat field outline (a closed loop on the terrain) |
+| `vegetation.c` | vegetation: static map layer + dynamic layer |
+| `objects.c` | objects from `map.json`: billboards (trees, etc.) |
+| `mesh.c` | static meshes (`prop_static`): `.obj` loader + node |
+| `glb.c` | binary glTF 2.0: parser + `GlbInstance3D` node |
+| `glb_anim.c` | skeletal animation (skinning), clips, instances |
+| `attach.c` | attaching nodes to models/bones + the `Sprite3D` node |
+| `fauna.c` | living map: fireflies, butterflies, birds |
+| `water.c` | water: puddles, lakes, rivers, seas; underwater tint |
+| `sky.c` | sky from a panorama: the `Skybox3D` node + horizon fog color |
+| `sun.c` | sun: a frozen directional light |
+| `lights.c` | Forward+: light layout into froxels (clusters) |
+| `particles.c` | particle system: instanced sprites with CPU updates |
+| `fx.c` | effects: named presets and continuous emitters, weather |
+| `decals.c` | decals on the terrain |
 
-### Игрок, физика, скрипты, платформа
+### Player, physics, scripts, platform
 
-| Модуль | О чём |
+| Module | What it is |
 |---|---|
-| `player.c` | состояние игрока |
-| `movement.c` | физика/движение (ходьба, бег, присед, прыжок, полёт) |
-| `camera.c` | камера: WASD + мышь, физика ходьбы, матрицы вида/проекции |
-| `playerbox.c` | бокс коллизий персонажа от 3-го лица |
-| `health.c` | HP, смерть, киллкемера |
-| `physics.c` | мини-движок тел (Verlet): верёвки, рэгдолл |
-| `phys_body.c` | надстройка над тем же Verlet-миром: твёрдые тела (сфера/бокс), статические коллайдеры карты, коллизии частица-частица, толчок игроком |
-| `linalg.c` | векторы и матрицы для камеры и проецирования |
-| `lua_engine.c` | Lua-скрипты движка: песочница, `engine.*`, события |
-| `audio.c` | звук: устройство, каналы, позиционные источники |
-| `android.c` | подготовка окружения под Android (цикл жизни) |
+| `player.c` | player state |
+| `movement.c` | physics/movement (walk, run, crouch, jump, fly) |
+| `camera.c` | camera: WASD + mouse, walk physics, view/projection matrices |
+| `playerbox.c` | third-person character collision box |
+| `health.c` | HP, death, killcam |
+| `physics.c` | mini body engine (Verlet): ropes, ragdoll |
+| `phys_body.c` | layer over the same Verlet world: rigid bodies (sphere/box), static map colliders, particle-particle collisions, push by the player |
+| `linalg.c` | vectors and matrices for the camera and projection |
+| `lua_engine.c` | engine Lua scripts: sandbox, `engine.*`, events |
+| `audio.c` | sound: device, channels, positional sources |
+| `android.c` | Android environment setup (lifecycle) |
 
-Два «косметических» дефекта шапок, известных и не трогать без причины:
-`src/linalg.c` в шапке назван `math.c`, у `src/lowend_profile.c` пустая вторая
-строка баннера.
+Two known "cosmetic" header defects, not to be touched without reason:
+`src/linalg.c` is called `math.c` in its header, and `src/lowend_profile.c` has an
+empty second banner line.
 
 ---
 
-## 6. Карты и пак-ресурсы
+## 6. Maps and pack resources
 
-- **Продуктовый вид:** `maps/<имя>.zip` — карта целиком (`map.json`, `map.png`,
-  `img/`, `shaders/`, `audio/`, `lua/maps/`, запечённый `baked/`).
-- **Dev-режим:** папка `map/` рядом с исходниками.
-- Цепочка поиска — `src/resources.c:85-164`. Отсюда правило: любой новый ресурс
-  обращается **относительным путём** через `resources_*`, иначе он не найдётся в
-  zip и на Android.
-- Упаковка/запекание: `make mapzip MAP=<имя>` (пересборка из `map/`),
-  `make mapbake MAP=<имя>` (свет → `map/baked/` → в zip), `make bake-maps`
-  (все `maps/*.zip`, через `tools/inject_baked.py`, геометрию не трогает).
+- **Shipped form:** `maps/<name>.zip` — the whole map (`map.json`, `map.png`,
+  `img/`, `shaders/`, `audio/`, `lua/maps/`, baked `baked/`).
+- **Dev mode:** a `map/` folder next to the sources.
+- The lookup chain — `src/resources.c:85-164`. Hence the rule: every new resource
+  is addressed by a **relative path** through `resources_*`, otherwise it will not
+  be found in a zip or on Android.
+- Packing/baking: `make mapzip MAP=<name>` (rebuild from `map/`),
+  `make mapbake MAP=<name>` (light → `map/baked/` → into the zip), `make bake-maps`
+  (all `maps/*.zip`, via `tools/inject_baked.py`, geometry untouched).
 
 ---
 
-## 7. Куда смотреть по конкретному вопросу
+## 7. Where to look for a specific question
 
-| Вопрос | Файл |
+| Question | File |
 |---|---|
-| почему настройка не сохранлась | `cvars.c` (флаги, `CVAR_CFGSET`) + `console_autoload` |
-| почему команда «не найдена» | `cmdreg.c:42-127` + `console.c:984-1004` |
-| почему ключ карты игнорируется | `mapdata.c:769-1056` (неизвестный enum → skip + лог) |
-| почему чёрный кадр / нет постэффекта | `renderer.c:881-1035` (условия `need_depth`, `*_is_on()`) |
-| почему трава не появилась | `vegetation.c` + `r_veg_*` (docs/cvars.md), бюджет чанков |
-| почему упал FPS после правки | `profiler.c` (слоты), `FR_BENCH`, `lowend_profile.c` |
-| почему ассет не загрузился | `resources.c` (цепочка) + `img/notfound.png` |
-| как добавить бэкенд | `srender.h` + `srender_stub.c` (выбор API) |
+| why a setting did not persist | `cvars.c` (flags, `CVAR_CFGSET`) + `console_autoload` |
+| why a command is "not found" | `cmdreg.c:46-140` + `console.c:984-1004` |
+| why a map key is ignored | `mapdata.c:753-1079` (unknown enum → skip + log) |
+| why a black frame / no post effect | `renderer.c:881-1035` (`need_depth`, `*_is_on()` conditions) |
+| why grass did not appear | `vegetation.c` + `r_veg_*` (docs/cvars.md), chunk budget |
+| why FPS dropped after an edit | `profiler.c` (slots), `FR_BENCH`, `lowend_profile.c` |
+| why an asset failed to load | `resources.c` (chain) + `img/notfound.png` |
+| how to add a backend | `srender.h` + `srender_stub.c` (API selection) |
 
-Справочники значений: [docs/cvars.md](cvars.md) ·
+Value references: [docs/cvars.md](cvars.md) ·
 [docs/commands.md](commands.md) · [docs/map-json.md](map-json.md) ·
-[docs/lua-api.md](lua-api.md). Правила работы агентам:
+[docs/lua-api.md](lua-api.md). Agent working rules:
 [../AGENTS.md](../AGENTS.md).
