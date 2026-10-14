@@ -39,6 +39,10 @@
 #define C_UINT 5125
 #define C_FLOAT 5126
 
+// fourcc чанков GLB: little-endian "JSON" и "BIN\0".
+#define GLB_CHUNK_JSON 0x4E4F534A
+#define GLB_CHUNK_BIN  0x004E4942
+
 static int comp_size(int c)
 {
     switch (c) {
@@ -357,8 +361,8 @@ GlbModel *glb_parse_file(const char *path)
         // пропустить проверку, после чего bin_len станет ложно огромным и
         // acc_fits/bv_fits валидировали бы по нему, а не по реальному буферу.
         if (clen > filesz - off) break;
-        if (ctype == 0x4E4F534A) { json_data = file + off; json_len = clen; }
-        else if (ctype == 0x004E4942) { bin = file + off; bin_len = clen; }
+        if (ctype == GLB_CHUNK_JSON) { json_data = file + off; json_len = clen; }
+        else if (ctype == GLB_CHUNK_BIN) { bin = file + off; bin_len = clen; }
         off += clen;
     }
     if (!json_data || !bin) {
@@ -469,7 +473,7 @@ GlbModel *glb_parse_file(const char *path)
                     GlbAcc *ap = &accs[ipos];
                     // Защита от OOB: акцессор обязан укладываться в bin-чанк.
                     // vec проверяем здесь же: read_vertex копирует vec float'ов
-                    // в p[3], поэтому POSITION обязан быть ровно VEC3.
+                    // в vp[3], поэтому POSITION обязан быть ровно VEC3.
                     if (!acc_fits(ap, bvs, bv_n, (long)bin_len) || ap->vec != 3) {
                         SDL_Log("glb: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен", path);
                         continue;
@@ -494,9 +498,9 @@ GlbModel *glb_parse_file(const char *path)
                     long nrm_base = an && an->bufferView >= 0 ? bvs[an->bufferView].byteOffset + an->byteOffset : 0;
                     long uv_base = au && au->bufferView >= 0 ? bvs[au->bufferView].byteOffset + au->byteOffset : 0;
                     for (long v = 0; v < nv; v++) {
-                        float p[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
-                        read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, p);
-                        mat4_transform_point(world, p, p);
+                        float vp[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
+                        read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, vp);
+                        mat4_transform_point(world, vp, vp);
                         // NORMAL/UV индексируются тем же v, но acc_fits проверял
                         // их по СВОЕМУ count. Битый GLB с count < POSITION.count
                         // иначе читал бы за пределами bin-чанка (OOB) — читаем
@@ -505,7 +509,7 @@ GlbModel *glb_parse_file(const char *path)
                         if (au && v < au->count) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
                         // БЕЗ флипа V: stb_image кладёт верхнюю строку
                         // картинки в t=0, glTF v=0 — тоже верх (см. glb_anim)
-                        if (!b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1])) {
+                        if (!b_push_v(bk, vp[0], vp[1], vp[2], n[0], n[1], n[2], u[0], u[1])) {
                             ok = 0; err = "нехватка памяти вершин"; break;
                         }
                     }

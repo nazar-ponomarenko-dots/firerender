@@ -40,6 +40,10 @@
 #define C_UINT 5125
 #define C_FLOAT 5126
 
+// fourcc чанков GLB: little-endian "JSON" и "BIN\0".
+#define GLB_CHUNK_JSON 0x4E4F534A
+#define GLB_CHUNK_BIN  0x004E4942
+
 static int cs(int c){ switch(c){ case C_BYTE: case C_UBYTE: return 1;
                       case C_SHORT: case C_USHORT: return 2;
                       case C_UINT: case C_FLOAT: return 4; } return 0; }
@@ -175,8 +179,8 @@ AnimGlb *glb_anim_parse(const char *path)
         // проверку; тогда bin_len станет ложно огромным и acc_fits валидировал
         // бы по нему, а не по реальному буферу -> чтение за его пределами.
         if(clen>filesz-off)break;
-        if(ctype==0x4E4F534A){json_data=file+off;json_len=clen;}
-        else if(ctype==0x004E4942){bin=file+off;bin_len=clen;}
+        if(ctype==GLB_CHUNK_JSON){json_data=file+off;json_len=clen;}
+        else if(ctype==GLB_CHUNK_BIN){bin=file+off;bin_len=clen;}
         off+=clen; }
     if(!json_data||!bin){ SDL_Log("glb_anim: %s нет чанков",path); free(file); return NULL; }
     const JsonNode*root=json_parse((const char*)json_data,(size_t)json_len);
@@ -299,7 +303,7 @@ AnimGlb *glb_anim_parse(const char *path)
             if(ipos<0||ipos>=acc_n)continue;
             GA*ap=&accs[ipos];
             // Защита от OOB: акцессор обязан укладываться в bin-чанк файла.
-            // vec проверяем сразу здесь: rvv копирует vec float'ов в p[3].
+            // vec проверяем сразу здесь: rvv копирует vec float'ов в vp[3].
             if(!acc_fits(ap,bvs,bv_n,(long)bin_len)||ap->vec!=3){
                 SDL_Log("glb_anim: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен",path);
                 continue;
@@ -338,15 +342,15 @@ AnimGlb *glb_anim_parse(const char *path)
             long jb=aj&&aj->bufferView>=0?bvs[aj->bufferView].byteOffset+aj->byteOffset:0;
             long wb=aw&&aw->bufferView>=0?bvs[aw->bufferView].byteOffset+aw->byteOffset:0;
             for(long v=0;v<nv;v++){
-                float p[3],n[3]={0,1,0},u[2]={0,0};
-                rvv(bin,pb,ap,(int)v,p);
+                float vp[3],n[3]={0,1,0},u[2]={0,0};
+                rvv(bin,pb,ap,(int)v,vp);
                 // NORMAL/UV/JOINTS/WEIGHTS индексируются тем же v, но acc_fits
                 // проверял каждый по СВОЕМУ count. Битый GLB с count < nv иначе
                 // читал бы за пределами bin-чанка (OOB) — читаем атрибут только
                 // в пределах его собственного count, иначе дефолт.
                 if(an&&v<an->count) rvv(bin,nb,an,(int)v,n);
                 if(au&&v<au->count) rvv(bin,ub,au,(int)v,u);
-                P->verts[3*v]=p[0]; P->verts[3*v+1]=p[1]; P->verts[3*v+2]=p[2];
+                P->verts[3*v]=vp[0]; P->verts[3*v+1]=vp[1]; P->verts[3*v+2]=vp[2];
                 P->normals[3*v]=n[0]; P->normals[3*v+1]=n[1]; P->normals[3*v+2]=n[2];
                 // БЕЗ флипа V: stb_image кладёт верхнюю строку картинки в
                 // t=0, а glTF v=0 — тоже верх изображения (top-left origin).
@@ -560,7 +564,7 @@ int glb_anim_has_anim(const char*path){
     while(off+8<=sz){
         unsigned clen,ct; memcpy(&clen,f+off,4); memcpy(&ct,f+off+4,4); off+=8;
         if(off+clen>sz) break;
-        if(ct==0x4E4F534A){
+        if(ct==GLB_CHUNK_JSON){
             const JsonNode*r=json_parse((const char*)f+off,clen);
             if(r){
                 const JsonNode*sk=json_find(r,"skins");
