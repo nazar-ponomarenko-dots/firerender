@@ -1177,6 +1177,223 @@ void console_render(int vw, int vh)
     glDisable(GL_BLEND);
 }
 
+static int st_version(void)
+{
+    int fail = 0;
+    // 10) version — номер сборки (buildnum.h генерируется Makefile)
+    {
+        console_exec("version");
+        int n = 0;
+        for (int i = 0; i < s_count && n == 0; i++)
+            if (strstr(ring_at(i), "build #"))
+                n = (int)strtol(strstr(ring_at(i), "build #") + 7, NULL, 10);
+        if (n <= 0) { SDL_Log("console test: version/buildnum FAIL"); fail++; }
+    }
+
+    return fail;
+}
+
+static int st_fx(void)
+{
+    int fail = 0;
+    // 11) fx — пресеты эффектов (fx_init_console в main.c)
+    {
+        console_exec("fx_list");
+        int found = 0;
+        for (int i = 0; i < s_count && !found; i++)
+            if (strstr(ring_at(i), "blood")) found = 1;
+        if (!found || !fx_find("blood") || !fx_find("rain") || !fx_find("smoke")
+            || !fx_find("explosion") || !fx_find("fire") || !fx_find("snow")
+            || !fx_find("sparks") || !fx_find("dust") || !fx_find("muzzle_flash")) {
+            SDL_Log("console test: fx presets FAIL");
+            fail++;
+        }
+    }
+
+    return fail;
+}
+
+static int st_mesh(void)
+{
+    int fail = 0;
+    // 12) mesh — .obj загрузчик (квад = 2 треуг., треугольник = 1 треуг.)
+    {
+        Mesh *m = mesh_load_obj_mem("cube.obj",
+            "# test cube\n"
+            "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+            "vn 0 0 1\n"
+            "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+            "f 1/1/1 2/2/1 3/3/1 4/4/1\n"
+            "v 0 0 1\nv 1 0 1\nv 0 1 1\n"
+            "f 5//1 6//1 7//1\n");
+        if (!m) { SDL_Log("console test: mesh load FAIL"); fail++; }
+        else {
+            // квад -> 6 вершин / 2 треуг.; треугольник -> 3 вершины / 1 треуг.
+            if (m->tri_count != 3 || m->vcount != 9) {
+                SDL_Log("console test: mesh triangable FAIL (%d tri, %d v)",
+                        m->tri_count, m->vcount);
+                fail++;
+            }
+            mesh_free(m);
+        }
+    }
+
+    return fail;
+}
+
+static int st_cmdreg(void)
+{
+    int fail = 0;
+    // 13) Центральный реестр команд (cmdreg.c) — проверить, что ключевые
+    // команды из разных модулей реально зарегистрированы (иначе — тихая
+    // потеря при переполнении/ошибке сборки реестра).
+    {
+        const char *need[] = { "mesh", "glb", "map", "maps", "save", "load", "setpos",
+                               "+forward", "-forward", "+use", "fx", "fx_list",
+                               "weather", "matlist", "noclip", "thirdperson",
+                               "reload_shaders", "ent_create", "screenshot" };
+        for (size_t i = 0; i < sizeof need / sizeof need[0]; i++) {
+            int found = 0;
+            for (int j = 0; j < s_cmds_n && !found; j++)
+                if (strcmp(s_cmds[j].name, need[i]) == 0) found = 1;
+            if (!found) {
+                SDL_Log("console test: команда \"%s\" не зарегистрирована", need[i]);
+                fail++;
+            }
+        }
+        if (s_cmds_n < 40) {
+            SDL_Log("console test: команд всего %d (<40), реестр неполный", s_cmds_n);
+            fail++;
+        }
+    }
+
+    return fail;
+}
+
+static int st_glb(void)
+{
+    int fail = 0;
+    // 14) Бинарный glTF (.glb): glb_parse_file headless — чанки, иерархия,
+    // запекание в мировые координаты, материалы (псевдо-PBR 2004).
+    {
+        GlbModel *gm = glb_parse_file("models/test.glb");
+        if (!gm) { SDL_Log("console test: glb parse FAIL (NULL)"); fail++; }
+        else {
+            int t = (gm->count != 1);
+            if (!t) {
+                GlbItem *o = &gm->items[0];
+                if (o->index_count != 6 || o->vcount != 4) {
+                    SDL_Log("console test: glb geo FAIL (idx=%d, v=%d)",
+                            o->index_count, o->vcount); t = 1;
+                }
+                // корневой узел translation [5,7,9] + дочерний scale 2:
+                // вершина 0 (0,0,0) -> мир (5,7,9)
+                if (fabsf(o->verts[0] - 5) > 1e-3f || fabsf(o->verts[1] - 7) > 1e-3f ||
+                    fabsf(o->verts[2] - 9) > 1e-3f) {
+                    SDL_Log("console test: glb world-tf FAIL (%.1f,%.1f,%.1f, ожид. 5,7,9)",
+                            o->verts[0], o->verts[1], o->verts[2]); t = 1;
+                }
+                if (o->alpha < 0.999f) { SDL_Log("console test: glb alpha FAIL"); t = 1; }
+                if (o->specular < 0.5f) { SDL_Log("console test: glb specular FAIL (%.2f)", o->specular); t = 1; }
+                if (!(o->cull == MAT_CULL_NONE)) { SDL_Log("console test: glb doubleSided FAIL (cull=%d)", o->cull); t = 1; }
+                if (o->blend != MAT_BLEND_OPAQUE) { SDL_Log("console test: glb alphaMode FAIL (blend=%d)", o->blend); t = 1; }
+                if (o->tint[0] < 0.19f || o->tint[0] > 0.21f) {
+                    SDL_Log("console test: glb baseColorFactor FAIL (%.2f)", o->tint[0]); t = 1;
+                }
+            }
+            if (t) fail++;
+            glb_model_free(gm);
+        }
+    }
+
+    return fail;
+}
+
+static int st_glb_anim(void)
+{
+    int fail = 0;
+    // 15) Анимированный glTF (.glb): glb_anim_parse headless — кожи, веса,
+    // клипы анимации (channels/samplers) и bind-pose геометрия.
+    {
+        AnimGlb *a = glb_anim_parse("models/test_anim.glb");
+        if (!a) { SDL_Log("console test: glb_anim parse FAIL (NULL)"); fail++; }
+        else {
+            int t = 0;
+            if (a->nnode != 4) { SDL_Log("console test: glb_anim nodes FAIL (%d)", a->nnode); t = 1; }
+            if (a->nprim != 1) { SDL_Log("console test: glb_anim prims FAIL (%d)", a->nprim); t = 1; }
+            if (a->nskin != 1) { SDL_Log("console test: glb_anim skins FAIL (%d)", a->nskin); t = 1; }
+            if (a->nclip != 1) { SDL_Log("console test: glb_anim clips FAIL (%d)", a->nclip); t = 1; }
+            if (a->nskin > 0 && a->skins[0].joint_count != 2) {
+                SDL_Log("console test: glb_anim joints FAIL (%d)", a->skins[0].joint_count); t = 1;
+            }
+            if (a->nprim > 0) {
+                AnimPrim *P = &a->prims[0];
+                if (P->vcount != 48) { SDL_Log("console test: glb_anim vcount FAIL (%d)", P->vcount); t = 1; }
+                if (!P->bone_idx || !P->bone_w) { SDL_Log("console test: glb_anim weights FAIL"); t = 1; }
+                // первая половина вершин (0-23) привязана к кости 0, вторая (24-47) к кости 1
+                if (P->bone_idx) {
+                    if (P->bone_idx[0] != 0 || P->bone_idx[23*4] != 0 ||
+                        P->bone_idx[24*4] != 1 || P->bone_idx[47*4] != 1) {
+                        SDL_Log("console test: glb_anim joints FAIL (%u,%u,%u,%u)",
+                                P->bone_idx[0], P->bone_idx[23*4], P->bone_idx[24*4], P->bone_idx[47*4]);
+                        t = 1;
+                    }
+                    if (P->bone_w[3] != 0.0f || P->bone_w[24*4+3] != 0.0f) {
+                        SDL_Log("console test: glb_anim weights FAIL"); t = 1;
+                    }
+                }
+            }
+            if (a->nclip > 0 && a->clips[0].nch != 1) {
+                SDL_Log("console test: glb_anim channels FAIL (%d)", a->clips[0].nch); t = 1;
+            }
+            if (t) fail++;
+            glb_anim_free(a);
+        }
+    }
+
+    return fail;
+}
+
+static int st_glb_girl(void)
+{
+    int fail = 0;
+    // 15b) Реальная модель с большой кожей: handpaint_-_girl_01.glb (99 костей,
+    // имя клипа "IDLE", не-скинненый примитив). Проверяет per-primitive remap
+    // и много-костевые кожи, которые не влезали бы в uBones[64] целиком.
+    {
+        AnimGlb *a = glb_anim_parse("models/handpaint_-_girl_01.glb");
+        if (!a) { SDL_Log("console test: glb_anim girl parse FAIL (NULL)"); fail++; }
+        else {
+            int t = 0;
+            if (a->nskin < 1 || a->skins[0].joint_count != 99) {
+                SDL_Log("console test: glb_anim girl joints FAIL (%d)",
+                        a->nskin > 0 ? a->skins[0].joint_count : -1); t = 1;
+            }
+            if (a->nprim != 6) { SDL_Log("console test: glb_anim girl prims FAIL (%d)", a->nprim); t = 1; }
+            if (a->nclip != 1) { SDL_Log("console test: glb_anim girl clips FAIL (%d)", a->nclip); t = 1; }
+            if (a->nclip > 0 && strcmp(a->clips[0].name, "IDLE")) {
+                SDL_Log("console test: glb_anim girl clip name FAIL (%s)", a->clips[0].name); t = 1;
+            }
+            int skinned = 0, plain = 0;
+            for (int i = 0; i < a->nprim; i++) {
+                if (a->prims[i].bone_idx) skinned++; else plain++;
+                if (a->prims[i].bone_idx)
+                    for (int v = 0; v < a->prims[i].vcount; v++)
+                        for (int k = 0; k < 4; k++)
+                            if (a->prims[i].bone_idx[4*v+k] >= a->skins[0].joint_count) { t = 1; }
+            }
+            if (skinned != 5 || plain != 1) {
+                SDL_Log("console test: glb_anim girl skin split FAIL (%d skinned, %d plain)",
+                        skinned, plain); t = 1;
+            }
+            if (t) fail++;
+            glb_anim_free(a);
+        }
+    }
+
+    return fail;
+}
+
 // --- Самопроверка (FR_TEST=x) --------------------------------------------------
 void console_selftest(void)
 {
@@ -1385,180 +1602,14 @@ void console_selftest(void)
         material_clear_all();
     }
 
-    // 10) version — номер сборки (buildnum.h генерируется Makefile)
-    {
-        console_exec("version");
-        int n = 0;
-        for (int i = 0; i < s_count && n == 0; i++)
-            if (strstr(ring_at(i), "build #"))
-                n = (int)strtol(strstr(ring_at(i), "build #") + 7, NULL, 10);
-        if (n <= 0) { SDL_Log("console test: version/buildnum FAIL"); fail++; }
-    }
-
-    // 11) fx — пресеты эффектов (fx_init_console в main.c)
-    {
-        console_exec("fx_list");
-        int found = 0;
-        for (int i = 0; i < s_count && !found; i++)
-            if (strstr(ring_at(i), "blood")) found = 1;
-        if (!found || !fx_find("blood") || !fx_find("rain") || !fx_find("smoke")
-            || !fx_find("explosion") || !fx_find("fire") || !fx_find("snow")
-            || !fx_find("sparks") || !fx_find("dust") || !fx_find("muzzle_flash")) {
-            SDL_Log("console test: fx presets FAIL");
-            fail++;
-        }
-    }
-
-    // 12) mesh — .obj загрузчик (квад = 2 треуг., треугольник = 1 треуг.)
-    {
-        Mesh *m = mesh_load_obj_mem("cube.obj",
-            "# test cube\n"
-            "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
-            "vn 0 0 1\n"
-            "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
-            "f 1/1/1 2/2/1 3/3/1 4/4/1\n"
-            "v 0 0 1\nv 1 0 1\nv 0 1 1\n"
-            "f 5//1 6//1 7//1\n");
-        if (!m) { SDL_Log("console test: mesh load FAIL"); fail++; }
-        else {
-            // квад -> 6 вершин / 2 треуг.; треугольник -> 3 вершины / 1 треуг.
-            if (m->tri_count != 3 || m->vcount != 9) {
-                SDL_Log("console test: mesh triangable FAIL (%d tri, %d v)",
-                        m->tri_count, m->vcount);
-                fail++;
-            }
-            mesh_free(m);
-        }
-    }
-
-    // 13) Центральный реестр команд (cmdreg.c) — проверить, что ключевые
-    // команды из разных модулей реально зарегистрированы (иначе — тихая
-    // потеря при переполнении/ошибке сборки реестра).
-    {
-        const char *need[] = { "mesh", "glb", "map", "maps", "save", "load", "setpos",
-                               "+forward", "-forward", "+use", "fx", "fx_list",
-                               "weather", "matlist", "noclip", "thirdperson",
-                               "reload_shaders", "ent_create", "screenshot" };
-        for (size_t i = 0; i < sizeof need / sizeof need[0]; i++) {
-            int found = 0;
-            for (int j = 0; j < s_cmds_n && !found; j++)
-                if (strcmp(s_cmds[j].name, need[i]) == 0) found = 1;
-            if (!found) {
-                SDL_Log("console test: команда \"%s\" не зарегистрирована", need[i]);
-                fail++;
-            }
-        }
-        if (s_cmds_n < 40) {
-            SDL_Log("console test: команд всего %d (<40), реестр неполный", s_cmds_n);
-            fail++;
-        }
-    }
-
-    // 14) Бинарный glTF (.glb): glb_parse_file headless — чанки, иерархия,
-    // запекание в мировые координаты, материалы (псевдо-PBR 2004).
-    {
-        GlbModel *gm = glb_parse_file("models/test.glb");
-        if (!gm) { SDL_Log("console test: glb parse FAIL (NULL)"); fail++; }
-        else {
-            int t = (gm->count != 1);
-            if (!t) {
-                GlbItem *o = &gm->items[0];
-                if (o->index_count != 6 || o->vcount != 4) {
-                    SDL_Log("console test: glb geo FAIL (idx=%d, v=%d)",
-                            o->index_count, o->vcount); t = 1;
-                }
-                // корневой узел translation [5,7,9] + дочерний scale 2:
-                // вершина 0 (0,0,0) -> мир (5,7,9)
-                if (fabsf(o->verts[0] - 5) > 1e-3f || fabsf(o->verts[1] - 7) > 1e-3f ||
-                    fabsf(o->verts[2] - 9) > 1e-3f) {
-                    SDL_Log("console test: glb world-tf FAIL (%.1f,%.1f,%.1f, ожид. 5,7,9)",
-                            o->verts[0], o->verts[1], o->verts[2]); t = 1;
-                }
-                if (o->alpha < 0.999f) { SDL_Log("console test: glb alpha FAIL"); t = 1; }
-                if (o->specular < 0.5f) { SDL_Log("console test: glb specular FAIL (%.2f)", o->specular); t = 1; }
-                if (!(o->cull == MAT_CULL_NONE)) { SDL_Log("console test: glb doubleSided FAIL (cull=%d)", o->cull); t = 1; }
-                if (o->blend != MAT_BLEND_OPAQUE) { SDL_Log("console test: glb alphaMode FAIL (blend=%d)", o->blend); t = 1; }
-                if (o->tint[0] < 0.19f || o->tint[0] > 0.21f) {
-                    SDL_Log("console test: glb baseColorFactor FAIL (%.2f)", o->tint[0]); t = 1;
-                }
-            }
-            if (t) fail++;
-            glb_model_free(gm);
-        }
-    }
-
-    // 15) Анимированный glTF (.glb): glb_anim_parse headless — кожи, веса,
-    // клипы анимации (channels/samplers) и bind-pose геометрия.
-    {
-        AnimGlb *a = glb_anim_parse("models/test_anim.glb");
-        if (!a) { SDL_Log("console test: glb_anim parse FAIL (NULL)"); fail++; }
-        else {
-            int t = 0;
-            if (a->nnode != 4) { SDL_Log("console test: glb_anim nodes FAIL (%d)", a->nnode); t = 1; }
-            if (a->nprim != 1) { SDL_Log("console test: glb_anim prims FAIL (%d)", a->nprim); t = 1; }
-            if (a->nskin != 1) { SDL_Log("console test: glb_anim skins FAIL (%d)", a->nskin); t = 1; }
-            if (a->nclip != 1) { SDL_Log("console test: glb_anim clips FAIL (%d)", a->nclip); t = 1; }
-            if (a->nskin > 0 && a->skins[0].joint_count != 2) {
-                SDL_Log("console test: glb_anim joints FAIL (%d)", a->skins[0].joint_count); t = 1;
-            }
-            if (a->nprim > 0) {
-                AnimPrim *P = &a->prims[0];
-                if (P->vcount != 48) { SDL_Log("console test: glb_anim vcount FAIL (%d)", P->vcount); t = 1; }
-                if (!P->bone_idx || !P->bone_w) { SDL_Log("console test: glb_anim weights FAIL"); t = 1; }
-                // первая половина вершин (0-23) привязана к кости 0, вторая (24-47) к кости 1
-                if (P->bone_idx) {
-                    if (P->bone_idx[0] != 0 || P->bone_idx[23*4] != 0 ||
-                        P->bone_idx[24*4] != 1 || P->bone_idx[47*4] != 1) {
-                        SDL_Log("console test: glb_anim joints FAIL (%u,%u,%u,%u)",
-                                P->bone_idx[0], P->bone_idx[23*4], P->bone_idx[24*4], P->bone_idx[47*4]);
-                        t = 1;
-                    }
-                    if (P->bone_w[3] != 0.0f || P->bone_w[24*4+3] != 0.0f) {
-                        SDL_Log("console test: glb_anim weights FAIL"); t = 1;
-                    }
-                }
-            }
-            if (a->nclip > 0 && a->clips[0].nch != 1) {
-                SDL_Log("console test: glb_anim channels FAIL (%d)", a->clips[0].nch); t = 1;
-            }
-            if (t) fail++;
-            glb_anim_free(a);
-        }
-    }
-
-    // 15b) Реальная модель с большой кожей: handpaint_-_girl_01.glb (99 костей,
-    // имя клипа "IDLE", не-скинненый примитив). Проверяет per-primitive remap
-    // и много-костевые кожи, которые не влезали бы в uBones[64] целиком.
-    {
-        AnimGlb *a = glb_anim_parse("models/handpaint_-_girl_01.glb");
-        if (!a) { SDL_Log("console test: glb_anim girl parse FAIL (NULL)"); fail++; }
-        else {
-            int t = 0;
-            if (a->nskin < 1 || a->skins[0].joint_count != 99) {
-                SDL_Log("console test: glb_anim girl joints FAIL (%d)",
-                        a->nskin > 0 ? a->skins[0].joint_count : -1); t = 1;
-            }
-            if (a->nprim != 6) { SDL_Log("console test: glb_anim girl prims FAIL (%d)", a->nprim); t = 1; }
-            if (a->nclip != 1) { SDL_Log("console test: glb_anim girl clips FAIL (%d)", a->nclip); t = 1; }
-            if (a->nclip > 0 && strcmp(a->clips[0].name, "IDLE")) {
-                SDL_Log("console test: glb_anim girl clip name FAIL (%s)", a->clips[0].name); t = 1;
-            }
-            int skinned = 0, plain = 0;
-            for (int i = 0; i < a->nprim; i++) {
-                if (a->prims[i].bone_idx) skinned++; else plain++;
-                if (a->prims[i].bone_idx)
-                    for (int v = 0; v < a->prims[i].vcount; v++)
-                        for (int k = 0; k < 4; k++)
-                            if (a->prims[i].bone_idx[4*v+k] >= a->skins[0].joint_count) { t = 1; }
-            }
-            if (skinned != 5 || plain != 1) {
-                SDL_Log("console test: glb_anim girl skin split FAIL (%d skinned, %d plain)",
-                        skinned, plain); t = 1;
-            }
-            if (t) fail++;
-            glb_anim_free(a);
-        }
-    }
-
+    // Секции 10-15b самодостаточны — вынесены в st_* выше;
+    // порядок проверок и подсчёт провалов прежние.
+    fail += st_version();
+    fail += st_fx();
+    fail += st_mesh();
+    fail += st_cmdreg();
+    fail += st_glb();
+    fail += st_glb_anim();
+    fail += st_glb_girl();
     SDL_Log("console selftest: %s", fail ? "FAIL" : "OK");
 }
