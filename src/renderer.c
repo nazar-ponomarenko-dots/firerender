@@ -41,6 +41,9 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>             // mingw: _mkdir объявлен только здесь
+#endif
 
 #include "png.h"
 #include "stb_image.h"
