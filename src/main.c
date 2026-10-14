@@ -474,17 +474,25 @@ int main(int argc, char *argv[])
     }
 #endif
 #ifdef USE_GLES_PATH
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    // GLES 3.0; если драйвер не отдаёт — пробуем любой, что есть.
+    static const int ctx_try[][3] = {
+        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES }, { 0, 0, 0 },
+    };
 #else
     // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
     // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
-    // раньше. Если драйвер не даст 4.5, SDL вернёт ближайший доступный, и
-    // vegetation.c сам откатится на инстансный путь (g_gl_gpu_driven == 0).
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    // раньше. Если драйвер не даст 4.5, vegetation.c сам откатится на
+    // инстансный путь (g_gl_gpu_driven == 0).
+    // Старые GLX-драйверы (Mesa <= 3.1, NVIDIA legacy 340/470) НЕ понижают
+    // запрос, а падают с GLXBadFBConfig — поэтому перебираем версии вниз и
+    // пересоздаём контекст: SDL перечитывает атрибуты на каждом вызове.
+    static const int ctx_try[][3] = {
+        { 4, 5, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 4, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 1, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 0, 0, 0 },
+    };
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
@@ -492,7 +500,16 @@ int main(int argc, char *argv[])
     g_win = SDL_CreateWindow("firerender", ww, wh,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
-    SDL_GLContext ctx = SDL_GL_CreateContext(g_win);
+    SDL_GLContext ctx = NULL;
+    for (unsigned ci = 0; ci < sizeof ctx_try / sizeof ctx_try[0] && !ctx; ci++) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, ctx_try[ci][0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, ctx_try[ci][1]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
+        ctx = SDL_GL_CreateContext(g_win);
+        if (!ctx && ctx_try[ci][0] > 0)
+            SDL_Log("Контекст GL %d.%d не доступен (%s); пробую ниже",
+                    ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
+    }
     if (!ctx) { SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
                 SDL_DestroyWindow(g_win); SDL_Quit(); return 1; }
     SDL_GL_MakeCurrent(g_win, ctx);
