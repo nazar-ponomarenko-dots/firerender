@@ -114,7 +114,7 @@ struct SrDevice {
         static int warned;                                                    \
         if (!warned) {                                                        \
             warned = 1;                                                       \
-            SDL_Log("Vulkan backend: '%s' не портирован (заглушка)", op);     \
+            SDL_Log("Vulkan backend: '%s' not ported (stub)", op);           \
         }                                                                     \
     } while (0)
 
@@ -136,7 +136,7 @@ SrDevice *sr_create(void)
             gpa = (PFN_vkGetInstanceProcAddr)SDL_LoadFunction(
                 vklib, "vkGetInstanceProcAddr");
         if (!gpa)
-            SDL_Log("Vulkan: loader не загрузился (SDL: %s)", SDL_GetError());
+            SDL_Log("Vulkan: loader failed to load (SDL: %s)", SDL_GetError());
     }
     if (!gpa) {
         if (vklib) SDL_UnloadObject(vklib);
@@ -147,7 +147,7 @@ SrDevice *sr_create(void)
     ((PFN_##name)(uintptr_t)gpa(instance, #name))
     PFN_vkCreateInstance vkCreateInstance = VKLOAD(NULL, vkCreateInstance);
     if (!vkCreateInstance) {
-        SDL_Log("Vulkan: vkCreateInstance не найден");
+        SDL_Log("Vulkan: vkCreateInstance not found");
         SDL_Vulkan_UnloadLibrary();
         return NULL;
     }
@@ -181,7 +181,7 @@ SrDevice *sr_create(void)
     PFN_vkGetDeviceQueue vkGetQueue = VKLOAD(d->instance, vkGetDeviceQueue);
     uint32_t np = 0;
     if (vkEnumPhys(d->instance, &np, NULL) != VK_SUCCESS || np == 0) {
-        SDL_Log("Vulkan: физических устройств нет");
+        SDL_Log("Vulkan: no physical devices");
         goto fail;
     }
     VkPhysicalDevice *phys = calloc(np, sizeof *phys);
@@ -202,7 +202,7 @@ SrDevice *sr_create(void)
     }
     free(phys);
     if (qf == 0xFFFFFFFFu) {
-        SDL_Log("Vulkan: ни у одного устройства нет graphics-очереди");
+        SDL_Log("Vulkan: no device has a graphics queue");
         goto fail;
     }
 
@@ -218,7 +218,7 @@ SrDevice *sr_create(void)
     dci.pQueueCreateInfos = &qci;
     // Surface/swapchain extensions are added at the present step.
     if (vkCreateDevice(d->phys, &dci, NULL, &d->dev) != VK_SUCCESS) {
-        SDL_Log("Vulkan: vkCreateDevice не удался");
+        SDL_Log("Vulkan: vkCreateDevice failed");
         goto fail;
     }
     d->queue_family = qf;

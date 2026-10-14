@@ -31,7 +31,7 @@ static int extract_one(const char *rel, const char *pref, int force)
         char alt[600]; snprintf(alt, sizeof alt, "assets/%s", rel);
         src = SDL_IOFromFile(alt, "rb");
         if (!src) {
-            SDL_Log("assets: в APK нет %s: %s", rel, SDL_GetError());
+            SDL_Log("assets: not in APK: %s: %s", rel, SDL_GetError());
             return -1;
         }
     }
@@ -45,7 +45,7 @@ static int extract_one(const char *rel, const char *pref, int force)
 
     FILE *out = fopen(dst, "wb");
     if (!out) {
-        SDL_Log("assets: не открыть %s", dst);
+        SDL_Log("assets: cannot open %s", dst);
         SDL_CloseIO(src);
         return -1;
     }
@@ -60,10 +60,10 @@ static int extract_one(const char *rel, const char *pref, int force)
     SDL_CloseIO(src);
     if (!ok) {
         remove(dst);
-        SDL_Log("assets: ошибка копирования %s", rel);
+        SDL_Log("assets: copy failed %s", rel);
         return -1;
     }
-    SDL_Log("assets: %s (%d КБ)", rel, (int)(sz / 1024));
+    SDL_Log("assets: %s (%d KiB)", rel, (int)(sz / 1024));
     return 1;
 }
 
@@ -72,7 +72,7 @@ int fr_android_prepare(void)
     SDL_Log("android: prepare start (SDL inited, pref?)");
     char *pref = SDL_GetPrefPath("ZaworGroup", "firerender");
     if (!pref) {
-        SDL_Log("android: нет pref-пути: %s", SDL_GetError());
+        SDL_Log("android: no pref path: %s", SDL_GetError());
         return 0;
     }
     SDL_Log("android: pref=%s", pref);
@@ -99,7 +99,7 @@ int fr_android_prepare(void)
         list = (char *)SDL_LoadFile("assets/assets.txt", &n);
     }
     if (!list) {
-        SDL_Log("android: в APK нет assets.txt — ресурсы не распаковать (cwd=%s, err=%s)",
+        SDL_Log("android: no assets.txt in APK — cannot extract resources (cwd=%s, err=%s)",
                 pref, SDL_GetError());
         SDL_free(pref);
         return 0;
@@ -128,9 +128,9 @@ int fr_android_prepare(void)
             p = eol ? eol + 1 : end;
         }
         SDL_free(list);
-        SDL_Log("assets: %d/%d файлов обновлено", copied, total);
+        SDL_Log("assets: %d/%d files updated", copied, total);
         if (failed > 0) {
-            SDL_Log("assets: %d ошибок — запуск отменён", failed);
+            SDL_Log("assets: %d errors — startup aborted", failed);
             SDL_free(pref);
             return 0;
         }
@@ -141,7 +141,7 @@ int fr_android_prepare(void)
             if (fclose(sf) != 0) stamp_ok = 0;
         }
         if (!stamp_ok) {
-            SDL_Log("assets: не записать маркер версии");
+            SDL_Log("assets: cannot write version stamp");
             SDL_free(pref);
             return 0;
         }
@@ -149,11 +149,11 @@ int fr_android_prepare(void)
 
     // Working folder = storage: config.cfg, save.cfg and logs are written here too
     if (chdir(pref) != 0) {
-        SDL_Log("android: chdir(%s) не удался", pref);
+        SDL_Log("android: chdir(%s) failed", pref);
         SDL_free(pref);
         return 0;
     } else
-        SDL_Log("android: рабочая папка %s", pref);
+        SDL_Log("android: working dir %s", pref);
     SDL_free(pref);
     return 1;
 }

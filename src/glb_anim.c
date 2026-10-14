@@ -170,8 +170,8 @@ AnimGlb *glb_anim_parse(const char *path)
 {
     unsigned int filesz=0;
     unsigned char*file=resources_read_file(path,&filesz);
-    if(!file){ SDL_Log("glb_anim: не найден %s",path); return NULL; }
-    if(filesz<20||memcmp(file,"glTF",4)){ SDL_Log("glb_anim: %s не GLB",path); free(file); return NULL; }
+    if(!file){ SDL_Log("glb_anim: not found %s",path); return NULL; }
+    if(filesz<20||memcmp(file,"glTF",4)){ SDL_Log("glb_anim: %s not a GLB",path); free(file); return NULL; }
     const unsigned char*json_data=NULL,*bin=NULL; unsigned int json_len=0,bin_len=0;
     unsigned int off=12;
     while(off+8<=filesz){ unsigned int clen,ctype; memcpy(&clen,file+off,4); memcpy(&ctype,file+off+4,4); off+=8;
@@ -182,9 +182,9 @@ AnimGlb *glb_anim_parse(const char *path)
         if(ctype==GLB_CHUNK_JSON){json_data=file+off;json_len=clen;}
         else if(ctype==GLB_CHUNK_BIN){bin=file+off;bin_len=clen;}
         off+=clen; }
-    if(!json_data||!bin){ SDL_Log("glb_anim: %s нет чанков",path); free(file); return NULL; }
+    if(!json_data||!bin){ SDL_Log("glb_anim: %s no chunks",path); free(file); return NULL; }
     const JsonNode*root=json_parse((const char*)json_data,(size_t)json_len);
-    if(!root){ SDL_Log("glb_anim: %s JSON не распознан",path); free(file); return NULL; }
+    if(!root){ SDL_Log("glb_anim: %s JSON not recognized",path); free(file); return NULL; }
 
     const JsonNode*acc_a=json_find(root,"accessors"),*bv_a=json_find(root,"bufferViews");
     const JsonNode*nd_a=json_find(root,"nodes"),*ms_a=json_find(root,"meshes");
@@ -194,7 +194,7 @@ AnimGlb *glb_anim_parse(const char *path)
     int acc_n=acc_a&&acc_a->type==JSON_ARRAY?json_array_len(acc_a):0;
     int bv_n=bv_a&&bv_a->type==JSON_ARRAY?json_array_len(bv_a):0;
     int node_n=nd_a&&nd_a->type==JSON_ARRAY?json_array_len(nd_a):0;
-    if(node_n==0){ SDL_Log("glb_anim: %s нет nodes",path); json_free(); free(file); return NULL; }
+    if(node_n==0){ SDL_Log("glb_anim: %s no nodes",path); json_free(); free(file); return NULL; }
 
     GB* bvs=calloc((size_t)(bv_n?bv_n:1),sizeof* bvs);
     if(!bvs){ json_free(); free(file); return NULL; }
@@ -218,7 +218,7 @@ AnimGlb *glb_anim_parse(const char *path)
     AnimGlb*out=calloc(1,sizeof* out);
     if(!out){ json_free(); free(bvs); free(accs); free(file); return NULL; }
     out->nodes=calloc((size_t)node_n,sizeof* out->nodes);
-    if(!out->nodes){ SDL_Log("glb_anim: %s — нехватка памяти",path);
+    if(!out->nodes){ SDL_Log("glb_anim: %s — out of memory",path);
         json_free(); free(bvs); free(accs); free(out); free(file); return NULL; }
     out->nnode=node_n;
     for(int i=0;i<node_n;i++) out->nodes[i].parent=-1;
@@ -278,7 +278,7 @@ AnimGlb *glb_anim_parse(const char *path)
     int*mesh_pstart=calloc((size_t)(mesh_n?mesh_n:1),sizeof(int));
     int*mesh_pcount=calloc((size_t)(mesh_n?mesh_n:1),sizeof(int));
     if(!out->skin_nodes||!mesh_pstart||!mesh_pcount){
-        SDL_Log("glb_anim: %s — нехватка памяти",path);
+        SDL_Log("glb_anim: %s — out of memory",path);
         json_free(); free(bvs); free(accs); glb_anim_free(out); free(file); return NULL; }
     for(int mi=0;mi<mesh_n;mi++){const JsonNode*mesh=json_array_get(ms_a,mi);
         const JsonNode*prims=json_find(mesh,"primitives");
@@ -305,7 +305,7 @@ AnimGlb *glb_anim_parse(const char *path)
             // OOB protection: the accessor must fit inside the file's BIN chunk.
             // Check vec right here: rvv copies vec floats into vp[3].
             if(!acc_fits(ap,bvs,bv_n,(long)bin_len)||ap->vec!=3){
-                SDL_Log("glb_anim: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен",path);
+                SDL_Log("glb_anim: %s — POSITION accessor out of buffer or not VEC3, primitive skipped",path);
                 continue;
             }
             // The other attributes are read into stack receivers of fixed
@@ -318,7 +318,7 @@ AnimGlb *glb_anim_parse(const char *path)
             long nv=ap->count;
             // Reasonable cap on primitive vertex count (protection against count~1e9 from JSON)
             if(nv>16*1024*1024){
-                SDL_Log("glb_anim: %s — POSITION count %ld слишком велик",path,nv);
+                SDL_Log("glb_anim: %s — POSITION count %ld too large",path,nv);
                 continue;
             }
             AnimPrim *P = NULL;
@@ -379,7 +379,7 @@ AnimGlb *glb_anim_parse(const char *path)
             goto prim_ok;
         prim_fail:
             // Allocation failure: free the half-built primitive and skip it.
-            SDL_Log("glb_anim: %s — нехватка памяти на примитив",path);
+            SDL_Log("glb_anim: %s — out of memory for primitive",path);
             if (P) {
                 free(P->verts); free(P->normals); free(P->uvs);
                 free(P->bone_idx); free(P->bone_w); free(P->indices);
@@ -747,7 +747,7 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
         }
     }
     if (nn + side_count + 1 > PHYS_MAX_PARTS || link_count > PHYS_MAX_LINKS) {
-        SDL_Log("ragdoll: skeleton слишком велик (%d/%d частиц, %d/%d связей)",
+        SDL_Log("ragdoll: skeleton too large (%d/%d parts, %d/%d links)",
                 nn + side_count + 1, PHYS_MAX_PARTS,
                 link_count, PHYS_MAX_LINKS);
         return -1;
@@ -916,7 +916,7 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
                 p->items[i].mtl_name, p->items[i].has_skin,
                 p->items[i].rag_skip);
     }
-    SDL_Log("ragdoll: %d костей, %s", nn, r->hang ? "висит" : "падает");
+    SDL_Log("ragdoll: %d bones, %s", nn, r->hang ? "hangs" : "falls");
     return 0;
 }
 
@@ -1136,8 +1136,8 @@ void glb_anim_ragdoll_step_all(float dt)
                         if (dev > worst) worst = dev;
                     }
                 }
-                SDL_Log("rag scan: частиц в разлёте %d из %d, "
-                        "дрейф масштаба кожи %.2f%%", bad, w->np, worst * 100.0f);
+                SDL_Log("rag scan: %d of %d parts flying apart, "
+                        "skin scale drift %.2f%%", bad, w->np, worst * 100.0f);
             }
         }
     }
@@ -1477,7 +1477,7 @@ static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int ski
         } }
     }
     if(has_skin&&overflow)
-        SDL_Log("glb_anim: примитив использует >=%d костей — часть вершин привязана к кости 0",MAX_BONES);
+        SDL_Log("glb_anim: primitive uses >=%d bones — some vertices bound to bone 0",MAX_BONES);
     d->joint_n=n;
     if(has_skin&&n>0){
         d->joint_map=malloc((size_t)n*sizeof(int));

@@ -30,7 +30,7 @@ PKG=ru.zaworg.firerender
 rm -rf "$BUILD"
 mkdir -p "$BUILD"/{lib,assets,gen,classes,filtered}
 
-echo "== 1/6 SDL3 (вендорена, third_party/SDL) =="
+echo "== 1/6 SDL3 (vendored, third_party/SDL) =="
 for ABI in $ABIS; do
     SDLB=build/and-sdl-$ABI
     if [ ! -f "$SDLB/libSDL3.so" ]; then
@@ -46,14 +46,14 @@ for ABI in $ABIS; do
     cp "$SDLB/libSDL3.so" "$BUILD/lib/$ABI/"
 done
 
-echo "== 2/6 движок (libmain.so) =="
+echo "== 2/6 engine (libmain.so) =="
 # GLES path: __ANDROID__ enables it by itself (gl_loader.h)
 SRC="src/*.c third_party/lua/lua.c third_party/miniz/miniz.c third_party/miniz/miniz_zip.c third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_tdef.c"
 for ABI in $ABIS; do
     case $ABI in
         arm64-v8a) TRIPLE24=aarch64-linux-android24 ;;
         x86_64)    TRIPLE24=x86_64-linux-android24 ;;
-        *) echo "неизвестный ABI $ABI"; exit 1 ;;
+        *) echo "unknown ABI $ABI"; exit 1 ;;
     esac
     # NDK r28: only wrapper names carrying the API level (android-24 = our minimum)
     CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/$TRIPLE24-clang
@@ -63,10 +63,10 @@ for ABI in $ABIS; do
         $SRC -o "$BUILD/lib/$ABI/libmain.so" \
         -L"$BUILD/lib/$ABI" -lSDL3 -lm -landroid -llog \
         -Wl,--no-undefined > /tmp/apk-main-$ABI.log 2>&1 \
-        || { echo "ошибка компиляции $ABI:"; grep -E "error|ошибка" /tmp/apk-main-$ABI.log | head -20; exit 1; }
+        || { echo "compile error for $ABI:"; grep -E "error|ошибка" /tmp/apk-main-$ABI.log | head -20; exit 1; }
 done
 
-echo "== 3/6 ресурсы в assets =="
+echo "== 3/6 resources into assets =="
 # assets.txt — manifest for unpacking (src/android.c); icons are not needed
 # models/ excluded — see the comment in the header
 printf '%s\n' "$VERSION" > "$BUILD/assets/assets.version"
@@ -92,7 +92,7 @@ $BT/d8 --release --min-api 24 --lib "$PLATFORM" \
     $(find "$BUILD/classes" -name '*.class') \
     --output "$BUILD" > /tmp/apk-d8.log 2>&1 || { echo "d8:"; tail -5 /tmp/apk-d8.log; exit 1; }
 
-echo "== 5/6 упаковка (aapt2) =="
+echo "== 5/6 packaging (aapt2) =="
 # Pass sdk/version explicitly — otherwise aapt2 sets sdkVersion=1 and versionCode='' (see aapt2 dump badging)
 $BT/aapt2 link -I "$PLATFORM" \
     --manifest android/app/src/main/AndroidManifest.xml \
@@ -111,7 +111,7 @@ done
 # extractNativeLibs="true" in the manifest, so compression is not critical, but you can
 # store uncompressed (-0) for extractNativeLibs=false.
 
-echo "== 6/6 подпись (debug) =="
+echo "== 6/6 signing (debug) =="
 $BT/zipalign -f 4 base.apk aligned.apk
 KS=~/.android/debug.keystore
 if [ ! -f "$KS" ]; then

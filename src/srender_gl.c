@@ -651,7 +651,7 @@ void sr_draw_elements_instanced_base(SrDevice *d, SrPrim prim, int count,
         // caps->base_instance == 0: the caller must not get here.
         static int warned = 0;
         if (!warned) {
-            SDL_Log("sr: base_instance недоступен — draw пропущен");
+            SDL_Log("sr: base_instance unavailable — draw skipped");
             warned = 1;
         }
         return;

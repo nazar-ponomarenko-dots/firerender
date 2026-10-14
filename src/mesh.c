@@ -129,12 +129,12 @@ Mesh *mesh_load_obj_mem(const char *name, const char *src)
     if (verts.failed || vns.failed || vts.failed ||
         pos.failed || nrm.failed || uv.failed) {
         free(pos.d); free(nrm.d); free(uv.d);
-        SDL_Log("mesh: %s — недостаточно памяти", name);
+        SDL_Log("mesh: %s — out of memory", name);
         return NULL;
     }
     if (pos.n == 0) {
         free(pos.d); free(nrm.d); free(uv.d);
-        SDL_Log("mesh: %s без граней", name);
+        SDL_Log("mesh: %s has no faces", name);
         return NULL;
     }
 
@@ -148,14 +148,14 @@ Mesh *mesh_load_obj_mem(const char *name, const char *src)
     m->uvs = uv.d;
     m->vcount = pos.n / 3;
     m->tri_count = m->vcount / 3;
-    SDL_Log("mesh: %s — %d вершин, %d треуг.", name, m->vcount, m->tri_count);
+    SDL_Log("mesh: %s — %d verts, %d tris", name, m->vcount, m->tri_count);
     return m;
 }
 
 Mesh *mesh_load_obj(const char *path)
 {
     char *src = resources_read_text(path);
-    if (!src) { SDL_Log("mesh: не найден %s", path); return NULL; }
+    if (!src) { SDL_Log("mesh: not found %s", path); return NULL; }
     Mesh *m = mesh_load_obj_mem(path, src);
     free(src);
     return m;

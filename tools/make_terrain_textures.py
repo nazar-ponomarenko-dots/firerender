@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Генерирует БЕСШОВНЫЕ текстуры материалов рельефа в img/.
+"""Generate SEAMLESS terrain material textures into img/.
 
-Слои splat-карты рельефа (см. src/splat.h):
-    img/dirt.png     R — почва/грунтовая дорога (бурая земля, комки, камешки)
-    img/sand.png     G — песок (мелкое зерно, без запечённой ряби)
-    img/gravel.png   B — гравий/тропинка (серая щебёнка, мелкие камни)
-    img/asphalt.png  A — асфальт (тёмный, крупная фракция, трещины, разметка нет)
+Terrain splat-map layers (see src/splat.h):
+    img/dirt.png     R — soil/dirt road (brown earth, clumps, pebbles)
+    img/sand.png     G — sand (fine grain, no baked-in ripples)
+    img/gravel.png   B — gravel/path (grey crushed stone, small rocks)
+    img/asphalt.png  A — asphalt (dark, coarse aggregate, cracks, no lane markings)
 
-Все текстуры 512x512 RGB и ТАЙЛЯТСЯ без швов: шум построен на решётке с
-периодическим индексом (обход по модулю), поэтому правый край продолжает
-левый, а нижний — верхний.
+All textures are 512x512 RGB and TILE seamlessly: the noise is built on a
+lattice with periodic indexing (wrap by modulo), so the right edge continues
+the left one and the bottom — the top.
 
-Запуск: python3 tools/make_terrain_textures.py
+Usage: python3 tools/make_terrain_textures.py
 """
 import os
 
@@ -24,13 +24,13 @@ N = 512
 
 
 def lattice(rng, n):
-    """Периодическая решётка случайных значений n x n."""
+    """Periodic lattice of random values n x n."""
     return rng.random((n, n)).astype(np.float32)
 
 
 def value_noise(rng, size, cells):
-    """Бесшовный value-noise: решётка cells x cells, билинейная интерполяция
-    с обходом индексов по модулю (правый край стыкуется с левым)."""
+    """Seamless value-noise: a cells x cells lattice, bilinear interpolation
+    with indices wrapped by modulo (the right edge joins the left one)."""
     g = lattice(rng, cells)
     # lattice coordinates
     t = np.linspace(0.0, cells, size, endpoint=False, dtype=np.float32)
@@ -51,7 +51,7 @@ def value_noise(rng, size, cells):
 
 
 def fbm(rng, size, base_cells, octaves, gain=0.5, lacunarity=2):
-    """Фрактальный шум: сумма октав value-noise (все периодические)."""
+    """Fractal noise: sum of value-noise octaves (all periodic)."""
     out = np.zeros((size, size), dtype=np.float32)
     amp = 1.0
     total = 0.0
@@ -70,7 +70,7 @@ def norm(a):
 
 
 def stones(rng, size, count, rmin, rmax, hard=1.0):
-    """Периодические «камешки»: диски со сглаженным краем, обёрнутые по краям."""
+    """Periodic "pebbles": discs with a smoothed edge, wrapped at the borders."""
     m = np.zeros((size, size), dtype=np.float32)
     ys, xs = np.mgrid[0:size, 0:size].astype(np.float32)
     for _ in range(count):
@@ -88,7 +88,7 @@ def stones(rng, size, count, rmin, rmax, hard=1.0):
 
 
 def cracks(rng, size, count, width=1.6, seg=90):
-    """Тонкие ломаные трещины (для асфальта). Периодичны за счёт wrap-координат."""
+    """Thin broken-line cracks (for asphalt). Periodic thanks to wrap coordinates."""
     m = np.zeros((size, size), dtype=np.float32)
     ys, xs = np.mgrid[0:size, 0:size].astype(np.float32)
     for _ in range(count):
@@ -175,4 +175,4 @@ if __name__ == "__main__":
     save(os.path.join(OUT, "sand.png"), make_sand())
     save(os.path.join(OUT, "gravel.png"), make_gravel())
     save(os.path.join(OUT, "asphalt.png"), make_asphalt())
-    print("Текстуры материалов рельефа готовы (бесшовные 512x512).")
+    print("Terrain material textures ready (seamless 512x512).")

@@ -92,12 +92,12 @@ void sr_api_report(void)
     // Planned: shown separately so the status is visible in the startup log.
     // (SDL_Vulkan_* probe will be added together with the backend itself.)
     if (!sr_api_available(SR_API_VULKAN))
-        SDL_Log("Render API: Vulkan [stub — каркас есть, бэкенд не включён]");
+        SDL_Log("Render API: Vulkan [stub — skeleton only, backend not enabled]");
     if (!sr_api_available(SR_API_METAL))
         SDL_Log("Render API: Metal [stub%s]",
 #ifdef __APPLE__
-                " — план: MoltenVK или SPIRV-Cross -> MSL");
+                " — plan: MoltenVK or SPIRV-Cross -> MSL");
 #else
-                " — платформа не Apple");
+                " — non-Apple platform");
 #endif
 }

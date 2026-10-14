@@ -150,7 +150,7 @@ static int map_reload(Game *g, const char *name, int force)
     }
     snprintf(g->map_name, sizeof g->map_name, "%s", target_name);
     if (!g->world_loaded) {
-        SDL_Log("Map selected: %s (загрузится при НОВОЙ ИГРЕ)", g->map_name);
+        SDL_Log("Map selected: %s (will load on NEW GAME)", g->map_name);
         return 0;
     }
     s_map_switching = 1;
@@ -337,7 +337,7 @@ static void take_shot_png(const char *path, int vw, int vh)
         if (png_save(path, vw, vh, flip) == 0)
             SDL_Log("screenshot: %s (%dx%d)", path, vw, vh);
         else
-            SDL_Log("screenshot: не удалось записать %s", path);
+            SDL_Log("screenshot: failed to write %s", path);
         free(flip);
     }
     free(px);
@@ -513,7 +513,7 @@ void cmd_load(const char *args)
         cmd_map_select(g->player.save_map);
     } else {
         snprintf(g->map_name, sizeof g->map_name, "%s", g->player.save_map);
-        SDL_Log("Map selected: %s (из save)", g->map_name);
+        SDL_Log("Map selected: %s (from save)", g->map_name);
     }
     console_print("load: карта %s, телепорт при загрузке", g->player.save_map);
 }
@@ -1129,7 +1129,7 @@ void cmd_matlist(const char *args)
 {
     (void)args;
     if (material_count() == 0) {
-        SDL_Log("matlist: материалов не зарегистрировано");
+        SDL_Log("matlist: no materials registered");
         return;
     }
     for (int i = 0; i < material_count(); i++) {

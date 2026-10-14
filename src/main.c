@@ -252,7 +252,7 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'O')) cvar_set("snd_occlusion", 0.0f);  // sound muting off (A/B)
     if (strchr(fr_test, 'Z')) {
         int fails = audio_selftest();
-        SDL_Log("FR_TEST Z: audio_selftest %s (провалов %d)",
+        SDL_Log("FR_TEST Z: audio_selftest %s (%d fails)",
                 fails ? "FAIL" : "OK", fails);
     }
     if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // static cascade cache off
@@ -265,7 +265,7 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'E')) {
         cvar_set("ecs_enable", 1.0f);   // ECS layer active from the first tick
         int fails = ecs_selftest();
-        SDL_Log("FR_TEST E: ecs_selftest %s (провалов %d)",
+        SDL_Log("FR_TEST E: ecs_selftest %s (%d fails)",
                 fails ? "FAIL" : "OK", fails);
         ecs_scene_new_generation();     // clean generation after the test
     }
@@ -276,7 +276,7 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'u')) {
         cvar_set("phys_bodies", 1.0f);
         int fails = phys_body_selftest();
-        SDL_Log("FR_TEST u: phys_body_selftest %s (провалов %d)",
+        SDL_Log("FR_TEST u: phys_body_selftest %s (%d fails)",
                 fails ? "FAIL" : "OK", fails);
         phys_body_kill_all(physics_world());   // the test leaves nothing behind
     }
@@ -304,7 +304,7 @@ static int fr_test_apply(Game *g)
                 // Mouse smoothing targets — snap to the new look (otherwise
                 // m_smooth drags the camera back to spawn)
                 camera_sync_look(&g->cam->cam);
-                SDL_Log("FR_POS: телепорт %.0f,%.0f yaw=%.2f pitch=%.2f",
+                SDL_Log("FR_POS: teleport %.0f,%.0f yaw=%.2f pitch=%.2f",
                         fx, fz, g->cam->cam.yaw, g->cam->cam.pitch);
             }
         }
@@ -483,7 +483,7 @@ static SDL_GLContext boot_gl_context(void)
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
         ctx = SDL_GL_CreateContext(g_win);
         if (!ctx && ctx_try[ci][0] > 0)
-            SDL_Log("Контекст GL %d.%d не доступен (%s); пробую ниже",
+            SDL_Log("GL context %d.%d not available (%s); trying lower",
                     ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
     }
     return ctx;
@@ -552,7 +552,7 @@ int main(int argc, char *argv[])
     // Called AFTER SDL_Init — on Android JNI/env and AAssetManager exist by then.
     if (!fr_android_prepare()) {
 #ifdef __ANDROID__
-        SDL_Log("android: подготовка ресурсов не удалась");
+        SDL_Log("android: resource preparation failed");
         SDL_Quit();
         return 1;
 #endif
@@ -586,8 +586,8 @@ int main(int argc, char *argv[])
         SrDevice *dev = sr_create();
         if (dev) {
             const SrCaps *c = sr_caps(dev);
-            SDL_Log("Backend %s: device OK (%s %s), но рендер-пайплайн на этот "
-                    "API ещё не портирован (sr_* заглушки) — завершение.",
+            SDL_Log("Backend %s: device OK (%s %s), but the render pipeline for "
+                    "this API is not ported yet (sr_* stubs) — exiting.",
                     sr_api_name(
 #ifdef FR_BACKEND_VULKAN
                         SR_API_VULKAN
@@ -598,7 +598,7 @@ int main(int argc, char *argv[])
                     c->vendor, c->version);
             sr_destroy(dev);
         } else {
-            SDL_Log("Backend %s: sr_create() не удался",
+            SDL_Log("Backend %s: sr_create() failed",
                     sr_api_name(
 #ifdef FR_BACKEND_VULKAN
                         SR_API_VULKAN
@@ -895,11 +895,11 @@ int main(int argc, char *argv[])
             app_state() == APP_PLAY && game.sun_node) {
             static int s_bake_warm = 0;
             if (++s_bake_warm == 30) {
-                SDL_Log("FR_BAKE: запекаю свет карты...");
+                SDL_Log("FR_BAKE: baking the map light...");
                 terrain_light_bake(&game.world,
                                    (SunParams *)game.sun_node->params,
                                    renderer_context());
-                SDL_Log("FR_BAKE: готово. Свет в map/baked/ — запусти make mapzip.");
+                SDL_Log("FR_BAKE: done. Light in map/baked/ — run make mapzip.");
                 running = false;
             }
         }
@@ -911,7 +911,7 @@ int main(int argc, char *argv[])
             int act = app_menu(renderer_vw(), renderer_vh());
             if (act == APP_ACT_START || act == APP_ACT_RESUME) {
                 if (!game.world_loaded && game_load_world(&game) != 0) {
-                    SDL_Log("World load failed — остаёмся в меню");
+                    SDL_Log("World load failed — staying in the menu");
                     console_print("ошибка загрузки карты");
                     // do not exit the app, give a chance to pick another map
                     continue;
@@ -972,11 +972,11 @@ int main(int argc, char *argv[])
         }
 
         if (!running && s_stages && s_st_n > 0) {
-            SDL_Log("FR_STAGES (среднее по %d кадрам, мс): input %.3f | "
+            SDL_Log("FR_STAGES (average over %d frames, ms): input %.3f | "
                     "logic %.3f [reload %.3f | demo %.3f | game_update %.3f | "
                     "phys %.3f | audio+lua %.3f]"
                     " | sync %.3f | render %.3f | end %.3f | "
-                    "swap %.3f | СУММА %.3f",
+                    "swap %.3f | TOTAL %.3f",
                     s_st_n, s_st_in * 1000.0 / s_st_n,
                     s_st_logic * 1000.0 / s_st_n,
                     s_st_reload * 1000.0 / s_st_n,
@@ -988,8 +988,8 @@ int main(int argc, char *argv[])
                     s_st_swap * 1000.0 / s_st_n,
                     (s_st_in + s_st_logic + s_st_sync + s_st_render +
                      s_st_end + s_st_swap) * 1000.0 / s_st_n);
-            SDL_Log("FR_STAGES max (мс): кадр %.1f | game_update %.1f | "
-                    "render %.1f  (boot-кадр портит reload-среднее — не смотри туда)",
+            SDL_Log("FR_STAGES max (ms): frame %.1f | game_update %.1f | "
+                    "render %.1f  (the boot frame skews the reload average — ignore it)",
                     s_st_frame_max * 1000.0, s_st_gu_max * 1000.0,
                     s_st_render_max * 1000.0);
         }

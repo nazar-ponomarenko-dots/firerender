@@ -200,7 +200,7 @@ void game_demo_toggle(Game *g)
         g->demo_min_dt = 1e9;
         g->demo_max_dt = 0;
         hud_demo_start(g->hud);
-        SDL_Log("DEMO: start (автополёт, замер FPS)");
+        SDL_Log("DEMO: start (autofly, FPS measurement)");
     } else {
         hud_demo_stop(g->hud);
         SDL_Log("DEMO: stopped");
@@ -294,7 +294,7 @@ static void map_actions_update(Game *g)
         if (!edge) continue;
         if (t->once && t->fired) continue;
         if (t->once) mt->fired = 1;
-        SDL_Log("Trigger: %s", t->name[0] ? t->name : "(без имени)");
+        SDL_Log("Trigger: %s", t->name[0] ? t->name : "(unnamed)");
         map_action_run(g, t->commands, t->cmd_n, t->message, t->sound,
                        t->pos, t->teleport, t->has_tp);
         if (!g->world_loaded) return;   // the world changed — the new map's
@@ -316,7 +316,7 @@ static void map_actions_update(Game *g)
     if (!best) return;
     MapObject *mo = (MapObject *)best;
     if (best->use.once) mo->use.used = 1;
-    SDL_Log("Use: %s", best->name[0] ? best->name : "(объект)");
+    SDL_Log("Use: %s", best->name[0] ? best->name : "(object)");
     map_action_run(g, best->use.commands, best->use.cmd_n,
                    best->use.message, best->use.sound, best->pos, NULL, 0);
 }
@@ -557,12 +557,12 @@ static void audio_load_map(Game *g)
     if (mapdata_music(&ms)) {
         g->music = audio_load(ms.sound);
         if (g->music) audio_music_start(g->music, ms.volume);
-        else SDL_Log("Map music: нет %s", ms.sound);
+        else SDL_Log("Map music: missing %s", ms.sound);
     }
     if (mapdata_ambient(&ms)) {
         g->ambient = audio_load(ms.sound);
         if (g->ambient) audio_loop_start(g->ambient, ms.volume);
-        else SDL_Log("Map ambient: нет %s", ms.sound);
+        else SDL_Log("Map ambient: missing %s", ms.sound);
     } else {
         if (!g->wind) g->wind = audio_load("audio/wind.wav");
         if (g->wind) audio_loop_start(g->wind, 0.22f);
@@ -577,7 +577,7 @@ static void audio_load_map(Game *g)
             SDL_Log("Map sound: %s at %.0f,%.0f (r=%.0fm)", m3->sound,
                     m3->pos[0], m3->pos[2], m3->radius);
         } else {
-            SDL_Log("Map sound: нет %s", m3->sound);
+            SDL_Log("Map sound: missing %s", m3->sound);
         }
     }
 }
@@ -598,7 +598,7 @@ int game_load_world(Game *g)
     double st_f = (double)SDL_GetPerformanceFrequency();
     Uint64 st_t = SDL_GetPerformanceCounter(), st_p = st_t;
 #define STLOG(msg) do { if (st) { st_p = SDL_GetPerformanceCounter(); \
-        SDL_Log("LOAD %s: %.0f мс", msg, (st_p - st_t) * 1000.0 / st_f); \
+        SDL_Log("LOAD %s: %.0f ms", msg, (st_p - st_t) * 1000.0 / st_f); \
         st_t = st_p; } } while (0)
     loading_begin();
     loading_progress(0.05f, "Загрузка уровня");

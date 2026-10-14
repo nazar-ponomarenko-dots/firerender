@@ -299,11 +299,11 @@ int audio_selftest(void)
     const float above[3]  = { 7.0f, 20.0f, 3.0f };   // same point, but above the wall
     int fails = 0;
     if (world_line_open(&w, from, behind) > 0.1f) {
-        SDL_Log("audio selftest FAIL: стена не перекрыла прямую");
+        SDL_Log("audio selftest FAIL: wall did not block the direct line");
         fails++;
     }
     if (world_line_open(&w, from, above) < 0.99f) {
-        SDL_Log("audio selftest FAIL: путь над стеной считается закрытым");
+        SDL_Log("audio selftest FAIL: path above the wall counted as blocked");
         fails++;
     }
     // Volume: occlusion off = 1.0, occlusion on — down to the floor itself.
@@ -312,18 +312,18 @@ int audio_selftest(void)
     audio_set_listener(from);
     cvar_set("snd_occlusion", 0.0f);
     if (audio_occlusion_at(behind) < 0.99f) {
-        SDL_Log("audio selftest FAIL: snd_occlusion 0 всё равно глушит");
+        SDL_Log("audio selftest FAIL: snd_occlusion 0 still muffles");
         fails++;
     }
     cvar_set("snd_occlusion", 1.0f);
     cvar_set("snd_occlusion_min", 0.25f);
     float full = audio_occlusion_at(behind);
     if (full > 0.26f || full < 0.24f) {
-        SDL_Log("audio selftest FAIL: за стеной %.2f, ожидался пол 0.25", full);
+        SDL_Log("audio selftest FAIL: behind wall %.2f, expected floor 0.25", full);
         fails++;
     }
     if (audio_occlusion_at(above) < 0.99f) {
-        SDL_Log("audio selftest FAIL: над стеной глуше, чем нужно");
+        SDL_Log("audio selftest FAIL: above wall more muffled than expected");
         fails++;
     }
     cvar_set("snd_occlusion", k0);
@@ -343,13 +343,13 @@ void audio_selftest_world(const WorldState *w, const float listener[3])
     for (int i = 0; i < mapdata_sound_count(); i++) {
         const MapSound3D *s = mapdata_sound(i);
         if (!s) continue;
-        SDL_Log("FR_TEST Z: звук %d (%.0f %.0f %.0f) -> %.2f", i,
+        SDL_Log("FR_TEST Z: sound %d (%.0f %.0f %.0f) -> %.2f", i,
                 s->pos[0], s->pos[1], s->pos[2], audio_occlusion_at(s->pos));
     }
     // Control point: a source 50 m UNDER the feet must be muffled —
     // otherwise the heights are not read (empty world) and all "1.00" above mean nothing.
     float under[3] = { listener[0], listener[1] - 50.0f, listener[2] };
-    SDL_Log("FR_TEST Z: контрольно, под ногами -> %.2f", audio_occlusion_at(under));
+    SDL_Log("FR_TEST Z: control, under the feet -> %.2f", audio_occlusion_at(under));
     audio_set_world(NULL);
 }
 

@@ -132,8 +132,8 @@ void cvar_set(const char *name, float v)
         // in config.cfg (otherwise a typo would live in the config forever).
         if (!name || !name[0]) return;
         int fl = s_config_loading ? CVAR_ARCHIVE : 0;
-        SDL_Log("cvar_set: \"%s\" не зарегистрирован — создаю%s",
-                name, fl & CVAR_ARCHIVE ? " (из config.cfg — архивный)" : "");
+        SDL_Log("cvar_set: \"%s\" not registered — creating%s",
+                name, fl & CVAR_ARCHIVE ? " (from config.cfg — archived)" : "");
         cvar_register_ex(name, v, 1.0f, -1.0f, fl, "map/lua-переменная");
         i = cvar_index(name);
     }
@@ -141,7 +141,7 @@ void cvar_set(const char *name, float v)
     Cvar *c = &s_cvars[i];
     // Cheat variables only change when sv_cheats 1
     if ((c->flags & CVAR_CHEAT) && cvar_get("sv_cheats") < 0.5f) {
-        SDL_Log("cvar \"%s\" — чит: требуется sv_cheats 1", c->name);
+        SDL_Log("cvar \"%s\" is a cheat: sv_cheats 1 required", c->name);
         return;
     }
     if (c->minv <= c->maxv) {            // range set — clamp
@@ -166,7 +166,7 @@ void cvar_set_string(const char *name, const char *s)
     int i = cvar_index(name);
     if (i < 0) {
         if (!name || !name[0]) return;
-        SDL_Log("cvar_set_string: \"%s\" не зарегистрирован — создаю", name);
+        SDL_Log("cvar_set_string: \"%s\" not registered — creating", name);
         cvar_register_string(name, s, "");
         i = cvar_index(name);
     }
@@ -174,7 +174,7 @@ void cvar_set_string(const char *name, const char *s)
     Cvar *c = &s_cvars[i];
     if (c->flags & CVAR_STRING) {
         if ((c->flags & CVAR_CHEAT) && cvar_get("sv_cheats") < 0.5f) {
-            SDL_Log("cvar \"%s\" — чит: требуется sv_cheats 1", c->name);
+            SDL_Log("cvar \"%s\" is a cheat: sv_cheats 1 required", c->name);
             return;
         }
         snprintf(c->str, sizeof c->str, "%s", s ? s : "");

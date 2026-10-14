@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Синтез звуков игрока: шаги, прыжок, приземление, шелест, ветер.
+"""Synthesize player sounds: footsteps, jump, landing, rustle, wind.
 
-Запуск: python3 tools/make_sounds.py
+Usage: python3 tools/make_sounds.py
 """
 import math
 import os
@@ -142,7 +142,7 @@ def main():
     save("wind.wav", make_wind(), target_rms=2400.0)
     save("rain.wav", make_rain(), target_rms=2600.0)
     save("thunder.wav", make_thunder(), target_rms=4200.0)
-    print("Готово.")
+    print("Done.")
 
 
 if __name__ == "__main__":

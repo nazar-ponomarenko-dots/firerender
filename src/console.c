@@ -1257,12 +1257,12 @@ static int st_cmdreg(void)
             for (int j = 0; j < s_cmds_n && !found; j++)
                 if (strcmp(s_cmds[j].name, need[i]) == 0) found = 1;
             if (!found) {
-                SDL_Log("console test: команда \"%s\" не зарегистрирована", need[i]);
+                SDL_Log("console test: command \"%s\" not registered", need[i]);
                 fail++;
             }
         }
         if (s_cmds_n < 40) {
-            SDL_Log("console test: команд всего %d (<40), реестр неполный", s_cmds_n);
+            SDL_Log("console test: only %d commands (<40), registry incomplete", s_cmds_n);
             fail++;
         }
     }
@@ -1290,7 +1290,7 @@ static int st_glb(void)
                 // vertex 0 (0,0,0) -> world (5,7,9)
                 if (fabsf(o->verts[0] - 5) > 1e-3f || fabsf(o->verts[1] - 7) > 1e-3f ||
                     fabsf(o->verts[2] - 9) > 1e-3f) {
-                    SDL_Log("console test: glb world-tf FAIL (%.1f,%.1f,%.1f, ожид. 5,7,9)",
+                    SDL_Log("console test: glb world-tf FAIL (%.1f,%.1f,%.1f, expected 5,7,9)",
                             o->verts[0], o->verts[1], o->verts[2]); t = 1;
                 }
                 if (o->alpha < 0.999f) { SDL_Log("console test: glb alpha FAIL"); t = 1; }
@@ -1478,7 +1478,7 @@ void console_selftest(void)
     {
         console_exec("set r_fog 0");              // no such cvar
         if (cvar_index("r_fog") >= 0) {
-            SDL_Log("console test: typo-set FAIL (создан мусорный cvar)");
+            SDL_Log("console test: typo-set FAIL (junk cvar was created)");
             fail++;
         }
     }

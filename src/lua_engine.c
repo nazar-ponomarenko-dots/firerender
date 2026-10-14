@@ -831,15 +831,15 @@ void lua_engine_map(const char *map_name)
     int rc = luaL_loadbuffer(L, src, strlen(src), path);
     free(src);
     if (rc != 0) {
-        SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
+        SDL_Log("lua: error %s: %s", path, lua_tostring(L, -1));
         lua_pop(L, 1);               // error message off the stack
         return;
     }
     if (lua_pcall(L, 0, 0, 0) != 0) {
-        SDL_Log("lua: ошибка %s: %s", path, lua_tostring(L, -1));
+        SDL_Log("lua: error %s: %s", path, lua_tostring(L, -1));
         lua_pop(L, 1);
     } else {
-        SDL_Log("lua: карта %s: скрипт %s", map_name, path);
+        SDL_Log("lua: map %s: script %s", map_name, path);
     }
 }
 
@@ -908,7 +908,7 @@ void lua_engine_init(void)
 {
     L = luaL_newstate();
     if (!L) {
-        SDL_Log("lua: не удалось создать состояние");
+        SDL_Log("lua: failed to create state");
         return;
     }
     // Sandbox: only safe libraries (no os/io/package/debug — the script cannot
@@ -930,7 +930,7 @@ void lua_engine_init(void)
     // The script loads through resources — it may live in a folder or in a map pak
     char *src = resources_read_text("lua/main.lua");
     if (!src) {
-        SDL_Log("lua: нет lua/main.lua — скрипты выключены");
+        SDL_Log("lua: no lua/main.lua — scripts disabled");
         return;
     }
     int rc = luaL_loadbuffer(L, src, strlen(src), "main.lua");
@@ -941,9 +941,9 @@ void lua_engine_init(void)
         return;
     }
     if (lua_pcall(L, 0, 0, 0) != 0) {
-        SDL_Log("lua: ошибка main.lua: %s", lua_tostring(L, -1));
+        SDL_Log("lua: main.lua error: %s", lua_tostring(L, -1));
         lua_pop(L, 1);
     } else {
-        SDL_Log("lua: скрипты загружены");
+        SDL_Log("lua: scripts loaded");
     }
 }

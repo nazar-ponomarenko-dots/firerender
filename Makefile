@@ -105,7 +105,7 @@ SDL3_G28_PREFIX := build/sdl3-g28-prefix
 
 $(SDL3_G28_PREFIX)/lib/libSDL3.a:
 	@mkdir -p /tmp/opencode
-	@test -x $(ZIG_DIR)/zig || (echo "Скачиваю zig..." && \
+	@test -x $(ZIG_DIR)/zig || (echo "Downloading zig..." && \
 	  curl -sL -o /tmp/opencode/zig.tar.xz \
 	    https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz && \
 	  tar xf /tmp/opencode/zig.tar.xz -C /tmp/opencode && \
@@ -129,7 +129,7 @@ linux: $(SDL3_G28_PREFIX)/lib/libSDL3.a
 	  -lSDL3 -lm -lpthread -ldl
 	strip build/firerender-linux
 	cp build/firerender-linux ./firerender
-	@echo "Портативный бинарник готов: ./firerender"
+	@echo "Portable binary ready: ./firerender"
 
 # --- Cross-build Windows exe (x86_64) ----------------------------------------
 # Needs: x86_64-w64-mingw32-gcc and a static SDL3 built for mingw.
@@ -158,7 +158,7 @@ winpkg: win
 	rm -rf build/win
 	mkdir -p build/win
 	cp build/firerender.exe build/win/
-	@echo "Готово: build/win/firerender.exe — нужны папки ресурсов рядом или выше"
+	@echo "Done: build/win/firerender.exe — resource folders must sit next to it or above"
 
 # Rebuild the map into maps/<name>.zip (map1 by default): map.json, map.png,
 # all map resources. The map is chosen in the menu or by the command map <name>.
@@ -172,7 +172,7 @@ mapzip:
 mapbake: $(BIN)
 	FR_BAKE=1 FR_TEST=S SDL_VIDEODRIVER=$${SDL_VIDEODRIVER:-dummy} ./$(BIN) || true
 	$(PYTHON) tools/make_map_zip.py $(MAP)
-	@echo "Свет карты запечён и упакован в maps/$(if $(MAP),$(MAP),map1).zip"
+	@echo "Map light baked and packed into maps/$(if $(MAP),$(MAP),map1).zip"
 
 # Bake lighting + shadows for ALL maps maps/*.zip. For each map the engine loads
 # exactly that one (FR_MAP=<name>), computes lightmap+sunvis+probes into map/baked/, then
@@ -184,7 +184,7 @@ BAKE_STAMP := build/.baked.stamp
 # Shared bake loop: for each map — the engine with FR_MAP + the baked/* step.
 define BAKE_ALL_MAPS
 	@for m in $(MAPS); do \
-	  echo "== запекаю свет карты $$m =="; \
+	  echo "== baking map light: $$m =="; \
 	  FR_BAKE=1 FR_MAP=$$m FR_TEST=S SDL_VIDEODRIVER=$${SDL_VIDEODRIVER:-offscreen} ./$(BIN) || true; \
 	  $(PYTHON) tools/inject_baked.py $$m; \
 	done
@@ -193,7 +193,7 @@ endef
 .PHONY: bake-maps
 bake-maps: $(BIN)
 	$(BAKE_ALL_MAPS)
-	@echo "Тени всех карт пересобраны: $(MAPS)"
+	@echo "Shadow maps of all cards rebuilt: $(MAPS)"
 
 # Stamp: building the engine drags along a rebuild of all maps' shadows (see target all).
 # $(BIN) within one «make» is built exactly once — there is no second
@@ -226,7 +226,7 @@ distclean:
 # narrow it: FR_ABIS="arm64-v8a" make apk
 apk:
 	ANDROID_SDK=$(if $(ANDROID_SDK),$(ANDROID_SDK),/opt/android-sdk) tools/make_apk.sh
-	@echo "Готово: build/android/firerender.apk"
+	@echo "Done: build/android/firerender.apk"
 
 # .PHONY — these targets are not files, they must always run.
 .PHONY: run gles run-gles clean distclean linux win winpkg apk buildnum
@@ -240,10 +240,10 @@ apk:
 #           surface via SDL_Vulkan_CreateSurface.
 #   Metal:  MoltenVK (SPIR-V as is) or SPIRV-Cross -> MSL + SDL_Metal_CreateView.
 backends:
-	@echo "Готовые бэкенды:      OpenGL (make), GLES 3.x (make gles)"
-	@echo "Заготовки (stubs):    Vulkan, Metal, Null — src/srender_stub.c"
-	@echo "Путь включения:       srender_vk.c / srender_metal.c + -DSR_ENABLE_*=1"
-	@echo "Статус в игре:        лог старта 'Render API: ...' (sr_api_report)"
+	@echo "Ready backends:       OpenGL (make), GLES 3.x (make gles)"
+	@echo "Stubs:                Vulkan, Metal, Null — src/srender_stub.c"
+	@echo "Enable path:          srender_vk.c / srender_metal.c + -DSR_ENABLE_*=1"
+	@echo "Status in game:       startup log 'Render API: ...' (sr_api_report)"
 
 # --- Experimental backends (make vulkan / make metal) ------------------------
 # Skeleton: sr_create() brings up a Vulkan device (srender_vk.c) / Metal skeleton
@@ -261,5 +261,5 @@ run-vulkan: vulkan
 
 metal: buildnum
 	@mkdir -p build
-	@uname -s | grep -q Darwin || { echo "Metal-цель собирается только на macOS"; exit 1; }
+	@uname -s | grep -q Darwin || { echo "The Metal target builds only on macOS"; exit 1; }
 	$(CC) $(CFLAGS) -DFR_BACKEND_METAL -DSR_ENABLE_METAL=1 $(VK_SRC) -o build/firerender-metal $(LIBS)

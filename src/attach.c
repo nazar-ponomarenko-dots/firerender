@@ -41,7 +41,7 @@ int attach_node(SceneNode *parent, SceneNode *child, const char *bone,
     if (bone && bone[0]) {
         slot = attach_bone_index(parent, bone);
         if (slot < 0) {
-            SDL_Log("attach: кость '%s' не найдена у %s — цепляю к origin",
+            SDL_Log("attach: bone '%s' not found in %s — attaching to origin",
                     bone, parent->name ? parent->name : "?");
             slot = ATTACH_ORIGIN;
             rc = -1;
@@ -50,7 +50,7 @@ int attach_node(SceneNode *parent, SceneNode *child, const char *bone,
     // Bone -> parent hook is mandatory. For non-skeletal nodes the slot stays
     // ATTACH_ORIGIN and the transform is simply computed from the parent.
     if (slot >= 0 && !parent->attach_fn) {
-        SDL_Log("attach: у %s нет точек крепления — цепляю к origin",
+        SDL_Log("attach: %s has no attach points — attaching to origin",
                 parent->name ? parent->name : "?");
         slot = ATTACH_ORIGIN;
         rc = -1;

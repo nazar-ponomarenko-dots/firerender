@@ -344,9 +344,9 @@ GlbModel *glb_parse_file(const char *path)
 {
     unsigned int filesz = 0;
     unsigned char *file = resources_read_file(path, &filesz);
-    if (!file) { SDL_Log("glb: не найден %s", path); return NULL; }
+    if (!file) { SDL_Log("glb: not found %s", path); return NULL; }
     if (filesz < 20 || memcmp(file, "glTF", 4) != 0) {
-        SDL_Log("glb: %s — не GLB (заголовок)", path);
+        SDL_Log("glb: %s — not a GLB (header)", path);
         free(file); return NULL;
     }
 
@@ -366,12 +366,12 @@ GlbModel *glb_parse_file(const char *path)
         off += clen;
     }
     if (!json_data || !bin) {
-        SDL_Log("glb: %s — нет чанков JSON/BIN", path);
+        SDL_Log("glb: %s — no JSON/BIN chunks", path);
         free(file); return NULL;
     }
 
     const JsonNode *root = json_parse((const char *)json_data, (size_t)json_len);
-    if (!root) { SDL_Log("glb: %s — JSON не распознан", path); free(file); return NULL; }
+    if (!root) { SDL_Log("glb: %s — JSON not recognized", path); free(file); return NULL; }
 
     const JsonNode *acc_arr = json_find(root, "accessors");
     const JsonNode *bv_arr = json_find(root, "bufferViews");
@@ -384,7 +384,7 @@ GlbModel *glb_parse_file(const char *path)
     int acc_n = acc_arr && acc_arr->type == JSON_ARRAY ? json_array_len(acc_arr) : 0;
     int bv_n = bv_arr && bv_arr->type == JSON_ARRAY ? json_array_len(bv_arr) : 0;
     if (!nodes || nodes->type != JSON_ARRAY) {
-        SDL_Log("glb: %s — нет nodes", path);
+        SDL_Log("glb: %s — no nodes", path);
         json_free(); free(file); return NULL;
     }
 
@@ -423,7 +423,7 @@ GlbModel *glb_parse_file(const char *path)
             const JsonNode *nd = (ni >= 0 && ni < json_array_len(nodes)) ? json_array_get(nodes, ni) : NULL;
             if (!nd) continue;
             if (!stack_push(&stack, &st_n, &st_cap, nd, NULL)) {
-                ok = 0; err = "нехватка памяти стека узлов"; break;
+                ok = 0; err = "node stack out of memory"; break;
             }
         }
     } else {
@@ -431,7 +431,7 @@ GlbModel *glb_parse_file(const char *path)
         for (int i = 0; i < json_array_len(nodes); i++) {
             const JsonNode *nd = json_array_get(nodes, i);
             if (!stack_push(&stack, &st_n, &st_cap, nd, NULL)) {
-                ok = 0; err = "нехватка памяти стека узлов"; break;
+                ok = 0; err = "node stack out of memory"; break;
             }
         }
     }
@@ -469,17 +469,17 @@ GlbModel *glb_parse_file(const char *path)
                     if (iuv < 0)
                         iuv = (int)json_num(attrs ? json_find(attrs, "TEXCOORD_0") : NULL, -1);
                     int iidx = (int)json_num(json_find(prim, "indices"), -1);
-                    if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "нет POSITION"; break; }
+                    if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "no POSITION"; break; }
                     GlbAcc *ap = &accs[ipos];
                     // OOB protection: the accessor must fit inside the BIN chunk.
                     // vec is checked right here too: read_vertex copies vec
                     // floats into vp[3], so POSITION must be exactly VEC3.
                     if (!acc_fits(ap, bvs, bv_n, (long)bin_len) || ap->vec != 3) {
-                        SDL_Log("glb: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен", path);
+                        SDL_Log("glb: %s — POSITION accessor out of buffer or not VEC3, primitive skipped", path);
                         continue;
                     }
                     if (ap->count > 16L * 1024 * 1024) {
-                        SDL_Log("glb: %s — POSITION count %ld слишком велик, примитив пропущен", path, ap->count);
+                        SDL_Log("glb: %s — POSITION count %ld too large, primitive skipped", path, ap->count);
                         continue;
                     }
                     // NORMAL exactly VEC3, UV no wider than VEC2 — else read_vertex
@@ -491,7 +491,7 @@ GlbModel *glb_parse_file(const char *path)
                     long nv = ap->count;
 
                     Bucket *bk = b_get(&buckets, &bk_n, &bk_cap, mat_idx);
-                    if (!bk) { ok = 0; err = "нехватка памяти бакетов"; break; }
+                    if (!bk) { ok = 0; err = "bucket out of memory"; break; }
                     unsigned int base = (unsigned int)bk->vn;
                     long pos_base = (ap->bufferView >= 0 && ap->bufferView < bv_n)
                                     ? bvs[ap->bufferView].byteOffset + ap->byteOffset : 0;
@@ -510,7 +510,7 @@ GlbModel *glb_parse_file(const char *path)
                         // NO V flip: stb_image puts the top row of the image at
                         // t=0, and glTF v=0 is also the top (see glb_anim)
                         if (!b_push_v(bk, vp[0], vp[1], vp[2], n[0], n[1], n[2], u[0], u[1])) {
-                            ok = 0; err = "нехватка памяти вершин"; break;
+                            ok = 0; err = "vertex out of memory"; break;
                         }
                     }
                     if (ok && ai) {
@@ -519,13 +519,13 @@ GlbModel *glb_parse_file(const char *path)
                         for (long i = 0; i < ai->count && ok; i++) {
                             long ii = read_index(bin, idx_base, ai, bvs, bv_n, (int)i, nv);
                             if (ii >= 0 && !b_push_i(bk, base + (unsigned int)ii)) {
-                                ok = 0; err = "нехватка памяти индексов"; break;
+                                ok = 0; err = "index out of memory"; break;
                             }
                         }
                     } else if (ok) {
                         for (long i = 0; i < nv && ok; i++) {
                             if (!b_push_i(bk, base + (unsigned int)i)) {
-                                ok = 0; err = "нехватка памяти индексов"; break;
+                                ok = 0; err = "index out of memory"; break;
                             }
                         }
                     }
@@ -540,7 +540,7 @@ GlbModel *glb_parse_file(const char *path)
                 const JsonNode *cnd = (ci >= 0 && ci < json_array_len(nodes)) ? json_array_get(nodes, ci) : NULL;
                 if (!cnd) continue;
                 if (!stack_push(&stack, &st_n, &st_cap, cnd, world)) {
-                    ok = 0; err = "нехватка памяти стека узлов"; break;
+                    ok = 0; err = "node stack out of memory"; break;
                 }
             }
         }
@@ -549,7 +549,7 @@ GlbModel *glb_parse_file(const char *path)
     free(accs);
 
     if (!ok || bk_n == 0) {
-        SDL_Log("glb: %s — %s", path, err[0] ? err : "нет примитивов");
+        SDL_Log("glb: %s — %s", path, err[0] ? err : "no primitives");
         for (int i = 0; i < bk_n; i++) b_free(&buckets[i]);
         free(buckets);
         free(bvs);
@@ -614,7 +614,7 @@ GlbModel *glb_parse_file(const char *path)
                 o->tint[2] += (float)json_num(json_array_get(em, 2), 0);
             }
             if (json_find(mt, "normalTexture"))
-                SDL_Log("glb: %s — normalTexture игнор (псевдо-PBR 2004)", path);
+                SDL_Log("glb: %s — normalTexture ignored (2004-style pseudo-PBR)", path);
             load_albedo(o, mi, materials, textures, images, samplers, bvs, bv_n,
                         bin, (long)bin_len);
             // "Glass" in gltf models is often painted with an OPAQUE texture
@@ -679,7 +679,7 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
     const size_t elem = 8 * sizeof(float);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->vcount * elem), NULL, GL_STATIC_DRAW);
     float *cpu = malloc((size_t)gi->vcount * 8 * sizeof(float));
-    if (!cpu) { SDL_Log("glb: нехватка памяти на CPU-буфер вершин"); glDeleteVertexArrays(1, &d->vao);
+    if (!cpu) { SDL_Log("glb: out of memory for CPU vertex buffer"); glDeleteVertexArrays(1, &d->vao);
                 glDeleteBuffers(1, &d->vbo); free(d); return NULL; }
     for (int i = 0; i < gi->vcount; i++) {
         cpu[8 * i + 0] = gi->verts[3 * i + 0];

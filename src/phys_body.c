@@ -617,7 +617,7 @@ void cmd_phys_props(const char *args)
     console_print("phys: %d ящиков (стопка), тел всего %d", made,
                   phys_body_count());
     // Statics come from map objects: without them crates fall «through the world».
-    SDL_Log("phys: props %d, тел %d, статика %d", made, phys_body_count(),
+    SDL_Log("phys: props %d, bodies %d, statics %d", made, phys_body_count(),
             phys_static_count());
 }
 

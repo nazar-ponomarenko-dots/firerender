@@ -33,7 +33,7 @@ struct SrDevice {
         static int warned;                                                    \
         if (!warned) {                                                        \
             warned = 1;                                                       \
-            SDL_Log("Metal backend: '%s' не портирован (заглушка)", op);      \
+            SDL_Log("Metal backend: '%s' not ported (stub)", op);            \
         }                                                                     \
     } while (0)
 
@@ -63,7 +63,7 @@ SrDevice *sr_create(void)
     d->caps.vendor = "Apple";
     d->caps.renderer = "Apple GPU";
     d->caps.version = ver;
-    SDL_Log("Metal backend: каркас поднят (%s); рендер-пайплайн не портирован",
+    SDL_Log("Metal backend: skeleton brought up (%s); render pipeline not ported",
             ver);
     return d;
 }

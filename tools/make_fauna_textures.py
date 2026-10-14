@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Генерирует текстуры фауны (светлячки, бабочки, птицы) в img/.
+"""Generate fauna textures (fireflies, butterflies, birds) into img/.
 
-Запуск: python3 tools/make_fauna_textures.py
+Usage: python3 tools/make_fauna_textures.py
 """
 import math
 import os
@@ -33,7 +33,7 @@ def write_png(path, w, h, rgba):
 
 
 def glow(w, h):
-    """Радиальный градиент: центр яркий тёплый -> прозрачный край."""
+    """Radial gradient: bright warm centre -> transparent edge."""
     buf = []
     cx, cy = (w - 1) / 2, (h - 1) / 2
     for y in range(h):
@@ -46,7 +46,7 @@ def glow(w, h):
 
 
 def butterfly(w, h):
-    """Бабочка сверху: два крыла-эллипса с тёмной окантовкой, тело."""
+    """Butterfly seen from above: two ellipse wings with a dark rim, a body."""
     buf = []
     for y in range(h):
         for x in range(w):
@@ -86,7 +86,7 @@ def butterfly(w, h):
 
 
 def bird(w, h):
-    """Птица сбоку: корпус + распахнутые крылья (силуэт)."""
+    """Bird seen from the side: body + spread wings (silhouette)."""
     buf = []
     for y in range(h):
         for x in range(w):
@@ -118,7 +118,7 @@ def main():
     write_png(os.path.join(OUT, "fauna_glow.png"), 64, 64, glow(64, 64))
     write_png(os.path.join(OUT, "fauna_butterfly.png"), 128, 128, butterfly(128, 128))
     write_png(os.path.join(OUT, "fauna_bird.png"), 128, 64, bird(128, 64))
-    print("Готово.")
+    print("Done.")
 
 
 if __name__ == "__main__":

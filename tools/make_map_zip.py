@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Собирает карту в maps/<имя>.zip.
+"""Pack a map into maps/<name>.zip.
 
-Внутри zip — корень карты:
-    map.json            манифест карты
-    map.png             карта высот
-    img/...             текстуры, на которые ссылается map.json
-    (позже: models/, scripts/, sounds/)
+Inside the zip — the map root:
+    map.json            map manifest
+    map.png             height map
+    img/...             textures referenced by map.json
+    (later: models/, scripts/, sounds/)
 
-Ресурсов, которых нет в zip, движок подсосёт из img/ движка.
-Запуск:  python3 tools/make_map_zip.py [имя]
+For resources missing from the zip, the engine falls back to its own img/.
+Usage:  python3 tools/make_map_zip.py [name]
 """
 import json
 import os
@@ -72,4 +72,4 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(src, name)
         print(f"  + {name}")
 
-print(f"Карта собрана: {OUT} ({os.path.getsize(OUT)//1024} КБ)")
+print(f"Map packed: {OUT} ({os.path.getsize(OUT)//1024} KB)")

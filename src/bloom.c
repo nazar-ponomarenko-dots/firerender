@@ -256,7 +256,7 @@ static void msaa_create(BloomParams *b, int samples)
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         // The driver won't provide multisampled RGBA16F — honest fallback without MSAA.
         // Remember the combination, otherwise sync would recreate this FBO every frame.
-        SDL_Log("MSAA %dx: FBO incomplete, выключаю (без сглаживания)", samples);
+        SDL_Log("MSAA %dx: FBO incomplete, disabling (no antialiasing)", samples);
         b->msaa_failed = samples;
         b->msaa_failed_ldr = b->scene_ldr;
         msaa_free(b);

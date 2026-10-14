@@ -87,7 +87,7 @@ void jobs_init(void)
         s_st.cv_work = s_st.cv_done = NULL;
         s_workers_n = 0;
         s_inited = 1;
-        SDL_Log("jobs: sync fallback (не удалось создать синхронизацию: %s)",
+        SDL_Log("jobs: sync fallback (failed to create synchronization: %s)",
                 SDL_GetError());
         return;
     }
@@ -102,13 +102,13 @@ void jobs_init(void)
         w->done = 1;
         w->thread = SDL_CreateThread(worker_main, name, w);
         if (!w->thread) {
-            SDL_Log("jobs: worker %d не создан: %s", i, SDL_GetError());
+            SDL_Log("jobs: worker %d not created: %s", i, SDL_GetError());
             continue;
         }
         s_workers_n++;
     }
     s_inited = 1;
-    SDL_Log("jobs: пул из %d работников (ядер %d)", s_workers_n,
+    SDL_Log("jobs: pool of %d workers (%d cores)", s_workers_n,
             SDL_GetNumLogicalCPUCores());
 }
 
