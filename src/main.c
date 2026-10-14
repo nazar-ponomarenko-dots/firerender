@@ -397,32 +397,12 @@ static float phys_ground(float x, float z)
     return (g && g->world_loaded) ? sample_height(&g->world, x, z) : 0.0f;
 }
 
-int main(int argc, char *argv[])
+// Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
+// Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
+// Ставит resources_set_base_dir() и переходит в неё — config.cfg и логи
+// пишутся рядом с данными, а не в произвольном CWD.
+static void boot_resolve_base_dir(void)
 {
-    (void)argc; (void)argv;
-
-    // 1) Инициализация SDL — должна быть ДО любых SDL_* вызовов
-    //    (включая SDL_GetPrefPath/SDL_LoadFile в fr_android_prepare на Android)
-    //    Раньше стояла после — на девайсе падал с SIGSEGV до показа окна.
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
-        // SDL ещё не поднялась — пишем в stderr
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-    srand((unsigned)SDL_GetTicks());
-
-    // Android: распаковать APK-assets в хранилище и перейти туда (до base_dir).
-    // Вызываем ПОСЛЕ SDL_Init — на Android здесь уже есть JNI/env и AAssetManager.
-    if (!fr_android_prepare()) {
-#ifdef __ANDROID__
-        SDL_Log("android: подготовка ресурсов не удалась");
-        SDL_Quit();
-        return 1;
-#endif
-    }
-
-    // Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
-    // Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
     static char base_dir[512];
     FILE *probe = fopen("map/map.json", "rb");
     if (probe) {
@@ -467,6 +447,116 @@ int main(int argc, char *argv[])
         chdir(base_dir);
 #endif
     }
+}
+
+// Каскад версий GL-контекста. Окно к моменту вызова уже создано, атрибуты
+// DOUBLEBUFFER/DEPTH — выставлены.
+static SDL_GLContext boot_gl_context(void)
+{
+#ifdef USE_GLES_PATH
+    // GLES 3.0; если драйвер не отдаёт — пробуем любой, что есть.
+    static const int ctx_try[][3] = {
+        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES }, { 0, 0, 0 },
+    };
+#else
+    // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
+    // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
+    // раньше. Если драйвер не даст 4.5, vegetation.c сам откатится на
+    // инстансный путь (g_gl_gpu_driven == 0).
+    // Старые GLX-драйверы (Mesa <= 3.1, NVIDIA legacy 340/470) НЕ понижают
+    // запрос, а падают с GLXBadFBConfig — поэтому перебираем версии вниз и
+    // пересоздаём контекст: SDL перечитывает атрибуты на каждом вызове.
+    static const int ctx_try[][3] = {
+        { 4, 5, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 4, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 1, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 0, 0, 0 },
+    };
+#endif
+    SDL_GLContext ctx = NULL;
+    for (unsigned ci = 0; ci < sizeof ctx_try / sizeof ctx_try[0] && !ctx; ci++) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, ctx_try[ci][0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, ctx_try[ci][1]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
+        ctx = SDL_GL_CreateContext(g_win);
+        if (!ctx && ctx_try[ci][0] > 0)
+            SDL_Log("Контекст GL %d.%d не доступен (%s); пробую ниже",
+                    ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
+    }
+    return ctx;
+}
+
+// FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland).
+// Значение — номер кадра для снимка (FR_SHOT=60), пустое = 60.
+static void loop_fr_shot(void)
+{
+    static int shot_frame = 0;
+    const char *fs = getenv("FR_SHOT");
+    if (fs && shot_frame != -1) {
+        int target = atoi(fs);
+        if (target < 1) target = 60;
+        if (shot_frame == 0) shot_frame = 1;
+        else if (shot_frame < target) shot_frame++;
+        if (shot_frame == target) {
+            unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
+            renderer_read_pixels(px, renderer_vw(), renderer_vh());
+            FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
+            if (f) {
+                fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());
+                for (int y = 0; y < renderer_vh(); y++)
+                    fwrite(px + (size_t)(renderer_vh() - 1 - y) * renderer_vw() * 3, 1,
+                           (size_t)renderer_vw() * 3, f);
+                fclose(f);
+                SDL_Log("FR_SHOT: /tmp/fr_shot.ppm (%dx%d) console=%d",
+                        renderer_vw(), renderer_vh(), console_active());
+            }
+            free(px);
+            shot_frame = -1;
+        }
+    }
+}
+
+// host_framerate — лимит FPS (задержка до следующего кадра)
+static void loop_framerate_limit(Uint64 frame_start)
+{
+    float hf = cvar_get("host_framerate");
+    if (hf <= 0.0f) return;
+    Uint64 target = (Uint64)(SDL_GetPerformanceFrequency() / hf);
+    Uint64 elapsed = SDL_GetPerformanceCounter() - frame_start;
+    if (elapsed < target) {
+        Uint32 ms = (Uint32)((target - elapsed) * 1000 /
+                             SDL_GetPerformanceFrequency());
+        if (ms > 0 && ms < 100) SDL_Delay(ms);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    // 1) Инициализация SDL — должна быть ДО любых SDL_* вызовов
+    //    (включая SDL_GetPrefPath/SDL_LoadFile в fr_android_prepare на Android)
+    //    Раньше стояла после — на девайсе падал с SIGSEGV до показа окна.
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        // SDL ещё не поднялась — пишем в stderr
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    srand((unsigned)SDL_GetTicks());
+
+    // Android: распаковать APK-assets в хранилище и перейти туда (до base_dir).
+    // Вызываем ПОСЛЕ SDL_Init — на Android здесь уже есть JNI/env и AAssetManager.
+    if (!fr_android_prepare()) {
+#ifdef __ANDROID__
+        SDL_Log("android: подготовка ресурсов не удалась");
+        SDL_Quit();
+        return 1;
+#endif
+    }
+
+    // Базовая директория ресурсов + переход в неё (map/, shaders/, img/).
+    boot_resolve_base_dir();
 
     // 2) Окно и контекст -------------------------------------------------------
     // Выбор бэкенда на этапе компиляции: make vulkan / make metal дают окна
@@ -519,43 +609,13 @@ int main(int argc, char *argv[])
         return 0;
     }
 #endif
-#ifdef USE_GLES_PATH
-    // GLES 3.0; если драйвер не отдаёт — пробуем любой, что есть.
-    static const int ctx_try[][3] = {
-        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES }, { 0, 0, 0 },
-    };
-#else
-    // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
-    // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
-    // раньше. Если драйвер не даст 4.5, vegetation.c сам откатится на
-    // инстансный путь (g_gl_gpu_driven == 0).
-    // Старые GLX-драйверы (Mesa <= 3.1, NVIDIA legacy 340/470) НЕ понижают
-    // запрос, а падают с GLXBadFBConfig — поэтому перебираем версии вниз и
-    // пересоздаём контекст: SDL перечитывает атрибуты на каждом вызове.
-    static const int ctx_try[][3] = {
-        { 4, 5, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 4, 3, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 3, 3, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 3, 1, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 0, 0, 0 },
-    };
-#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
     g_win = SDL_CreateWindow("firerender", ww, wh,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
-    SDL_GLContext ctx = NULL;
-    for (unsigned ci = 0; ci < sizeof ctx_try / sizeof ctx_try[0] && !ctx; ci++) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, ctx_try[ci][0]);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, ctx_try[ci][1]);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
-        ctx = SDL_GL_CreateContext(g_win);
-        if (!ctx && ctx_try[ci][0] > 0)
-            SDL_Log("Контекст GL %d.%d не доступен (%s); пробую ниже",
-                    ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
-    }
+    SDL_GLContext ctx = boot_gl_context();
     if (!ctx) { SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
                 SDL_DestroyWindow(g_win); SDL_Quit(); return 1; }
     SDL_GL_MakeCurrent(g_win, ctx);
@@ -890,34 +950,7 @@ int main(int argc, char *argv[])
         console_render(renderer_vw(), renderer_vh());         // консоль — поверх всего (`)
         bench_gpu_end(&bench);
 
-        // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland).
-        // Значение — номер кадра для снимка (FR_SHOT=60), пустое = 60.
-        {
-            static int shot_frame = 0;
-            const char *fs = getenv("FR_SHOT");
-            if (fs && shot_frame != -1) {
-                int target = atoi(fs);
-                if (target < 1) target = 60;
-                if (shot_frame == 0) shot_frame = 1;
-                else if (shot_frame < target) shot_frame++;
-                if (shot_frame == target) {
-                    unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
-                    renderer_read_pixels(px, renderer_vw(), renderer_vh());
-                    FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
-                    if (f) {
-                        fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());
-                        for (int y = 0; y < renderer_vh(); y++)
-                            fwrite(px + (size_t)(renderer_vh() - 1 - y) * renderer_vw() * 3, 1,
-                                   (size_t)renderer_vw() * 3, f);
-                        fclose(f);
-                        SDL_Log("FR_SHOT: /tmp/fr_shot.ppm (%dx%d) console=%d",
-                                renderer_vw(), renderer_vh(), console_active());
-                    }
-                    free(px);
-                    shot_frame = -1;
-                }
-            }
-        }
+        loop_fr_shot();
 
         SDL_GL_SwapWindow(g_win);
         ST_ACC(s_st_swap);
@@ -927,19 +960,7 @@ int main(int argc, char *argv[])
             if (fr > s_st_frame_max) s_st_frame_max = fr;
         }
 
-        // host_framerate — лимит FPS (задержка до следующего кадра)
-        {
-            float hf = cvar_get("host_framerate");
-            if (hf > 0.0f) {
-                Uint64 target = (Uint64)(SDL_GetPerformanceFrequency() / hf);
-                Uint64 elapsed = SDL_GetPerformanceCounter() - now;
-                if (elapsed < target) {
-                    Uint32 ms = (Uint32)((target - elapsed) * 1000 /
-                                         SDL_GetPerformanceFrequency());
-                    if (ms > 0 && ms < 100) SDL_Delay(ms);
-                }
-            }
-        }
+        loop_framerate_limit(now);
 
         if (g_quit_request) {
             g_quit_request = 0;
