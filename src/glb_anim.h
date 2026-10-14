@@ -126,6 +126,9 @@ void glb_anim_ragdoll_kick(SceneNode *n, const float vel[3]); // толчок в
 void glb_anim_ragdoll_disable(SceneNode *n);
 // Отладка: мировые позиции частиц всех рэгдоллов (для рендера точками).
 int glb_anim_ragdoll_debug_particles(float *out_xyz, int max_parts);
+// Точка крепления ПОСЛЕДНЕГО включённого рэгдолла (для автонаведения
+// камеры в тестах). 1 — записал, 0 — активных рэгдоллов нет.
+int glb_anim_ragdoll_aim(float out_pos[3]);
 
 // --- Клипы анимации (в GLB может быть несколько) --------------------------------
 int glb_anim_clip_count(SceneNode *n);            // сколько клипов у узла

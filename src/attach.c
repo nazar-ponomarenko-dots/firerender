@@ -177,8 +177,17 @@ SceneNode *sprite_make_node(const char *tex_path, float w, float h,
 
     sprite_prog_init(p);
     float size[3] = { p->w, p->h, 0.0f };
-    return node_new("Sprite3D", "Sprite3D", NULL, size, p, NULL,
-                    sprite_node_render);
+    SceneNode *node = node_new("Sprite3D", "Sprite3D", NULL, size, p, NULL,
+                               sprite_node_render);
+    if (!node) {
+        if (p->tex) resources_texture_release(p->tex);
+        resources_program_release(p->prog);
+        glDeleteBuffers(1, &p->vbo);
+        glDeleteBuffers(1, &p->ibo);
+        glDeleteVertexArrays(1, &p->vao);
+        free(p);
+    }
+    return node;
 }
 
 void sprite_set_size(SceneNode *n, float w, float h)

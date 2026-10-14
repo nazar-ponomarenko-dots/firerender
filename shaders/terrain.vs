@@ -26,8 +26,17 @@ uniform float uHeightMax;             // высота, соответствую�
 out vec2 vUV;
 out vec3 vWorldPos;
 
+float sample_height16(vec2 uv) {
+    vec2 h = texture(uHeightmap, uv).rg;
+#ifdef FR_HEIGHT_RG8
+    return (h.r * 65280.0 + h.g * 255.0) / 65535.0;
+#else
+    return h.r;
+#endif
+}
+
 void main() {
-    float t = texture(uHeightmap, aUV).r;
+    float t = sample_height16(aUV);
     float h = mix(uHeightMin, uHeightMax, t) - aDrop;
     vec3 pos = vec3(aPos.x, h, aPos.y);
     vUV = aUV;

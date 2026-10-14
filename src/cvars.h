@@ -34,6 +34,8 @@ typedef struct {
 #define CVAR_CHEAT     4  // чит: меняется только при sv_cheats 1
 #define CVAR_USERINFO  8  // инфо игрока: шлётся/сохраняется, но не важна для
                           // игрового мира (как FCVAR_USERINFO в Source)
+#define CVAR_CFGSET   32  // значение задано явно (конфиг/юзер/карта):
+                          // cvar_set_default его НЕ перетирает
 #define CVAR_STRING   16  // строковая переменная (значение в c->str)
 
 // Очищает реестр (вызывается console_init).
@@ -57,6 +59,7 @@ void cvar_register_string(const char *name, const char *def, const char *help);
 // cvar_set зажимает значение в диапазон. Для string-переменных cvar_set
 // пишет и строковое значение.
 float cvar_get(const char *name);
+void cvar_set_default(const char *name, float v);   // задать, если юзер не задавал
 void cvar_set(const char *name, float v);
 
 // Строковые переменные (CVAR_STRING). cvar_get_string возвращает

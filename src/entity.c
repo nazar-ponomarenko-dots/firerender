@@ -81,13 +81,15 @@ int entity_handle(Entity *e)
     if (idx < 0 || idx >= ENTITY_MAX) return 0;
     if (!s_entities[idx].classname) return 0;
     int serial = s_serial[idx] & 0xFFFF;
-    int num = (int)(idx + 1) & 0xFFFF;
-    return (serial << 16) | num;     // != 0, num>=1; serial в верхних 16 бит
+    // Собираем беззнаковым сдвигом: serial >= 32768 дал бы отрицательный
+    // int, а ниже такой хэндл считался бы негодным — живая сущность
+    // «протухала» бы для Lua/консоли после 32768 переиспользований слота.
+    return (int)(((unsigned)serial << 16) | (unsigned)(idx + 1));
 }
 
 Entity *entity_get(int handle)
 {
-    if (handle <= 0) return NULL;
+    if (handle == 0) return NULL;            // num >= 1, поэтому 0 — только «нет»
     int num  = handle & 0xFFFF;              // 1..ENTITY_MAX
     int serial = (unsigned)handle >> 16;
     if (num < 1 || num > ENTITY_MAX) return NULL;

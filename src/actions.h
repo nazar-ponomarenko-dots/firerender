@@ -23,7 +23,17 @@ typedef enum {
     A_COUNT
 } ActionId;
 
-// Текущее состояние действий (меняют "+команды")
+typedef enum {
+    ACTION_SRC_BIND = 0,
+    ACTION_SRC_TOUCH,
+    ACTION_SRC_GAMEPAD,
+    ACTION_SRC_COUNT
+} ActionSource;
+
+// Итоговое состояние — OR всех источников. Это не даёт отпусканию пальца
+// погасить действие, которое всё ещё удерживает клавиатура или геймпад.
 extern bool g_act[A_COUNT];
+void action_set(ActionSource src, ActionId id, bool on);
+void action_clear_source(ActionSource src);
 
 #endif

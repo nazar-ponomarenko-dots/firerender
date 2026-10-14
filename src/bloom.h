@@ -13,10 +13,16 @@
 
 typedef struct {
     GLuint fbo, tex;           // сцена: FBO + цвет (полный экран)
-    GLuint depth;              // буфер глубины сцены
+    GLuint depth;              // буфер глубины сцены (текстура для пост-эффектов)
+    GLuint rbo_depth_nm;       // глубина сцены БЕЗ MSAA: RBO-аттачмент
+    GLuint fbo_res;            // resolve-FBO (tex + depth-текстура) для blit'а
     GLuint fbo_ms;             // MSAA-сцена: мультисэмпл-FBO (r_msaa > 0)
     GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
     int msaa;                  // активные сэмплы (0 = MSAA выключен)
+    int msaa_failed;           // неподдерживаемый запрос (не повторять каждый кадр)
+    int msaa_failed_ldr;
+    GLuint fbo_ldr, tex_ldr;   // LDR-копия сцены для present (bloom_present)
+    int scene_ldr;             // сцена сразу в RGBA8 (картошка: HDR некому)
     GLuint fbo_glow[2];        // ping-pong буферы glow (половинный размер)
     GLuint tex_glow[2];
     GLuint vao, vbo;           // полноэкранный треугольник
@@ -48,10 +54,19 @@ GLuint bloom_scene_fbo(const BloomParams *b);
 // FBO сцены в начале кадра). Живое применение настройки без перезапуска.
 void bloom_msaa_sync(BloomParams *b);
 
+// Текущие сэмплы MSAA-таргета сцены (0 — без MSAA). Для alpha-to-coverage:
+// классический MSAA не сглаживает края alpha-cutout (discard в шейдере),
+// рисующие модули включают GL_SAMPLE_ALPHA_TO_COVERAGE при активном MSAA.
+int bloom_msaa_active(void);
+
 // Разворачивает мультисэмпл-сцену в обычные текстуры (цвет + глубина) для
 // постобработки (GI/SSR/туман читают их). Без MSAA — ничего не делает.
 // Вызывать ПОСЛЕ отрисовки 3D-сцены, ДО всех пост-проходов.
-void bloom_resolve(BloomParams *b);
+// want_depth: нужна ли развёрнутая глубина в этом кадре. В КАРТОШКЕ ни один
+// потребитель (GI/SSR/voxfog) не активен — тогда копию глубины из RBO в
+// текстуру пропускаем (полноэкранный blit впустую). MSAA-путь цвет+глубину
+// разворачивает всегда (СРЕДНИЕ/УЛЬТРА бит-в-бит без изменений).
+void bloom_resolve(BloomParams *b, int want_depth);
 
 // Текстура и глубина сцены (для объёмного тумана — voxfog.c).
 GLuint bloom_scene_tex(const BloomParams *b);
@@ -62,7 +77,9 @@ GLuint bloom_scene_depth(const BloomParams *b);
 // или уже с объёмным туманом (voxfog). target_fbo — куда писать композит:
 // 0 = экран; иначе FBO (voxfog подставляет свой, чтобы туман лёг ПОВЕРХ
 // bloom'а и сам не светился).
-void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo);
+void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
+                  int out_w, int out_h);
+void bloom_present(BloomParams *b, GLuint scene_tex, int out_w, int out_h);
 
 // Освобождает GL-ресурсы.
 void bloom_cleanup(BloomParams *b);

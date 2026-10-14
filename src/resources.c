@@ -14,6 +14,7 @@
 #include "stb_image.h"
 
 #include <SDL3/SDL.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,21 +99,21 @@ int resources_resolve_path(const char *rel_path, char *out, size_t out_sz)
     // Через базовую директорию
     if (s_base_dir[0] && s_base_dir[0] != '.') {
         char cand[512];
-        snprintf(cand, sizeof cand, "%s/%s", s_base_dir, path);
-        if (access(cand, F_OK) == 0) {
+        int wr = snprintf(cand, sizeof cand, "%s/%s", s_base_dir, path);
+        if (wr > 0 && wr < (int)sizeof cand && access(cand, F_OK) == 0) {
             snprintf(out, out_sz, "%s", cand);
             return 1;
         }
-        snprintf(cand, sizeof cand, "%s/../%s", s_base_dir, path);
-        if (access(cand, F_OK) == 0) {
+        wr = snprintf(cand, sizeof cand, "%s/../%s", s_base_dir, path);
+        if (wr > 0 && wr < (int)sizeof cand && access(cand, F_OK) == 0) {
             snprintf(out, out_sz, "%s", cand);
             return 1;
         }
     }
     // Родительская директория текущей
     char up[512];
-    snprintf(up, sizeof up, "../%s", path);
-    if (access(up, F_OK) == 0) {
+    int wr = snprintf(up, sizeof up, "../%s", path);
+    if (wr > 0 && wr < (int)sizeof up && access(up, F_OK) == 0) {
         snprintf(out, out_sz, "%s", up);
         return 1;
     }
@@ -140,14 +141,19 @@ unsigned char *resources_read_file(const char *path, unsigned int *size)
     if (resources_resolve_path(path, resolved, sizeof resolved)) {
         FILE *f = fopen(resolved, "rb");
         if (f) {
-            fseek(f, 0, SEEK_END);
+            if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
             long szl = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            unsigned char *buf = malloc((size_t)szl + 1);
-            if (buf && fread(buf, 1, (size_t)szl, f) == (size_t)szl) {
+            if (szl < 0 || (unsigned long)szl > UINT_MAX ||
+                fseek(f, 0, SEEK_SET) != 0) {
                 fclose(f);
-                buf[szl] = 0;
-                if (size) *size = (unsigned int)szl;
+                return NULL;
+            }
+            size_t sz = (size_t)szl;
+            unsigned char *buf = malloc(sz + 1);
+            if (buf && fread(buf, 1, sz, f) == sz) {
+                fclose(f);
+                buf[sz] = 0;
+                if (size) *size = (unsigned int)sz;
                 return buf;
             }
             free(buf);
@@ -172,7 +178,7 @@ typedef struct ResEntry {
     int iw, ih;          // размеры (картинки)
     // Шейдерная программа: пути и mtime файлов (для hot-reload, см. resources_shader_reload)
     char vs[128], fs[128];
-    long vs_mt, fs_mt;
+    uint64_t vs_stamp, fs_stamp;
     // Текстура: параметры создания и mtime файла (для hot-reload текстур)
     char tex_path[128];
     int tex_channels, tex_wrap, tex_linear;
@@ -192,6 +198,8 @@ static ResEntry *cache_find(const char *key)
 static ResEntry *cache_add(const char *key, void *data, int refs)
 {
     ResEntry *e = malloc(sizeof *e);
+    if (!e) return NULL;
+    memset(e, 0, sizeof *e);
     snprintf(e->key, sizeof e->key, "%s", key);
     e->data = data;
     e->refs = refs;
@@ -306,20 +314,24 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
         return e->data;
     }
 
+    int iw = 0, ih = 0;
     int from_pak = 0;
-    unsigned char *p = image_load_raw(path, w, h, channels, &from_pak);
+    unsigned char *p = image_load_raw(path, &iw, &ih, channels, &from_pak);
     if (!p) {
         // Source Engine style: отсутствующая картинка заменяется notfound.png.
         // Если и он пропал — честный NULL (не рекурсия: ниже защита).
         if (strcmp(path, "img/notfound.png") == 0) return NULL;
         SDL_Log("Texture %s not found -> using img/notfound.png", path);
-        p = image_load_raw("img/notfound.png", w, h, channels, &from_pak);
+        p = image_load_raw("img/notfound.png", &iw, &ih, channels, &from_pak);
     }
     if (!p) return NULL;
     ResEntry *ne = cache_add(key, p, 1);
+    if (!ne) { stbi_image_free(p); return NULL; }
     ne->from_pak = from_pak;      // из пака — только если реально из архива
-    ne->iw = *w;
-    ne->ih = *h;
+    ne->iw = iw;
+    ne->ih = ih;
+    if (w) *w = iw;
+    if (h) *h = ih;
     return p;
 }
 
@@ -352,6 +364,7 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     GLuint tex = make_texture(w, h, img, channels == 4 ? GL_RGBA : GL_RGB,
                               wrap, linear);
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)tex, 1);
+    if (!ne) { glDeleteTextures(1, &tex); return 0; }
     // «Из пака» наследуем от записи ПИКСЕЛЕЙ: движковые img/*.png читаются с
     // диска даже при открытом паке и обязаны выживать смену карты (иначе на
     // повторной загрузке они грузятся заново — с чужими глобальными флагами
@@ -480,6 +493,7 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     GLuint prog = program_link(vs_path, fs_path);
     if (!prog) return 0;
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)prog, 1);
+    if (!ne) { glDeleteProgram(prog); return 0; }
     // Для hot-reload: пути и mtime файлов. cache_add ставит from_pak = "пак
     // открыт", но шейдер может лежать на ДИСКЕ (пак содержит только свои
     // шейдеры карты). Уточняем по факту наличия файла в архиве.
@@ -491,25 +505,23 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     snprintf(ne->vs, sizeof ne->vs, "%s", vs_path);
     snprintf(ne->fs, sizeof ne->fs, "%s", fs_path);
     if (!ne->from_pak) {
-        ne->vs_mt = file_mtime(vs_path);
-        ne->fs_mt = file_mtime(fs_path);
+        ne->vs_stamp = shader_source_stamp(vs_path);
+        ne->fs_stamp = shader_source_stamp(fs_path);
     }
     return prog;
 }
 
 // --- Hot-reload шейдеров --------------------------------------------------------
-#define RESHADE_MAX 8
-static ReshadeFn s_reshade[RESHADE_MAX];
-static int s_reshade_n = 0;
+static ReshadeFn *s_reshade;
+static int s_reshade_n, s_reshade_cap;
 
 // Отложенное удаление старых программ после hot-reload. Старую программу НЕЛЬЗЯ
 // удалять сразу: её id ещё держат живые узлы (glb/mesh/anim не слушают reshade),
 // и они продолжают её рисовать. Держим до тех пор, пока ВСЕ держатели не вернут
 // её через resources_program_release (remaining — сколько релизов осталось).
 typedef struct { GLuint prog; int remaining; } PendingProg;
-#define PROG_PENDING_MAX 128
-static PendingProg s_prog_pending[PROG_PENDING_MAX];
-static int s_prog_pending_n = 0;
+static PendingProg *s_prog_pending;
+static int s_prog_pending_n, s_prog_pending_cap;
 
 static void prog_pending_add(GLuint prog, int remaining)
 {
@@ -517,7 +529,18 @@ static void prog_pending_add(GLuint prog, int remaining)
     // Уже есть такой id (повторный reload до релиза) — складываем релизы
     for (int i = 0; i < s_prog_pending_n; i++)
         if (s_prog_pending[i].prog == prog) { s_prog_pending[i].remaining += remaining; return; }
-    if (s_prog_pending_n >= PROG_PENDING_MAX) { glDeleteProgram(prog); return; } // предохранитель
+    if (s_prog_pending_n == s_prog_pending_cap) {
+        int cap = s_prog_pending_cap ? s_prog_pending_cap * 2 : 32;
+        PendingProg *p = realloc(s_prog_pending, (size_t)cap * sizeof *p);
+        if (!p) {
+            // Старый id ещё используют живые узлы: удалять его при OOM нельзя.
+            // Безопаснее оставить редкую утечку до завершения GL-контекста.
+            SDL_Log("resources: pending shader list OOM; keeping program %u", prog);
+            return;
+        }
+        s_prog_pending = p;
+        s_prog_pending_cap = cap;
+    }
     s_prog_pending[s_prog_pending_n].prog = prog;
     s_prog_pending[s_prog_pending_n].remaining = remaining;
     s_prog_pending_n++;
@@ -539,9 +562,16 @@ static int prog_pending_release(GLuint prog)
 
 void resources_on_reshade(ReshadeFn fn)
 {
-    if (!fn || s_reshade_n >= RESHADE_MAX) return;
+    if (!fn) return;
     for (int i = 0; i < s_reshade_n; i++)
         if (s_reshade[i] == fn) return;
+    if (s_reshade_n == s_reshade_cap) {
+        int cap = s_reshade_cap ? s_reshade_cap * 2 : 16;
+        ReshadeFn *p = realloc(s_reshade, (size_t)cap * sizeof *p);
+        if (!p) { SDL_Log("resources: reshade callback OOM"); return; }
+        s_reshade = p;
+        s_reshade_cap = cap;
+    }
     s_reshade[s_reshade_n++] = fn;
 }
 
@@ -551,9 +581,9 @@ int resources_shader_reload(void)
     for (ResEntry *e = s_cache; e; e = e->next) {
         if (strncmp(e->key, "prog#", 5) != 0) continue;
         if (e->from_pak || e->vs[0] == 0) continue;
-        long mt0 = file_mtime(e->vs);
-        long mt1 = file_mtime(e->fs);
-        if (mt0 == e->vs_mt && mt1 == e->fs_mt) continue;
+        uint64_t stamp0 = shader_source_stamp(e->vs);
+        uint64_t stamp1 = shader_source_stamp(e->fs);
+        if (stamp0 == e->vs_stamp && stamp1 == e->fs_stamp) continue;
         // Перекомпиляция: новый id встаёт в кеш, а старую программу отдаём в
         // отложенное удаление — её ещё рисуют узлы, не слушающие reshade.
         // ВАЖНО: refcount счёта СТАРОЙ программы уходит в pending, поэтому для
@@ -567,8 +597,8 @@ int resources_shader_reload(void)
         prog_pending_add(old, e->refs);
         e->data = (void *)(uintptr_t)prog;
         e->refs = 0;                 // новый id: держатели пере-запросят
-        e->vs_mt = mt0;
-        e->fs_mt = mt1;
+        e->vs_stamp = stamp0;
+        e->fs_stamp = stamp1;
         SDL_Log("shader reloaded: %s + %s", e->vs, e->fs);
         changed++;
     }
@@ -623,7 +653,9 @@ void resources_shutdown(void)
     // не дожить до shutdown — на выходе удаляем всё разом.
     for (int i = 0; i < s_prog_pending_n; i++)
         glDeleteProgram(s_prog_pending[i].prog);
-    s_prog_pending_n = 0;
+    free(s_prog_pending);
+    s_prog_pending = NULL;
+    s_prog_pending_n = s_prog_pending_cap = 0;
     int n = 0;
     ResEntry *e = s_cache;
     while (e) {
@@ -641,5 +673,8 @@ void resources_shutdown(void)
         n++;
     }
     s_cache = NULL;
+    free(s_reshade);
+    s_reshade = NULL;
+    s_reshade_n = s_reshade_cap = 0;
     SDL_Log("resources: %d cached entries freed", n);
 }

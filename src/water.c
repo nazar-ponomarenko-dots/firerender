@@ -480,8 +480,15 @@ SceneNode *water_make_node(WorldState *w, const WorldTextures *wt,
         shader_on_reshade(water_reshade);
         SDL_Log("Water: %d water bodies (%d drawn)", n, built);
         const float size[3] = { w->world_w, 1.0f, w->world_d };
-        return node_new("Water", "MeshInstance3D", NULL, size, p,
-                        water_node_update, water_node_render);
+        SceneNode *node = node_new("Water", "MeshInstance3D", NULL, size, p,
+                                   water_node_update, water_node_render);
+        if (!node) {
+            SceneNode partial = {0};
+            partial.params = p;
+            water_cleanup(&partial);
+            free(p);
+        }
+        return node;
     }
     return NULL;
 }

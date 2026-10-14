@@ -35,6 +35,14 @@ static float s_step_timer = 0.0f;
 static float s_rustle_timer = 0.0f;
 static int s_was_air = 0;    // был ли в воздухе в прошлом кадре (приземление)
 static int s_prev_duck = 0;  // приседали ли в прошлом кадре (смена — не падение)
+static float s_fall_impact = 0.0f;  // скорость падения в момент приземления (м/с)
+
+float movement_take_fall_impact(void)
+{
+    float v = s_fall_impact;
+    s_fall_impact = 0.0f;
+    return v;
+}
 
 // Позиция игрока (слушатель = камера; источник звуков — игрок)
 #define SOUND_RADIUS 25.0f    // радиус слышимости звуков игрока, м
@@ -254,6 +262,8 @@ void movement_update(Camera *cam, const WorldState *w, float dt)
                     if (vol > 0.6f) vol = 0.6f;
                     audio_3d_play_once(s_land, vol, s_player_pos, SOUND_RADIUS);
                 }
+                // Скорость падения -> игровой слой (урон от падения, game.c).
+                s_fall_impact = -fall;
             }
             s_was_air = 0;
         } else {

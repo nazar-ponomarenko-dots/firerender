@@ -19,4 +19,9 @@ extern int g_step_calls;
 // т.п.), движки cam->pos / vx / vy / vz, реагирует на режимы cam->fly/noclip.
 void movement_update(Camera *cam, const WorldState *w, float dt);
 
+// Скорость падения (м/с, >0) в момент последнего приземления с высоты —
+// один раз: возвращает и обнуляет. Игровой слой (game.c) переводит её в урон
+// от падения. 0 — приземления с ощутимой высоты в этом кадре не было.
+float movement_take_fall_impact(void);
+
 #endif

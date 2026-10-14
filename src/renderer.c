@@ -16,6 +16,7 @@
 #include "cvars.h"
 #include "game.h"
 #include "gi.h"
+#include "lowend_profile.h"
 #include "gl_loader.h"
 #include "gpu.h"
 #include "hud.h"
@@ -23,6 +24,7 @@
 #include "mapdata.h"
 #include "profiler.h"
 #include "resources.h"
+#include "srender.h"
 #include "sky.h"
 #include "ssr.h"
 #include "physics.h"
@@ -39,6 +41,9 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>             // mingw: _mkdir объявлен только здесь
+#endif
 
 #include "png.h"
 #include "stb_image.h"
@@ -74,6 +79,38 @@ void renderer_set_viewport(int vw, int vh)
     if (vw > 0 && vh > 0) { s_vw = vw; s_vh = vh; }
 }
 
+// --- Масштаб рендера (r_render_scale) ------------------------------------------
+// Сцена (вместе с MSAA/GI/SSR/вокс-туманом) рисуется в УМЕНЬШЕННОМ
+// разрешении, финальный композит (voxfog/bloom) и HUD — в нативе окна:
+// апскейл получается сам, текстуры сэмплятся по нормализованным UV.
+// Все фуллскрин-проходы стоят пропорционально пикселям — это главный
+// рычаг фпс на слабых iGPU (0.6 = ~2.8x меньше пикселей).
+static int s_rsw = 1280, s_rsh = 720;  // размер сцены с масштабом
+static int s_scene_ldr = -1;
+
+static void scene_size_update(void)
+{
+    float sc = cvar_get("r_render_scale");
+    if (sc < 0.4f) sc = 0.4f;
+    if (sc > 1.0f) sc = 1.0f;
+    int w = (int)((float)s_vw * sc + 0.5f);
+    int h = (int)((float)s_vh * sc + 0.5f);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    int ldr = cvar_get("r_scene_ldr") > 0.5f;
+    int format_changed = ldr != s_scene_ldr;
+    if (w == s_rsw && h == s_rsh && !format_changed) return;
+    s_rsw = w;
+    s_rsh = h;
+    s_scene_ldr = ldr;
+    bloom_resize(&s_bloom, s_rsw, s_rsh);
+#ifndef USE_GLES_PATH
+    ssr_resize(&s_ssr, s_rsw, s_rsh);
+    gi_resize(&s_gi, s_rsw, s_rsh);
+    voxfog_resize(s_rsw, s_rsh);
+#endif
+}
+
 // --- Cubemap reflection FBO ----------------------------------------------------
 static GpuTex make_cubemap_color_tex(int size)
 {
@@ -88,7 +125,8 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
     static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
     GpuTex id = 0;
     int size = 0;
-    int first = 1;
+    int loaded = 0;
+    int valid = 1;
 
     // PNG хранит строки сверху вниз (в capture флип по Y), а glTexImage2D
     // считает строку 0 низом — без обратного флипа отражения были бы
@@ -109,33 +147,49 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
         char **files = SDL_GlobDirectory(dir, pattern, 0, &count);
         if (!files || count == 0) {
             if (files) SDL_free(files);
-            continue;
+            valid = 0;
+            break;
         }
-        // Take the most recent (last in list)
-        char *latest = files[0];
+        // SDL_GlobDirectory хранит строки внутри одного блока: копируем имя
+        // до освобождения списка.
+        const char *latest = files[0];
         for (int i = 1; i < count; i++) {
             if (strcmp(files[i], latest) > 0) latest = files[i];
         }
+        char latest_name[256];
+        snprintf(latest_name, sizeof latest_name, "%s", latest);
         SDL_free(files);
 
         char fullpath[512];
-        snprintf(fullpath, sizeof fullpath, "%s/%s", dir, latest);
+        snprintf(fullpath, sizeof fullpath, "%s/%s", dir, latest_name);
         int w, h, ch;
         unsigned char *px = stbi_load(fullpath, &w, &h, &ch, 3);
         if (!px) {
-            SDL_Log("Failed to load cubemap face %s: %s", latest, stbi_failure_reason());
-            continue;
+            SDL_Log("Failed to load cubemap face %s: %s", latest_name, stbi_failure_reason());
+            valid = 0;
+            break;
         }
-        if (first) {
+        if (w != h || (size && (w != size || h != size))) {
+            SDL_Log("Invalid cubemap face %s: %dx%d, expected %dx%d square",
+                    latest_name, w, h, size, size);
+            stbi_image_free(px);
+            valid = 0;
+            break;
+        }
+        if (!id) {
             id = gpu_tex_gen(s_gpu);
             size = w;
-            first = 0;
         }
         gpu_cubemap_face_rgb8(s_gpu, id, face, w, h, px);
+        loaded++;
         stbi_image_free(px);
     }
     stbi_set_flip_vertically_on_load(0);   // глобальный флаг — вернуть как было
 
+    if (!valid || loaded != 6) {
+        if (id) gpu_tex_delete(s_gpu, &id);
+        return 0;
+    }
     if (id) {
         gpu_tex_params_cubemap(s_gpu, id, 1);
         if (out_size) *out_size = size;
@@ -197,8 +251,8 @@ static void renderer_ctx_fill(Game *g)
 {
     RendererContext *rc = &s_rc;
     memset(rc, 0, sizeof *rc);
-    rc->vw = s_vw;
-    rc->vh = s_vh;
+    rc->vw = s_rsw;   // сцена в масштабе r_render_scale (HUD остаётся натив)
+    rc->vh = s_rsh;
 
     // Камера
     if (g->cam) {
@@ -308,12 +362,10 @@ static void renderer_ctx_fill(Game *g)
     // Вьюпорт текущего прохода (проходы кубомапа переопределяют его)
     rc->view_vp[0] = 0;
     rc->view_vp[1] = 0;
-    rc->view_vp[2] = s_vw;
-    rc->view_vp[3] = s_vh;
-    // Кубомап отражений — статический: загружается из cubemaps/ при старте.
-    // refl_cubemap_dirty оставлен для совместимости, но не используется.
-    if (g->cam && g->world_loaded)
-        rc->refl_cubemap_dirty = 0;
+    rc->view_vp[2] = s_rsw;
+    rc->view_vp[3] = s_rsh;
+    // Кубомап отражений — статический: загружается из cubemaps/ при старте,
+    // переписывается только командой cubemap_capture.
     // Каскадные тени: текстуры и производные (матрицы свежит shadow.c)
     {
         const float boxes[SHADOW_CASCADES] = {
@@ -331,7 +383,12 @@ static void renderer_ctx_fill(Game *g)
             rc->shadow_tex[c] = shadow_texture(c);
             memcpy(rc->shadow_matrix[c], shadow_matrix(c),
                    sizeof rc->shadow_matrix[c]);
-            rc->shadow_box[c] = boxes[c];
+            // uShadowBox для шейдеров — это РАДИУС покрытия каскада, а не
+            // сторона бокса. Бокс центрирован на камере (shadow_matrix_for
+            // с center=cam_pos, ortho ±box/2), поэтому фрагмент гарантированно
+            // внутри карты каскада только при dist <= box/2. Отдаём половины
+            // {4,8,48,256}; за пределами sample_cascade вернёт «освещено».
+            rc->shadow_box[c] = boxes[c] * 0.5f;
             rc->shadow_depth[c] = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
             // bias рельефа: shadow_bias латеральных текселей (из map.json).
             // РАНЬШЕ каскад 3 получал вдвое меньше — но у него тексель 50 см
@@ -385,11 +442,19 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     su->u_ambient  = glGetUniformLocation(prog, "uAmbient");
     su->u_skycolor = glGetUniformLocation(prog, "uSkyColor");
     su->u_groundcolor = glGetUniformLocation(prog, "uGroundColor");
+    su->u_probe_amb = glGetUniformLocation(prog, "uProbeAmb");
+    su->u_probe_sun = glGetUniformLocation(prog, "uProbeSun");
+    su->u_probe_on  = glGetUniformLocation(prog, "uProbeOn");
     su->u_fogcolor = glGetUniformLocation(prog, "uFogColor");
     su->u_fogstart = glGetUniformLocation(prog, "uFogStart");
     su->u_fogend   = glGetUniformLocation(prog, "uFogEnd");
     su->u_fogon    = glGetUniformLocation(prog, "uFogOn");
     su->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
+    // Границы каскадов: шейдеры выбирают каскад по дистанции через
+    // uShadowBox[4]. Источник правды — SHADOW_BOX_* в shadow.h, но сюда
+    // отдаётся ПОЛОВИНА каждой стороны (радиус покрытия каскада — бокс
+    // центрирован на камере, см. renderer_ctx_fill), т.е. {4,8,48,256}.
+    su->u_shadowbox = glGetUniformLocation(prog, "uShadowBox");
     su->u_wetness = glGetUniformLocation(prog, "uWetness");
     su->u_snowcover = glGetUniformLocation(prog, "uSnowCover");
     su->u_snowmask  = glGetUniformLocation(prog, "uSnowMask");
@@ -422,25 +487,25 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniformMatrix4fv(su->u_viewproj, 1, GL_FALSE, rc->viewproj);
     if (su->u_campos >= 0)
         glUniform3f(su->u_campos, rc->cam_pos[0], rc->cam_pos[1], rc->cam_pos[2]);
-    if (su->u_lightdir >= 0)
-        glUniform3fv(su->u_lightdir, SUN_MAX_LIGHTS, &rc->light_dir[0][0]);
-    if (su->u_lightcolor >= 0)
-        glUniform3fv(su->u_lightcolor, SUN_MAX_LIGHTS, &rc->light_color[0][0]);
-    if (su->u_lightint >= 0)
-        glUniform1fv(su->u_lightint, SUN_MAX_LIGHTS, rc->light_intensity);
+    if (su->u_lightdir >= 0 && rc->light_count > 0)
+        glUniform3fv(su->u_lightdir, rc->light_count, &rc->light_dir[0][0]);
+    if (su->u_lightcolor >= 0 && rc->light_count > 0)
+        glUniform3fv(su->u_lightcolor, rc->light_count, &rc->light_color[0][0]);
+    if (su->u_lightint >= 0 && rc->light_count > 0)
+        glUniform1fv(su->u_lightint, rc->light_count, rc->light_intensity);
     if (su->u_lightcount >= 0) glUniform1i(su->u_lightcount, rc->light_count);
     // Точечные и прожекторные источники
-    if (su->u_pointpos >= 0) glUniform3fv(su->u_pointpos, SCENE_MAX_POINT, &rc->point_pos[0][0]);
-    if (su->u_pointcolor >= 0) glUniform3fv(su->u_pointcolor, SCENE_MAX_POINT, &rc->point_color[0][0]);
-    if (su->u_pointint >= 0) glUniform1fv(su->u_pointint, SCENE_MAX_POINT, rc->point_intensity);
-    if (su->u_pointrange >= 0) glUniform1fv(su->u_pointrange, SCENE_MAX_POINT, rc->point_range);
+    if (su->u_pointpos >= 0 && rc->point_count > 0) glUniform3fv(su->u_pointpos, rc->point_count, &rc->point_pos[0][0]);
+    if (su->u_pointcolor >= 0 && rc->point_count > 0) glUniform3fv(su->u_pointcolor, rc->point_count, &rc->point_color[0][0]);
+    if (su->u_pointint >= 0 && rc->point_count > 0) glUniform1fv(su->u_pointint, rc->point_count, rc->point_intensity);
+    if (su->u_pointrange >= 0 && rc->point_count > 0) glUniform1fv(su->u_pointrange, rc->point_count, rc->point_range);
     if (su->u_pointcount >= 0) glUniform1i(su->u_pointcount, rc->point_count);
-    if (su->u_spotpos >= 0) glUniform3fv(su->u_spotpos, SCENE_MAX_SPOT, &rc->spot_pos[0][0]);
-    if (su->u_spotdir >= 0) glUniform3fv(su->u_spotdir, SCENE_MAX_SPOT, &rc->spot_dir[0][0]);
-    if (su->u_spotcolor >= 0) glUniform3fv(su->u_spotcolor, SCENE_MAX_SPOT, &rc->spot_color[0][0]);
-    if (su->u_spotint >= 0) glUniform1fv(su->u_spotint, SCENE_MAX_SPOT, rc->spot_intensity);
-    if (su->u_spotrange >= 0) glUniform1fv(su->u_spotrange, SCENE_MAX_SPOT, rc->spot_range);
-    if (su->u_spotangle >= 0) glUniform1fv(su->u_spotangle, SCENE_MAX_SPOT, rc->spot_angle);
+    if (su->u_spotpos >= 0 && rc->spot_count > 0) glUniform3fv(su->u_spotpos, rc->spot_count, &rc->spot_pos[0][0]);
+    if (su->u_spotdir >= 0 && rc->spot_count > 0) glUniform3fv(su->u_spotdir, rc->spot_count, &rc->spot_dir[0][0]);
+    if (su->u_spotcolor >= 0 && rc->spot_count > 0) glUniform3fv(su->u_spotcolor, rc->spot_count, &rc->spot_color[0][0]);
+    if (su->u_spotint >= 0 && rc->spot_count > 0) glUniform1fv(su->u_spotint, rc->spot_count, rc->spot_intensity);
+    if (su->u_spotrange >= 0 && rc->spot_count > 0) glUniform1fv(su->u_spotrange, rc->spot_count, rc->spot_range);
+    if (su->u_spotangle >= 0 && rc->spot_count > 0) glUniform1fv(su->u_spotangle, rc->spot_count, rc->spot_angle);
     if (su->u_spotcount >= 0) glUniform1i(su->u_spotcount, rc->spot_count);
     if (su->u_ambient >= 0)
         glUniform3f(su->u_ambient, rc->ambient[0], rc->ambient[1], rc->ambient[2]);
@@ -448,6 +513,9 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniform3f(su->u_skycolor, rc->sky_color[0], rc->sky_color[1], rc->sky_color[2]);
     if (su->u_groundcolor >= 0)
         glUniform3f(su->u_groundcolor, rc->ground_color[0], rc->ground_color[1], rc->ground_color[2]);
+    // Запечённый свет по умолчанию ВЫКЛ — включают точечно пути объектов/мешей,
+    // передавая ambient и видимость солнца из пробы terrain_baked_probe().
+    if (su->u_probe_on >= 0) glUniform1f(su->u_probe_on, 0.0f);
     if (su->u_fogcolor >= 0)
         glUniform3f(su->u_fogcolor, rc->fog_color[0], rc->fog_color[1], rc->fog_color[2]);
     if (su->u_fogstart >= 0) glUniform1f(su->u_fogstart, rc->fog_start);
@@ -455,6 +523,8 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     if (su->u_fogon >= 0)    glUniform1f(su->u_fogon, rc->fog_on ? 1.0f : 0.0f);
     if (su->u_shadow_on >= 0)
         glUniform1f(su->u_shadow_on, rc->shadow_on ? 1.0f : 0.0f);
+    if (su->u_shadowbox >= 0)
+        glUniform1fv(su->u_shadowbox, SHADOW_CASCADES, rc->shadow_box);
     if (su->u_wetness >= 0)
         glUniform1f(su->u_wetness, rc->wetness);
     if (su->u_snowcover >= 0)
@@ -501,15 +571,81 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     gpu_active_texture(s_gpu, 0);
 }
 
+void scene_uniforms_probe(const SceneUniforms *su, float x, float y, float z)
+{
+    if (su->u_probe_on < 0) return;
+    // Запечённые пробы объектов/мешей — тоже СТАТИЧНОЕ решение (uProbeSun =
+    // тень статичных преград из бейка). Как и лайтмап террейна, включаются
+    // только в режиме статических теней (r_shadows_mode==2). В режимах 0/1/3
+    // объекты идут динамическим путём: полусферный ambient + CSM.
+    if (!(cvar_get("r_baked_light") > 0.5f) || !terrain_baked_probes_have()
+        || cvar_get("r_shadows_mode") != 2.0f) {
+        glUniform1f(su->u_probe_on, 0.0f);
+        return;
+    }
+    float p[4];
+    terrain_baked_probe(x, y, z, p);
+    if (su->u_probe_amb >= 0) glUniform3f(su->u_probe_amb, p[0], p[1], p[2]);
+    if (su->u_probe_sun >= 0) glUniform1f(su->u_probe_sun, p[3]);
+    glUniform1f(su->u_probe_on, 1.0f);
+}
+
 void renderer_setup(const WorldState *w, int vw, int vh)
 {
     if (!s_gpu) s_gpu = gpu_create();   // RHI-бэкенд (GL): один на процесс
+    cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
+                     "масштаб рендера сцены (1 = полное разрешение окна)");
+    cvar_register_ex("r_cheap_fog", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "туман только в шейдерах (без voxfog-проходов)");
+    cvar_register_ex("r_present_blit", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "present: grade+blit двумя проходами (1, быстрее на 0.1мс) / один композит "
+                     "натив (0)");
+    lowend_profile_init();
+    lowend_profile_apply();
+#ifdef USE_GLES_PATH
+    // GLES использует единый shader-present: blit default FBO ненадёжен на EGL.
+    cvar_set("r_present_blit", 0.0f);
+#endif
+    // Сцена сразу в масштабе: таргеты (MSAA/GI/SSR/туман) меньше окна
+    float sc = cvar_get("r_render_scale");
+    if (sc < 0.4f) sc = 0.4f;
+    if (sc > 1.0f) sc = 1.0f;
+    s_rsw = (int)((float)vw * sc + 0.5f);
+    s_rsh = (int)((float)vh * sc + 0.5f);
+    if (s_rsw < 1) s_rsw = 1;
+    if (s_rsh < 1) s_rsh = 1;
+    s_scene_ldr = cvar_get("r_scene_ldr") > 0.5f;
+#ifdef USE_GLES_PATH
+    // Не все GLES-устройства умеют RGBA16F как color attachment.
+    // В этом случае выбираем валидный LDR target вместо чёрного incomplete FBO.
+    {
+        SrDevice *probe = sr_create();
+        if (probe && !sr_caps(probe)->color_half_float) {
+            cvar_set("r_scene_ldr", 1.0f);
+            s_scene_ldr = 1;
+            SDL_Log("GLES: RGBA16F target unsupported, using RGBA8 scene");
+        }
+        sr_destroy(probe);
+    }
+#endif
     memset(&s_bloom, 0, sizeof s_bloom);
-    bloom_init(&s_bloom, vw, vh);
-    ssr_init(&s_ssr, vw, vh);
+    bloom_init(&s_bloom, s_rsw, s_rsh);
+    SDL_Log("Scene target: %dx%d %s, present=%s", s_rsw, s_rsh,
+            cvar_get("r_scene_ldr") > 0.5f ? "RGBA8" : "RGBA16F",
+#ifdef USE_GLES_PATH
+            "shader"
+#else
+            cvar_get("r_present_blit") > 0.5f ? "blit" : "shader"
+#endif
+    );
+#ifndef USE_GLES_PATH
+    ssr_init(&s_ssr, s_rsw, s_rsh);
     memset(&s_gi, 0, sizeof s_gi);
-    gi_init(&s_gi, vw, vh);
-    voxfog_init(w, vw, vh);
+    gi_init(&s_gi, s_rsw, s_rsh);
+    voxfog_init(w, s_rsw, s_rsh);
+#else
+    (void)w;
+#endif
     make_cubemap_fbo(256); // кубомап фиксированного размера
     s_cubemap_valid = 0;
     s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
@@ -520,20 +656,24 @@ void renderer_setup(const WorldState *w, int vw, int vh)
 
 void renderer_resize(int vw, int vh)
 {
-    if (!s_active) return;
-    bloom_resize(&s_bloom, vw, vh);
-    ssr_resize(&s_ssr, vw, vh);
-    gi_resize(&s_gi, vw, vh);
-    voxfog_resize(vw, vh);
+    if (!s_active || vw <= 0 || vh <= 0) return;
+    s_vw = vw;
+    s_vh = vh;
+    // Принудить общий scaled-resize: реальные FBO должны соответствовать
+    // r_render_scale, а не нативному размеру окна.
+    s_rsw = s_rsh = 0;
+    scene_size_update();
 }
 
 void renderer_teardown(void)
 {
     if (!s_active) return;
     bloom_cleanup(&s_bloom);
+#ifndef USE_GLES_PATH
     ssr_cleanup(&s_ssr);
     gi_cleanup(&s_gi);
     voxfog_cleanup();
+#endif
     if (s_refl_cubemap) {
         gpu_tex_delete(s_gpu, &s_refl_cubemap);
         for (int i = 0; i < 6; i++) gpu_fbo_delete(s_gpu, &s_refl_cubemap_fbo[i]);
@@ -577,11 +717,16 @@ static ProfSlot node_slot(const char *name)
 
 static void render_part(SceneNode *world, float dt, int ui)
 {
+    int profiling = cvar_get("profiler") > 0.5f;
     for (SceneNode *c = world->first_child; c; c = c->next) {
         if (!c->render) continue;
         int is_ui = (strcmp(c->name, "Minimap") == 0) ||
                     (strcmp(c->name, "DebugHUD") == 0);
         if (is_ui != ui) continue;
+        if (!profiling) {
+            c->render(c, dt);
+            continue;
+        }
         ProfSlot slot = node_slot(c->name);
         Uint64 t0 = SDL_GetPerformanceCounter();
         prof_gpu_begin(slot);
@@ -611,10 +756,13 @@ void renderer_begin(void)
     prof_reset();
     float clear_rgb[3] = { 0.6f, 0.65f, 0.7f };
     if (s_active) sky_fog_color(clear_rgb);
-    // Смена r_msaa вживую: пересоздать MSAA-таргет ДО привязки FBO сцены
+    // Смена r_render_scale/r_msaa вживую: пересоздать таргеты ДО привязки
+    scene_size_update();
     bloom_msaa_sync(&s_bloom);
     gpu_bind_framebuffer(s_gpu, s_active ? bloom_scene_fbo(&s_bloom) : 0);
-    gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
+    // Сцена — в масштабе; прямой рендер в экран (фон меню) — натив
+    if (s_active) gpu_viewport(s_gpu, 0, 0, s_rsw, s_rsh);
+    else          gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
     gpu_clear(s_gpu, clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
 }
 
@@ -640,6 +788,7 @@ static const float s_face_ups[6][3] = {
 
 // Центр кубомапа отражений: x/z игрока, y — уровень воды под игроком
 // (если воды нет — высота камеры: куб описывает окружение игрока).
+__attribute__((unused))
 static void cubemap_center_pos(Game *g, float out[3])
 {
     const Camera *cam = &g->cam->cam;
@@ -768,74 +917,114 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         // Каскадные тени: узлы рисуют глубину (pass = RP_SHADOW). Всегда
         // заполненными — до включения каркасного режима.
         if (s_rc.shadow_on) {
-            Uint64 t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_SHADOW);
+            int profiling = cvar_get("profiler") > 0.5f;
+            Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_SHADOW);
             shadow_render(world, &s_rc);
-            prof_gpu_end(PROF_SHADOW);
-            Uint64 t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_SHADOW,
-                        (float)(t1 - t0) * 1000.0f /
-                        (float)SDL_GetPerformanceFrequency());
+            if (profiling) {
+                prof_gpu_end(PROF_SHADOW);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_SHADOW,
+                            (float)(t1 - t0) * 1000.0f /
+                            (float)SDL_GetPerformanceFrequency());
+            }
         }
-gpu_wireframe(s_gpu, s_wire);
+        if (s_wire) gpu_wireframe(s_gpu, 1);
         render_3d(world, dt);
-        gpu_wireframe(s_gpu, 0);
+        if (s_wire) gpu_wireframe(s_gpu, 0);
         did_3d = 1;
     }
     if (did_3d) {
-        // Развернуть MSAA-сцену в текстуры (цвет+глубина) для пост-проходов
-        bloom_resolve(&s_bloom);
+        // Развернуть MSAA-сцену в текстуры (цвет+глубина) для пост-проходов.
+        // Глубину разворачиваем только если её реально прочтут ниже — те же
+        // условия, что и у потребителей (GI/SSR/voxfog). В КАРТОШКЕ все три
+        // выключены → полноэкранный blit глубины пропускается.
+        int need_depth =
+            gi_is_on() ||
+            (cvar_get("r_ssr") >= 0.5f &&
+             (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
+             cvar_get("r_ssr_strength") > 0.0f) ||
+            (voxfog_is_on() && cvar_get("r_cheap_fog") < 0.5f);
+        bloom_resolve(&s_bloom, need_depth);
         gpu_bind_framebuffer(s_gpu, 0);
         gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
-        Uint64 pf = SDL_GetPerformanceFrequency();
+        int profiling = cvar_get("profiler") > 0.5f;
+        Uint64 pf = profiling ? SDL_GetPerformanceFrequency() : 0;
         GLuint scene_for_post = bloom_scene_tex(&s_bloom);
         // GI (аналог Lumen): непрямой свет + ambient occlusion. Идёт ПЕРВЫМ
         // из пост-проходов — SSR и bloom должны видеть уже подсвеченную
         // сцену (иначе отражения и свечение считаются от «недосвеченной»).
         if (gi_is_on()) {
-            Uint64 tg = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_GI);
+            Uint64 tg = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_GI);
             scene_for_post = gi_render(&s_gi, scene_for_post,
                                        bloom_scene_depth(&s_bloom), &s_rc);
-            prof_gpu_end(PROF_GI);
-            Uint64 te = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_GI, (float)(te - tg) * 1000.0f / (float)pf);
+            if (profiling) {
+                prof_gpu_end(PROF_GI);
+                Uint64 te = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_GI, (float)(te - tg) * 1000.0f / (float)pf);
+            }
         }
         // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
         // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
         if (cvar_get("r_ssr") >= 0.5f &&
             (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
             cvar_get("r_ssr_strength") > 0.0f) {
-            Uint64 ts = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_SSR);
+            Uint64 ts = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_SSR);
             ssr_render(&s_ssr, scene_for_post,
                        bloom_scene_depth(&s_bloom), &s_rc);
-            prof_gpu_end(PROF_SSR);
-            Uint64 te = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
+            if (profiling) {
+                prof_gpu_end(PROF_SSR);
+                Uint64 te = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_SSR, (float)(te - ts) * 1000.0f / (float)pf);
+            }
             scene_for_post = ssr_tex(&s_ssr);
         }
-        if (voxfog_is_on()) {
-            Uint64 t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, scene_for_post, voxfog_fbo());
-            prof_gpu_end(PROF_BLOOM);
-            Uint64 t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
-            t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_FOG);
-            voxfog_render(s_vw, s_vh, &s_rc,
+        // r_cheap_fog: туман ТОЛЬКО шейдерный (в terrain.fs/wheat.fs —
+        // дистанционный mix + ранний выход дальней травы), без voxfog-марша
+        // и композита. Для КАРТОШКИ: горизонт смягчён, ноль доп. проходов.
+        if (voxfog_is_on() && cvar_get("r_cheap_fog") < 0.5f) {
+            Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_BLOOM);
+            bloom_render(&s_bloom, scene_for_post, voxfog_fbo(),
+                         s_rsw, s_rsh);
+            if (profiling) {
+                prof_gpu_end(PROF_BLOOM);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
+                t0 = SDL_GetPerformanceCounter();
+                prof_gpu_begin(PROF_FOG);
+            }
+            voxfog_render(s_rsw, s_rsh, s_vw, s_vh, &s_rc,
                           voxfog_texture(), bloom_scene_depth(&s_bloom));
-            prof_gpu_end(PROF_FOG);
-            t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_FOG, (float)(t1 - t0) * 1000.0f / (float)pf);
+            if (profiling) {
+                prof_gpu_end(PROF_FOG);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_FOG, (float)(t1 - t0) * 1000.0f / (float)pf);
+            }
         } else {
-            Uint64 t0 = SDL_GetPerformanceCounter();
-            prof_gpu_begin(PROF_BLOOM);
-            bloom_render(&s_bloom, scene_for_post, 0);
-            prof_gpu_end(PROF_BLOOM);
-            Uint64 t1 = SDL_GetPerformanceCounter();
-            prof_add_ms(PROF_BLOOM, (float)(t1 - t0) * 1000.0f / (float)pf);
+            Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
+            if (profiling) prof_gpu_begin(PROF_BLOOM);
+            // r_present_blit=1 — grade в масштабе сцены + аппаратный blit
+            // (быстрее на слабых iGPU); 0 — шейдерный композит на экран.
+#ifdef USE_GLES_PATH
+            // ES/EGL backbuffer: fullscreen shader present. Реальные Android
+            // surface сохраняют кадр до SDL_GL_SwapWindow; desktop offscreen
+            // EGL может не поддерживать readback default framebuffer корректно.
+            bloom_render(&s_bloom, scene_for_post, 0, s_vw, s_vh);
+#else
+            if (cvar_get("r_present_blit") > 0.5f)
+                bloom_present(&s_bloom, scene_for_post, s_vw, s_vh);
+            else
+                bloom_render(&s_bloom, scene_for_post, 0, s_vw, s_vh);
+#endif
+            if (profiling) {
+                prof_gpu_end(PROF_BLOOM);
+                Uint64 t1 = SDL_GetPerformanceCounter();
+                prof_add_ms(PROF_BLOOM,
+                            (float)(t1 - t0) * 1000.0f / (float)pf);
+            }
         }
     }
 
@@ -844,8 +1033,62 @@ gpu_wireframe(s_gpu, s_wire);
         render_ui(world, dt);
 }
 
+// Чтение кадра для скриншотов. На GLES/EGL драйверы отдают default
+// framebuffer чёрным (на экран после swap картинка при этом идёт) — читаем
+// scene-target: валидный FBO того же размера (при r_render_scale 1.0),
+// HUD-оверлеи в кадр не входят.
+void renderer_read_pixels(unsigned char *px, int vw, int vh)
+{
+    int rw = vw, rh = vh;
+#ifdef USE_GLES_PATH
+    GLuint prev = 0;   // обратно восстанавливаем binding только на GLES-пути
+    rw = s_rsw < vw ? s_rsw : vw;
+    rh = s_rsh < vh ? s_rsh : vh;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, (GLint *)&prev);
+    glBindFramebuffer(GL_FRAMEBUFFER, bloom_scene_fbo(&s_bloom));
+    if (getenv("FR_GLDBG")) {
+        SDL_Log("capture: fbo=%u complete=%d err_before=0x%x",
+                bloom_scene_fbo(&s_bloom),
+                glCheckFramebufferStatus(GL_FRAMEBUFFER), glGetError());
+    }
+#endif
+    // GLES-драйверы (NVIDIA EGL) дают GL_INVALID_OPERATION на чтение GL_RGB
+    // из RGBA8-attachment — читаем GL_RGBA и выкидываем альфу.
+#ifdef USE_GLES_PATH
+    memset(px, 0, (size_t)vw * vh * 3);
+    {
+        unsigned char *rgba = malloc((size_t)rw * rh * 4);
+        if (rgba) {
+            glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            for (int y = 0; y < rh; y++)
+                for (int x = 0; x < rw; x++) {
+                    memcpy(px + ((size_t)y * vw + x) * 3,
+                           rgba + ((size_t)y * rw + x) * 4, 3);
+                }
+            free(rgba);
+        }
+    }
+#else
+    glReadPixels(0, 0, rw, rh, GL_RGB, GL_UNSIGNED_BYTE, px);
+#endif
+#ifdef USE_GLES_PATH
+    if (getenv("FR_GLDBG")) {
+        unsigned char t[3];
+        glReadPixels(rw / 2, rh / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, t);
+        SDL_Log("capture: err_after=0x%x center=%d,%d,%d", glGetError(),
+                t[0], t[1], t[2]);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, prev);
+#endif
+}
+
 void renderer_end(Game *g, float dt)
 {
+    lowend_profile_frame(dt * 1000.0f);
+    // Все оверлеи и screenshot читают default framebuffer. Некоторые ES/EGL
+    // драйверы не сохраняют раздельные READ/DRAW bindings после пост-проходов.
+    gpu_bind_framebuffer(s_gpu, 0);
+    gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
     // Прицел — простая белая точка в центре (в игре, без консоли,
     // cvar r_crosshair; консоль: toggle_crosshair)
     if (g->world_loaded && app_state() == APP_PLAY && !console_active()
@@ -927,6 +1170,75 @@ void renderer_end(Game *g, float dt)
         gpu_cap(s_gpu, GPU_CAP_BLEND, 0);
     }
 
+    // --- HP: полоска здоровья (всегда в игре), вспышка урона, экран смерти ---
+    if (g->world_loaded && app_state() == APP_PLAY) {
+        const Health *h = &g->player.hp;
+        gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
+        gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
+
+        // Красная вспышка урона на весь экран (гаснет со временем).
+        // Живому: полоска HP и вспышка урона. Мёртвому — только экран смерти.
+        if (!h->dead) {
+        if (h->hurt_flash > 0.001f) {
+            const float fl[4] = { 0.75f, 0.05f, 0.05f, h->hurt_flash * 0.38f };
+            hud_rect_draw(s_vw, s_vh, 0.0f, 0.0f, (float)s_vw, (float)s_vh, fl);
+        }
+
+        // Полоска HP слева снизу.
+        float frac = health_frac(h);
+        float bx = 24.0f, bh = 20.0f, bw = 240.0f;
+        float by = (float)s_vh - 46.0f;
+        const float border[4] = { 0.0f, 0.0f, 0.0f, 0.55f };
+        const float back[4]   = { 0.12f, 0.12f, 0.14f, 0.62f };
+        // Цвет заливки: красный (мало) -> жёлтый -> зелёный (много).
+        float fr, fg2, fb = 0.10f;
+        if (frac > 0.5f) { fr = (1.0f - frac) * 2.0f; fg2 = 0.85f; }
+        else             { fr = 0.90f;                fg2 = frac * 2.0f * 0.85f; }
+        const float fill[4] = { fr, fg2, fb, 0.92f };
+        hud_rect_draw(s_vw, s_vh, bx - 2.0f, by - 2.0f, bw + 4.0f, bh + 4.0f, border);
+        hud_rect_draw(s_vw, s_vh, bx, by, bw, bh, back);
+        if (frac > 0.0f)
+            hud_rect_draw(s_vw, s_vh, bx, by, bw * frac, bh, fill);
+        char hpbuf[32];
+        snprintf(hpbuf, sizeof hpbuf, "HP %d", (int)(h->hp + 0.5f));
+        const float hptext[4] = { 0.96f, 0.98f, 1.0f, 1.0f };
+        hud_text_draw_small(s_vw, s_vh, bx + 8.0f,
+                            by + (bh - hud_text_line_height_small()) * 0.5f
+                              + hud_text_ascent_small(), hpbuf, hptext);
+        }
+
+        // Экран смерти: плавное затемнение (гасим не мгновенно, а за ~0.5 с
+        // после удара) с красным подтоном, надпись и отсчёт возрождения.
+        if (h->dead) {
+            // Время с момента смерти растёт от 0; вход затемнения за ~0.4 с
+            // (не зависит от длины respawn_delay). dp — доля до возрождения.
+            float dl = h->respawn_delay > 0.001f ? h->respawn_delay : 1.0f;
+            float td = dl - h->respawn_t; if (td < 0.0f) td = 0.0f;
+            float fade = td / 0.4f; if (fade > 1.0f) fade = 1.0f;
+            float dp = td / dl; if (dp > 1.0f) dp = 1.0f;
+            // Затемнение с красным подтоном (кровь -> черно к концу).
+            const float dim[4] = { 0.18f * (1.0f - dp), 0.0f, 0.0f,
+                                   0.66f * fade };
+            hud_rect_draw(s_vw, s_vh, 0.0f, 0.0f, (float)s_vw, (float)s_vh, dim);
+            const char *msg = "ВЫ ПОГИБЛИ";
+            float mw2 = hud_text_width_big(msg);
+            const float dc[4] = { 0.92f, 0.18f, 0.18f, fade };
+            hud_text_draw_big(s_vw, s_vh, (s_vw - mw2) * 0.5f,
+                              s_vh * 0.40f + hud_text_ascent_big(), msg, dc);
+            // Подпись: обратный отсчёт до возрождения.
+            char sub[48];
+            float secs = h->respawn_t; if (secs < 0.0f) secs = 0.0f;
+            snprintf(sub, sizeof sub, "Возрождение через %.0f...", secs + 0.99f);
+            float sw = hud_text_width(sub);
+            const float sc[4] = { 0.85f, 0.85f, 0.88f, fade };
+            hud_text_draw(s_vw, s_vh, (s_vw - sw) * 0.5f,
+                          s_vh * 0.40f + hud_text_line_height_big() * 0.95f
+                            + hud_text_ascent(), sub, sc);
+        }
+        gpu_cap(s_gpu, GPU_CAP_BLEND, 0);
+    }
+
     // snd_debug: панелька справа сверху — какие звуки играют сейчас
     // и счётчик шагов (для отладки звука). Работает в меню и в игре.
     if (cvar_get("snd_debug") > 0.5f) {
@@ -950,6 +1262,7 @@ void renderer_end(Game *g, float dt)
     if (cvar_get("profiler") > 0.5f && g->world_loaded) {
         char line[256];
         float total = prof_total_ms();
+        float gpu_total = prof_gpu_total_ms();
         float frame = dt * 1000.0f;
         float fps = frame > 0.001f ? 1000.0f / frame : 0.0f;
         gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
@@ -960,15 +1273,22 @@ void renderer_end(Game *g, float dt)
         const float dim[4] = { 0.62f, 0.66f, 0.74f, 1.0f };
         const float hot[4] = { 1.0f, 0.72f, 0.3f, 1.0f };
         float fh = hud_text_line_height_small();
-        float y = (float)s_vh - 8.0f - fh * 8.0f;
-        hud_rect_draw(s_vw, s_vh, (float)s_vw - 330.0f, y - 8.0f, 322.0f,
-                      fh * 8.0f + 16.0f, bg);
-        float x = (float)s_vw - 318.0f;
+        float y = (float)s_vh - 8.0f - fh * 9.0f;
+        hud_rect_draw(s_vw, s_vh, (float)s_vw - 390.0f, y - 8.0f, 382.0f,
+                      fh * 9.0f + 16.0f, bg);
+        float x = (float)s_vw - 378.0f;
         snprintf(line, sizeof line, "Frame %.1f ms  (%.0f fps)", frame, fps);
         hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
         y += fh;
-        snprintf(line, sizeof line, "Tris %d | Verts %d | Draws %d",
-                 g_prof_tris, g_prof_verts, g_prof_draws);
+        snprintf(line, sizeof line, "CPU slots %.1f | GPU slots %.1f ms", total, gpu_total);
+        hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, dim);
+        y += fh;
+        snprintf(line, sizeof line, "%s | %dx%d %.2fx", lowend_profile_name(),
+                 s_rsw, s_rsh, lowend_profile_scale());
+        hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
+        y += fh;
+        snprintf(line, sizeof line, "Tris %d | Verts %d | Draws %d | GLskip %d",
+                 g_prof_tris, g_prof_verts, g_prof_draws, g_prof_state_skipped);
         hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
         y += fh;
         // строки по модулям (только ненулевые, в порядке убывания GPU-времени)
@@ -984,8 +1304,9 @@ void renderer_end(Game *g, float dt)
             float cpu = prof_ms(i);
             float gpu = prof_gpu_ms(i);
             if (cpu <= 0.01f && gpu <= 0.01f) continue;
-            float ref = gpu > cpu ? gpu : cpu;
-            float pct = total > 0.01f ? 100.0f * ref / total : 0.0f;
+            float cpu_pct = total > 0.01f ? 100.0f * cpu / total : 0.0f;
+            float gpu_pct = gpu_total > 0.01f ? 100.0f * gpu / gpu_total : 0.0f;
+            float pct = cpu_pct > gpu_pct ? cpu_pct : gpu_pct;
             snprintf(line, sizeof line, "%-10s CPU %5.2f | GPU %5.2f ms",
                      prof_name(i), cpu, gpu);
             const float *c = (pct >= 25.0f) ? hot : (pct >= 10.0f ? fg : dim);

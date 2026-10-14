@@ -20,9 +20,11 @@
 #include "glb_anim.h"    // cmd_glbanim + auto-выбор в cmd_glb
 
 // --- +/- команды действия (ставят флаг g_act) ---------------------------------
-#define DEF_ACTION(id, name)                                             \
-    static void a_##name##_on(const char *a) { (void)a; g_act[id] = 1; } \
-    static void a_##name##_off(const char *a) { (void)a; g_act[id] = 0; }
+#define DEF_ACTION(id, name)                                                    \
+    static void a_##name##_on(const char *a)                                    \
+    { (void)a; action_set(ACTION_SRC_BIND, id, true); }                         \
+    static void a_##name##_off(const char *a)                                   \
+    { (void)a; action_set(ACTION_SRC_BIND, id, false); }
 
 DEF_ACTION(A_FORWARD, forward)
 DEF_ACTION(A_BACK,    back)
@@ -115,6 +117,13 @@ static const ConCmdDesc s_cmds[] = {
     { "attach", "attach sprite|glb|mesh <N> <кость|-> <файл> [...] | attach list|bones <N>", cmd_attach },
     { "sprite", "sprite <png> [x y z] [w h] [flat] — спрайт в мире", cmd_sprite },
     { "cubemap_capture", "cubemap_capture [x y z] [size] — захват кубомапа отражений (6 PNG в cubemaps/)", cmd_cubemap_capture },
+    { "hp",       "hp — статус здоровья игрока",                cmd_hp },
+    { "hurt",     "hurt [N] — нанести урон (по умолч. 25)",     cmd_hurt },
+    { "heal",     "heal [N] — вылечить (без N — до полного)",   cmd_heal },
+    { "god",      "god [0/1] — бессмертие (нужен sv_cheats)",   cmd_god },
+    { "kill",     "kill — мгновенная смерть игрока",            cmd_kill },
+    { "sethp",    "sethp <N> — задать HP (нужен sv_cheats)",    cmd_sethp },
+    { "maxhp",    "maxhp <N> — задать максимум HP",             cmd_maxhp },
 };
 
 void cmdreg_register_all(void)

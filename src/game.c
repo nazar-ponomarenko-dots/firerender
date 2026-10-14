@@ -30,6 +30,7 @@
 #include "loading.h"
 #include "mapdata.h"
 #include "material.h"
+#include "movement.h"
 #include "objects.h"
 #include "particles.h"
 #include "playerbox.h"
@@ -454,6 +455,7 @@ static int scene_build(Game *g, const WorldTextures *wt)
         // Спавн: стартовая точка/взгляд игрока (для «Новой игры»)
     player_set_spawn(&g->player, g->cam->cam.pos, g->cam->cam.yaw,
                      g->cam->cam.pitch);
+    health_revive(&g->player.hp);   // новый/перезагруженный мир — полный HP
 
     // Узлы сцены получают единый рендер-контекст (renderer.c) вместо cam/sun
     const RendererContext *rc = renderer_context();
@@ -582,10 +584,27 @@ static void audio_load_map(Game *g)
 // прогресса справа снизу с подписью фазы (loading.c предъявляет кадры).
 int game_load_world(Game *g)
 {
+    if (!g || g->world_loading) {
+        SDL_Log("World load rejected: nested load");
+        return -1;
+    }
+    g->world_loading = 1;
+    // FR_STAGES: тайминг фаз загрузки мира (поиск тяжёлых мест загрузки)
+    const int st = getenv("FR_STAGES") != NULL;
+    double st_f = (double)SDL_GetPerformanceFrequency();
+    Uint64 st_t = SDL_GetPerformanceCounter(), st_p = st_t;
+#define STLOG(msg) do { if (st) { st_p = SDL_GetPerformanceCounter(); \
+        SDL_Log("LOAD %s: %.0f мс", msg, (st_p - st_t) * 1000.0 / st_f); \
+        st_t = st_p; } } while (0)
     loading_begin();
     loading_progress(0.05f, "Загрузка уровня");
     WorldTextures wt;
-    if (world_load_geometry(g, &wt) != 0) { loading_end(); return -1; } // фаза 1
+    if (world_load_geometry(g, &wt) != 0) {
+        loading_end();
+        g->world_loading = 0;
+        return -1;
+    } // фаза 1
+    STLOG("geometry+textures");
     loading_progress(0.30f, "Собираем сцену");
     if (scene_build(g, &wt) != 0) {
         // scene_build уже освободила частичную сцену (scene_teardown внутри);
@@ -593,19 +612,29 @@ int game_load_world(Game *g)
         world_unload_geometry(g);
         SDL_Log("World load failed: scene_build");
         loading_end();
+        g->world_loading = 0;
         return -1;                                       // фаза 2: сцена
     }
+    STLOG("scene_build");
     loading_progress(0.60f, "Настройки карты");
     map_apply();                                       // фаза 3: cvar'ы/команды
     loading_progress(0.75f, "Звук карты");
     audio_load_map(g);                                 // фаза 4: звук карты
 
-    // Статические тени (режим 2): готовим карту теней сразу при загрузке
     loading_progress(0.85f, "Тени и маски");
-    if (cvar_get("r_shadows_mode") == 2.0f)
+    // Запечённый свет карты (map/baked): движок только ЧИТАЕТ. Нет файла —
+    // terrain_baked_light_have() = 0, рельеф идёт прежним расчётным путём.
+    // Грузим ПЕРВЫМ — от его наличия зависит, нужен ли CPU-пересчёт статики.
+    terrain_baked_light_load(&g->world);
+    // Статические тени (режим 2): офлайн-лайтмап уже содержит статические тени
+    // (+AO+переотражения), и в режиме 2 шейдер берёт именно его. CPU-пересчёт
+    // (terrain_shadows_bake) нужен ТОЛЬКО как fallback для карт БЕЗ запечённого
+    // света — иначе это секунды впустую на результат, который никто не читает.
+    if (cvar_get("r_shadows_mode") == 2.0f && !terrain_baked_light_have())
         terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
     // Мокрость: запечённая маска "под крышей" (всегда, полезна для мокрости)
     terrain_wetness_mask_bake(&g->world);
+    STLOG("bakes");
     SDL_Log("World loaded (%.0fx%.0f m)", g->world.world_w, g->world.world_d);
 
     // Скрипт карты (lua/maps/<карта>.lua): после сцены и сущностей
@@ -613,6 +642,7 @@ int game_load_world(Game *g)
     lua_engine_map(g->map_name);
     loading_progress(1.0f, "Готово");
     loading_end();
+    g->world_loading = 0;
     return 0;
 }
 
@@ -682,12 +712,17 @@ void game_unload_world(Game *g)
 void game_map_config_load(Game *g)
 {
     FILE *f = fopen("config.cfg", "r");
-    if (!f) return;
-    char line[128];
-    while (fgets(line, sizeof line, f)) {
-        if (sscanf(line, "map_name %63s", g->map_name) == 1) { }
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "map_name %63s", g->map_name) == 1) { }
+        }
+        fclose(f);
     }
-    fclose(f);
+    // FR_MAP — принудительный выбор карты (для запекания всех карт: make bake-maps).
+    // Перебивает и дефолт, и config.cfg, не трогая пользовательский конфиг.
+    const char *em = getenv("FR_MAP");
+    if (em && em[0]) snprintf(g->map_name, sizeof g->map_name, "%s", em);
 }
 
 void game_map_config_save(Game *g)
@@ -729,6 +764,34 @@ void game_update(Game *g, float dt)
         node_update_tree(g->root, dt);
         fx_update(dt);              // эмиттеры эффектов (дождь/огонь/...)
         entity_update_all(dt);
+
+        // --- Здоровье игрока: урон от падения, реген, смерть/респавн ---
+        // Урон от падения: безопасно до ~12 м/с (высокие прыжки/мелкие уступы),
+        // выше — растёт линейно. movement.c отдаёт скорость касания земли.
+        float fall = movement_take_fall_impact();
+        const float FALL_SAFE = 12.0f, FALL_DMG_K = 6.5f;
+        if (fall > FALL_SAFE && !g->cam->cam.noclip && !g->cam->cam.fly)
+            health_damage(&g->player.hp, (fall - FALL_SAFE) * FALL_DMG_K);
+        int respawn = 0;
+        health_update(&g->player.hp, dt, &respawn);
+        // Мёртв: замораживаем ввод/движение (нельзя ходить и вертеть головой),
+        // а камеру плавно «роняем» — взгляд оседает вниз, будто игрок упал.
+        // Возрождение снимает заморозку и телепортирует на спавн.
+        int dead = health_is_dead(&g->player.hp);
+        camera_set_frozen(dead);
+        if (dead) {
+            const float DEATH_PITCH = 0.62f;   // pitch+ = вниз (см. движение)
+            float k = dt * 3.5f; if (k > 1.0f) k = 1.0f;
+            g->cam->cam.pitch += (DEATH_PITCH - g->cam->cam.pitch) * k;
+            g->cam->cam.vx = g->cam->cam.vy = g->cam->cam.vz = 0.0f;
+        }
+        if (respawn) {
+            game_apply_spawn(g, g->player.spawn_pos,
+                             g->player.spawn_yaw, g->player.spawn_pitch);
+            health_revive(&g->player.hp);
+            camera_set_frozen(0);
+        }
+
         if (mapdata_field_attached() && g->field_node) {
             g->field_node->pos[0] = g->cam->cam.pos[0];
             g->field_node->pos[2] = g->cam->cam.pos[2];

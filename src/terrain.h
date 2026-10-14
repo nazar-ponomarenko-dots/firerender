@@ -37,10 +37,15 @@ typedef struct TerrainParams {
     GLint u_specpow, u_specint;     // блики (земля матовая: spec = 0)
     GLint u_heightmin, u_heightmax, u_texscale;
     GLint u_statictex, u_static_on, u_worldsize;   // статические тени
+    GLint u_baked_lm, u_baked_on;   // запечённый свет (RGB-люксель, unit 9)
+    GLint u_sunvis, u_sunvis_on;    // карта видимости солнца (unit 16): дальние
+                                    // статичные тени в режиме 1 (CSM)
     GLint u_wetness_mask;           // маска мокрости (unit 8)
     // Поверхности (splat): маска материалов + 4 слоя текстур
     GLuint tex_splat_layer[SPLAT_LAYERS];   // грунт/песок/щебень/асфальт
     GLint u_splat, u_splat_on, u_layer[SPLAT_LAYERS], u_layer_scale;
+    GLint u_detail_dist;            // LOD деталей террейна (0 = выкл)
+    GLint u_simple;                 // 1 = упрощённый рендер (циклы точек/прожекторов → 0)
     TerrainTile *tiles;             // массив тайлов (tiles_n штук)
     int tiles_n;
     int vert_count;                // индексов в геометрии (все тайлы и LOD)
@@ -79,5 +84,29 @@ GLuint terrain_wetness_mask_tex(void);
 // R = открытое небо, G = под крышей).
 int terrain_snow_mask_have(void);
 GLuint terrain_snow_mask_tex(void);
+
+// --- Запечённый свет (offline map-compilation, FR_BAKE / make mapbake) ----
+// Считает освещение в 3D один раз офлайн и пишет в map/baked/:
+//   lightmap.png  — RGB-люксель рельефа (солнце + прямой свет + полусферный
+//                   ambient с AO по небу + 1 диффузный переотражённый бонс),
+//                   ТОЛЬКО статические окклюдеры (динамика исключена);
+//   probes.bin    — 3D-сетка зондов освещённости для ДИНАМИЧЕСКИХ объектов
+//                   (ambient RGB + видимость солнца в точке).
+// Движок в рантайме только ЧИТАЕТ (terrain_baked_light_load) и подставляет.
+void terrain_light_bake(const WorldState *w, SunParams *sun,
+                        const RendererContext *rc);
+// Грузит map/baked/lightmap.png (+ probes.bin) при загрузке мира. 1 — успех.
+int  terrain_baked_light_load(const WorldState *w);
+// 1, если запечённый свет загружен и его можно применять (cvar r_baked_light).
+int  terrain_baked_light_have(void);
+// 1, если загружена карта видимости солнца (для дальних теней в режиме 1 CSM).
+int  terrain_baked_sunvis_have(void);
+// Освобождает GL-текстуру люкселя и сетку зондов (при выгрузке мира).
+void terrain_baked_light_free(void);
+// Трилинейная выборка ambient (out[0..2]) и видимости солнца (out[3]) из
+// сетки зондов в мировой точке (x,y,z) — для освещения динамических объектов.
+void terrain_baked_probe(float x, float y, float z, float out[4]);
+// 1, если загружена именно сетка зондов (лайтмапа может быть и без неё).
+int  terrain_baked_probes_have(void);
 
 #endif

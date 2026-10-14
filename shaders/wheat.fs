@@ -26,6 +26,18 @@ in float vHeight;      // высота растения в метрах (из wh
 
 uniform sampler2DArray uVeg;      // массив спрайтов: 0-3 = трава/одуванчик, 4-6 = LOD пшеницы
 uniform vec3 uCamPos;             // позиция узла Camera
+// Z-PREPASS: 1 = проход только глубины (без освещения). Тот же квад и тот
+// же альфа-тест, что и в цветном проходе, поэтому глубина совпадает бит-в-бит
+// и цветной проход с glDepthFunc(GL_EQUAL) шейдит каждый пиксель ОДИН раз —
+// срезается overdraw в самом дорогом шейдере кадра. Картинка идентична.
+uniform float uDepthOnly;
+// УПРОЩЁННЫЙ РЕНДЕР (КАРТОШКА, r_simple_render): срезаем всё, что почти не
+// видно на дальнем/густом поле, но стоит фрагментов — точечные/прожекторные
+// циклы (→ 0 итераций), блик, подповерхностное рассеивание, контровой свет
+// и 8-тапную светящуюся обводку, а также LOD-блендинг спрайта (1 выборка
+// вместо 2). Остаётся ядро: альбедо + полусфера + солнце (+ его тень) +
+// туман. На СРЕДНИХ/УЛЬТРА uSimple=0 — путь не меняется.
+uniform float uSimple;
 
 // Вид (vLayer из wheat.vs): 0/1/2 — три вида травы, 3 — одуванчик,
 // 4 (и непрерывно 4..6 при LOD) — пшеница.
@@ -111,7 +123,7 @@ vec4 veg_sample(vec2 base, float lf, out vec2 uv_out) {
     vec2 ua = li < 4.5 ? lod0_uv(base) : (li < 5.5 ? lod1_uv(base) : lod2_uv(base));
     vec4 a = texture(uVeg, vec3(ua, li < 4.5 ? 4.0 : (li < 5.5 ? 5.0 : 6.0)));
     uv_out = ua;
-    if (w > 0.001) {
+    if (w > 0.001 && uSimple < 0.5) {
         vec2 ub = li < 4.5 ? lod1_uv(base) : lod2_uv(base);
         vec4 b = texture(uVeg, vec3(ub, li < 5.5 ? 5.0 : 6.0));
         uv_out = mix(ua, ub, w);
@@ -120,12 +132,10 @@ vec4 veg_sample(vec2 base, float lf, out vec2 uv_out) {
     return a;
 }
 
-// границы каскадов — ПОЛОВИНЫ боксов (см. terrain.fs). На границах
-// каскады смешиваются, дальше SHADOW_LIMIT теней нет.
-#define SHADOW_BOX0 4.0f
-#define SHADOW_BOX1 8.0f
-#define SHADOW_BOX2 48.0f
-#define SHADOW_LIMIT 256.0f
+// границы каскадов — uShadowBox[4]: РАДИУС покрытия каскада (половина
+// стороны бокса; бокс центрирован на камере) = {4,8,48,256}. За
+// uShadowBox[3] (256 м) теней нет — это край покрытия каскада 3.
+uniform float uShadowBox[4];
 
 // Тень одного каскада = ОБЪЕДИНЕНИЕ: аппаратный PCF (vis — плотное поле
 // под кроной тёмное, ближайший стебель в ~5 см) + ГРАДИЕНТ ГЛУБИНЫ вдоль
@@ -157,18 +167,18 @@ float sample_cascade(vec3 wp, int c) {
 float veg_shadow(vec3 wp) {
     if (uShadowOn < 0.5) return 1.0;
     float dist = distance(uCamPos, wp);
-    if (dist >= SHADOW_LIMIT) return 1.0;
+    if (dist >= uShadowBox[3]) return 1.0;
     // выбор каскада со смешиванием на границах (как в terrain.fs)
-    if (dist < SHADOW_BOX0) {
-        float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
+    if (dist < uShadowBox[0]) {
+        float t = smoothstep(uShadowBox[0] * 0.8, uShadowBox[0], dist);
         return mix(sample_cascade(wp, 0), sample_cascade(wp, 1), t);
     }
-    if (dist < SHADOW_BOX1) {
-        float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
+    if (dist < uShadowBox[1]) {
+        float t = smoothstep(uShadowBox[1] * 0.8, uShadowBox[1], dist);
         return mix(sample_cascade(wp, 1), sample_cascade(wp, 2), t);
     }
-    if (dist < SHADOW_BOX2) {
-        float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
+    if (dist < uShadowBox[2]) {
+        float t = smoothstep(uShadowBox[2] * 0.8, uShadowBox[2], dist);
         return mix(sample_cascade(wp, 2), sample_cascade(wp, 3), t);
     }
     return sample_cascade(wp, 3);
@@ -178,6 +188,9 @@ void main() {
     vec2 suv;
     vec4 c = veg_sample(vUVBase, vLayer, suv);
     if (c.a < 0.5) discard;              // прозрачный фон спрайта
+    // Проход глубины: альфа-тест уже сделан выше — этого достаточно, чтобы
+    // записать глубину силуэта. Дорогое освещение/тени/снег НЕ считаем.
+    if (uDepthOnly > 0.5) { FragColor = vec4(0.0); return; }
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vWorldPos);
     float wet = clamp(uWetness, 0.0, 1.0);
@@ -187,9 +200,14 @@ void main() {
 
     // РАННИЙ ВЫХОД: за дальней границей тумана цвет ПОЛНОСТЬЮ равен цвету
     // тумана — пересчёт света/теней/снега бессмыслен и дорог (именно дальняя
-    // трава даёт бОльшую часть фрагментов). Результат идентичен mix(...,1.0).
+    // трава даёт бОльшую часть фрагментов). Альфа — та же c.a, что и в полном
+    // пути: при alpha-to-coverage (MSAA) full-path даёт мягкую кромку по краю
+    // спрайта, а прежняя жёсткая 1.0 на границе тумана резала верхушки
+    // «кривовато» (у высокого колоса верх пересекал uFogEnd раньше низа —
+    // часть квада шла ранним выходом с alpha=1, часть полным с alpha=c.a).
+    // Теперь при d>=uFogEnd результат бит-в-бит равен mix(...,1.0) полного пути.
     if (uFogOn > 0.5 && d >= uFogEnd) {
-        FragColor = vec4(uFogColor, 1.0);
+        FragColor = vec4(uFogColor, c.a);
         return;
     }
 
@@ -241,6 +259,9 @@ void main() {
     // в тени полусферный свет гаснет до 1/4.
     vec3 light = amb * mix(0.25, 1.0, shadow);
     vec3 L = vec3(0.0);
+    // Светит КАЖДЫЙ направленный источник: солнце (0, тёплое, с тенью) +
+    // холодный «fill» — он балансирует жёлтизну солнца. В картошке НЕ режем
+    // (без fill пшеница уходит в жёлтый).
     for (int i = 0; i < uLightCount; i++) {
         vec3 li = normalize(uLightDir[i]);
         float diff = 0.55 + 0.25 * max(dot(N, li), 0.0);
@@ -248,6 +269,10 @@ void main() {
         light += uLightColor[i] * uLightIntensity[i] * diff * sh;
         if (i == 0) L = li;
     }
+    // Точечные источники и прожекторы — только в полном рендере: на картошке
+    // циклы схлопываются в ноль (поле освещает солнце, локальный свет на
+    // дальней траве почти не читается).
+    if (uSimple < 0.5) {
     // Точечные источники: затухание по дистанции, локальный свет
     for (int i = 0; i < uPointCount; i++) {
         vec3 Lp = uPointPos[i] - vWorldPos;
@@ -270,9 +295,10 @@ void main() {
         float diff = max(dot(N, lip), 0.0);
         light += uSpotColor[i] * uSpotIntensity[i] * (0.5 + 0.5 * diff) * att * edge;
     }
+    }
     light = min(light, vec3(1.0));
     vec3 col = c.rgb * vTint * grad * light;
-    if (uLightCount > 0 && length(L) > 0.5) {
+    if (uSimple < 0.5 && uLightCount > 0 && length(L) > 0.5) {
         vec3 H = normalize(L + V);
         float spec = pow(max(dot(N, H), 0.0), 48.0) * layer;
         col += uLightColor[0] * spec * 0.5 * shadow;
@@ -291,13 +317,16 @@ void main() {
     // настоящей листвы. Верхушки тоньше — просвечивают сильнее. Тень
     // уважается: растение в тени не светится. В ДОЖДЬ — выключено:
     // мокрая листва не просвечивает (нет контрового солнца).
-    if (uLightCount > 0 && length(L) > 0.5) {
+    if (uSimple < 0.5 && uLightCount > 0 && length(L) > 0.5) {
         float trans = max(dot(-L, V), 0.0);          // 1 = свет строго за растением
         float tip = smoothstep(0.25, 1.0, suv.y);    // верхушка тоньше — ярче
         float sss = trans * trans * (0.25 + 0.75 * tip) * shadow * (1.0 - wet);
         col += c.rgb * vTint * uLightColor[0] * uLightIntensity[0] * sss * 0.7;
     }
 
+    // КОНТРОВОЙ СВЕТ + светящаяся обводка — только полный рендер. На картошке
+    // весь блок (включая до 8 текстурных выборок обводки) пропускается.
+    if (uSimple < 0.5) {
     // КОНТРОВОЙ СВЕТ: солнце ЗА растением (смотрим с теневой стороны,
     // L·V < 0). Низ затемняется тем СИЛЬНЕЕ, чем ВЫШЕ растение (высокая
     // пшеница затеняет собственное основание, низкая трава — почти нет),
@@ -333,11 +362,15 @@ void main() {
                     + smoothstep(0.1, 0.45, o2) * 0.26) * 0.6;   // -40% свечение
         col += lit * backlit * glow;
     }
+    } // uSimple < 0.5 — конец контрового света и обводки
 
     // туман по дальности. При uFogOn = 0 (r_fog_mode 0) — без затрат.
     if (uFogOn > 0.5) {
         float fog = smoothstep(uFogStart, uFogEnd, d);
         col = mix(col, uFogColor, fog);
     }
-    FragColor = vec4(col, 1.0);
+    // Альфа из текстуры (0.5..1 у сглаженной кромки): при активном MSAA
+    // включён alpha-to-coverage — частичное покрытие сглаживает край.
+    // Блендинг выключен, поэтому в таргет альфа не влияет.
+    FragColor = vec4(col, c.a);
 }

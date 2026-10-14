@@ -15,14 +15,19 @@
 #include <SDL3/SDL.h>
 
 // --- Мини-dynarray (realloc-наращивание) -------------------------------------
-typedef struct { float *d; int n; int cap; } FArr;
-static void farr_push(FArr *a, float v)
+typedef struct { float *d; int n; int cap; int failed; } FArr;
+static int farr_push(FArr *a, float v)
 {
+    if (a->failed) return 0;
     if (a->n >= a->cap) {
-        a->cap = a->cap ? a->cap * 2 : 64;
-        a->d = realloc(a->d, (size_t)a->cap * sizeof(float));
+        int cap = a->cap ? a->cap * 2 : 64;
+        float *p = realloc(a->d, (size_t)cap * sizeof(float));
+        if (!p) { a->failed = 1; return 0; }
+        a->d = p;
+        a->cap = cap;
     }
     a->d[a->n++] = v;
+    return 1;
 }
 
 // Итдекс 1-based; расширяем по корнеру (данные грани копируются в выход).
@@ -70,6 +75,7 @@ Mesh *mesh_load_obj_mem(const char *name, const char *src)
     FArr pos = {0}, nrm = {0}, uv = {0};          // выход (по корнеру)
 
     char *buf = strdup(src);
+    if (!buf) return NULL;
     char *line = buf;
     while (line) {
         char *nl = strchr(line, '\n');
@@ -120,6 +126,12 @@ Mesh *mesh_load_obj_mem(const char *name, const char *src)
     free(buf);
     free(verts.d); free(vns.d); free(vts.d);
 
+    if (verts.failed || vns.failed || vts.failed ||
+        pos.failed || nrm.failed || uv.failed) {
+        free(pos.d); free(nrm.d); free(uv.d);
+        SDL_Log("mesh: %s — недостаточно памяти", name);
+        return NULL;
+    }
     if (pos.n == 0) {
         free(pos.d); free(nrm.d); free(uv.d);
         SDL_Log("mesh: %s без граней", name);
@@ -127,6 +139,10 @@ Mesh *mesh_load_obj_mem(const char *name, const char *src)
     }
 
     Mesh *m = calloc(1, sizeof *m);
+    if (!m) {
+        free(pos.d); free(nrm.d); free(uv.d);
+        return NULL;
+    }
     m->verts = pos.d;
     m->normals = nrm.d;
     m->uvs = uv.d;
@@ -238,6 +254,8 @@ void mesh_node_render(SceneNode *n, float dt)
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, p->rc);
+    // Запечённый свет: проба в позиции узла (перевод из мировой матрицы).
+    scene_uniforms_probe(&p->su, model[12], model[13], model[14]);
     glUniformMatrix4fv(p->u_model, 1, GL_FALSE, model);
     material_bind(&p->mat, &p->ml, 0);
     glActiveTexture(GL_TEXTURE0);
@@ -283,6 +301,11 @@ SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
     if (!prog) { mesh_free(mesh); return NULL; }
 
     MeshLocs *p = calloc(1, sizeof *p);
+    if (!p) {
+        resources_program_release(prog);
+        mesh_free(mesh);
+        return NULL;
+    }
     p->rc = rc;
     p->mesh = mesh;
     p->prog = prog;
@@ -306,6 +329,13 @@ SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
     float size[3] = {scale, scale, scale};
     SceneNode *n = node_new("MeshInstance", "MeshInstance3D", pos, size, p,
                             NULL, mesh_node_render);
+    if (!n) {
+        if (p->tex) resources_texture_release(p->tex);
+        resources_program_release(prog);
+        mesh_free(mesh);
+        free(p);
+        return NULL;
+    }
     // Масштаб — в трансформ узла (scene.c): меш можно вращать и прицеплять.
     n->scl[0] = n->scl[1] = n->scl[2] = p->scale;
     node_update_transforms(n);

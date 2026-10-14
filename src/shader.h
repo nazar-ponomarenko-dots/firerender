@@ -9,6 +9,11 @@
 #define SHADER_H
 #include "gl_loader.h"
 #include "resources.h"   // ReshadeFn (hot-reload)
+#include <stdint.h>
+
+// Отпечаток исходника вместе с рекурсивными #include на диске. Меняется при
+// правке общего GLSL-файла, даже если основной .vs/.fs не трогали.
+uint64_t shader_source_stamp(const char *path);
 
 // Компилирует шейдер из файла; при ошибке печатает лог. Возвращает ID или 0.
 GLuint compile_shader_file(GLenum type, const char *path);

@@ -57,15 +57,14 @@ uniform float uShadowBias[4];
 uniform float uShadowOn;
 
 out vec4 FragColor;
+uniform float uFogOnly;          // 1 = вывести только туман (цвет+trans), без сцены
 
 #define FOG_MAX 96.0f         // дальше тумана нет (самый дальний каскад до 80 м)
 #define C0_HALF 8.0f          // половины боксов каскадов
 #define C1_HALF 24.0f
 #define C2_HALF 80.0f
-#define SHADOW_BOX0 4.0f
-#define SHADOW_BOX1 8.0f
-#define SHADOW_BOX2 48.0f
-#define SHADOW_LIMIT 256.0f
+// границы каскадов для god rays — uShadowBox[4] из RendererContext
+uniform float uShadowBox[4];
 
 // Плотность в точке мира: каскад по дистанции от камеры.
 // Возвращает vec2: x = базовая плотность (R), y = туман над водой (G).
@@ -99,11 +98,11 @@ float point_vis(sampler2DShadow map, float bias, vec3 suv) {
 
 float point_shadow(vec3 wp) {
     float dist = length(wp - uCamPos);
-    if (dist >= SHADOW_LIMIT) return 1.0;
+    if (dist >= uShadowBox[3]) return 1.0;
     int c;
-    if (dist < SHADOW_BOX0) c = 0;
-    else if (dist < SHADOW_BOX1) c = 1;
-    else if (dist < SHADOW_BOX2) c = 2;
+    if (dist < uShadowBox[0]) c = 0;
+    else if (dist < uShadowBox[1]) c = 1;
+    else if (dist < uShadowBox[2]) c = 2;
     else c = 3;
     vec4 sc = uShadowMatrix[c] * vec4(wp, 1.0);
     vec3 suv = sc.xyz / sc.w;
@@ -122,10 +121,18 @@ float fog_hash(vec2 p) {
 }
 
 // Высота рельефа из карты высот (в метрах) — та же формула, что в terrain.vs
+float sample_height16(vec2 uv) {
+    vec2 h = texture(uHeightmap, uv).rg;
+#ifdef FR_HEIGHT_RG8
+    return (h.r * 65280.0 + h.g * 255.0) / 65535.0;
+#else
+    return h.r;
+#endif
+}
+
 float terrain_height(vec3 p) {
     vec2 uv = clamp(p.xz / uWorldSize, 0.0, 1.0);
-    float t = texture(uHeightmap, uv).r;
-    return mix(uHeightMin, uHeightMax, t);
+    return mix(uHeightMin, uHeightMax, sample_height16(uv));
 }
 
 // Дымка над землёй (дождь): тонкий серый слой ~uHazeH на рельефе, с шумом.
@@ -232,6 +239,12 @@ void main() {
         if (trans < 0.01) break;                   // дальше не видно — хватит
     }
 
+    if (uFogOnly > 0.5) {
+        // Полупроходной режим: марш в текстуру полразмера, композит на
+        // экране отдельно (fog_comp.fs) — марш в 4 раза дешевле
+        FragColor = vec4(inscat, trans);
+        return;
+    }
     vec3 col = scene * trans + inscat;
     FragColor = vec4(col, 1.0);
 }

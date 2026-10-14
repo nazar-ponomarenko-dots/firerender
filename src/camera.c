@@ -4,8 +4,10 @@
 #include "camera.h"
 
 #include "cvars.h"
+#include "gamepad.h"
 #include "linalg.h"
 #include "movement.h"
+#include "touch.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
@@ -138,6 +140,7 @@ SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
                             float fov_deg, float znear, float zfar)
 {
     CameraParams *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
     p->world = w;
     p->cam.pos[0] = start_pos[0];
     p->cam.pos[1] = start_pos[1];
@@ -148,12 +151,15 @@ SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
     p->znear = znear;
     p->zfar = zfar;
     const float size[3] = { fov_deg, znear, zfar };   // fov, near, far — тоже "размер"
-    return node_new("Camera", "Camera3D", start_pos, size, p,
-                    camera_node_update, NULL);
+    SceneNode *node = node_new("Camera", "Camera3D", start_pos, size, p,
+                               camera_node_update, NULL);
+    if (!node) free(p);
+    return node;
 }
 
 static int s_demo = 0;          // демо-сцена: ввод выключен, камеру ведёт main.c
 static int s_input_lock = 0;    // консоль открыта: ввод игрока выключен
+static int s_frozen = 0;        // игрок мёртв: ввод и движение заморожены
 
 void camera_demo_set(int on)
 {
@@ -165,16 +171,32 @@ void camera_lock_input(int lock)
     s_input_lock = lock;
 }
 
+void camera_set_frozen(int frozen)
+{
+    s_frozen = frozen;
+}
+
 void camera_node_update(SceneNode *n, float dt)
 {
     CameraParams *p = n->params;
     // FOV — cvar (консоль: set fov 90, колесо мыши тоже пишет в cvar)
     float fov = cvar_get("fov");
     if (fov > 0.0f && fov <= 180.0f) p->fov_deg = fov;
-    if (!s_demo && !s_input_lock) {              // в демо/консоли камеру не трогаем
+    if (!s_demo && !s_input_lock && !s_frozen) {
         float mx = 0, my = 0;
-        if (!getenv("FR_NOMOUSE"))                // детерминированные тесты
-            SDL_GetRelativeMouseState(&mx, &my);  // мышь — обзор
+        if (!getenv("FR_NOMOUSE")) {
+            SDL_GetRelativeMouseState(&mx, &my);
+            float gx = 0, gy = 0;
+            gamepad_look_take(&gx, &gy);
+            mx += gx;
+            my += gy;
+#ifdef __ANDROID__
+            float tx = 0, ty = 0;
+            touch_look_take(&tx, &ty);
+            mx += tx;
+            my += ty;
+#endif
+        }
         camera_update(&p->cam, p->world, mx, my, dt);
     }
 

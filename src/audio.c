@@ -135,6 +135,7 @@ Sound *audio_load(const char *path)
         return NULL;
     }
     Sound *s = calloc(1, sizeof *s);
+    if (!s) { SDL_free(data); return NULL; }
     snprintf(s->path, sizeof s->path, "%s", path);
     s->spec = spec;
     s->data = data;

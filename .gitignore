@@ -19,3 +19,6 @@ models/
 # Номер сборки (локальный счётчик, инкрементируется каждым make)
 buildnum.txt
 src/buildnum.h
+
+# Локальные данные агента ZCode
+.zcode/

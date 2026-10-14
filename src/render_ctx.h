@@ -107,9 +107,8 @@ typedef struct RendererContext {
     float snowcover;           // снежный покров 0..1 (из fx.c, растёт под снегом)
     float world_size[2];       // размер мира (X, Z), м — UV маски снега
     float sun_glow;            // яркость солнечного диска 0..1 (гаснет в дождь)
-    // Кубомап отражений воды: флаг "центр устарел" — renderer_frame рендерит
-    // 6 граней из позиции игрока, когда игрок ушёл дальше порога (см. renderer.c)
-    int refl_cubemap_dirty;
+    // Кубомап отражений воды — СТАТИЧЕСКИЙ: грани читаются из cubemaps/ при
+    // старте, обновляются только командой cubemap_capture (см. renderer.c).
     // Вьюпорт текущего прохода: обычные проходы — окно (vw/vh), проходы
     // кубомапа — размер грани. Узлы сцены ставят его вместо vw/vh.
     int view_vp[4];
@@ -122,10 +121,12 @@ typedef struct {
     GLint u_pointpos, u_pointcolor, u_pointint, u_pointrange, u_pointcount;
     GLint u_spotpos, u_spotdir, u_spotcolor, u_spotint, u_spotrange, u_spotangle, u_spotcount;
     GLint u_ambient, u_skycolor, u_groundcolor;
+    GLint u_probe_amb, u_probe_sun, u_probe_on; // запечённый свет для динамики (per-instance)
     GLint u_fogcolor, u_fogstart, u_fogend, u_fogon;
     GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES];
     GLint u_shadowbias[SHADOW_CASCADES], u_shadowdepth[SHADOW_CASCADES];
     GLint u_shadowgrad[SHADOW_CASCADES], u_shadow_on;
+    GLint u_shadowbox;  // uShadowBox[4]: границы смешивания каскадов (м)
     GLint u_wetness;    // мокрость 0..1
     GLint u_snowcover;  // снежный покров 0..1
     GLint u_snowmask;   // маска "открыто небу" (unit 8, RG8: R=снег, G=сухо под крышей)
@@ -144,5 +145,10 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog);
 // Растительность/объекты переопределяют bias/градиент своими значениями
 // (rc->shadow_bias_veg и т.п.) ПОСЛЕ вызова.
 void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc);
+
+// Точечно включает запечённый свет для одного динамического объекта в точке
+// (x,y,z): сэмплит terrain_baked_probe() и шлёт uProbeAmb/uProbeSun/uProbeOn.
+// Если бейка нет или r_baked_light выключен — гасит uProbeOn (обычный путь).
+void scene_uniforms_probe(const SceneUniforms *su, float x, float y, float z);
 
 #endif

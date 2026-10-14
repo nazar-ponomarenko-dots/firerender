@@ -24,6 +24,8 @@
 
 #include <SDL3/SDL.h>
 
+static float hud_mobile_scale(int vw, int vh);
+
 // TTF-шрифт Inter 18pt Black (img/Inter_18pt-Black.ttf): атлас растеризуется
 // один раз при старте через stb_truetype, глифы ставятся по метрикам шрифта
 // (advance/беринг) — строки не "летят", как с фиксированной сеткой 8x8.
@@ -163,6 +165,7 @@ static void font_rasterize(HudFont *f, int cp, unsigned char *atlas,
 static void font_rasterize_all(HudFont *f, int atlas_w, int atlas_h, int pad)
 {
     unsigned char *atlas = calloc((size_t)atlas_w * atlas_h, 1);
+    if (!atlas) return;            // f->ok останется 0: растеризовать некуда
     int cx = pad, cy = pad, row_h = 0;
     for (int c = FONT_ASCII_FIRST; c <= FONT_ASCII_LAST; c++)
         font_rasterize(f, c, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);
@@ -281,6 +284,7 @@ SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
     // Шрифт/программа/буферы — общие (hud_shared_init); узел — только панель
     if (!s_shared_prog) return NULL;
     HudParams *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
     p->prog = s_shared_prog;
     p->vao = s_shared_vao;
     p->vbo = s_shared_vbo;
@@ -296,8 +300,10 @@ SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
     p->u_color  = s_shared.u_color;
     p->u_usetex = s_shared.u_usetex;
     const float size[3] = { 0, 0, 0 };
-    return node_new("DebugHUD", "CanvasItem2D", NULL, size, p,
-                    hud_node_update, hud_node_render);
+    SceneNode *node = node_new("DebugHUD", "CanvasItem2D", NULL, size, p,
+                               hud_node_update, hud_node_render);
+    if (!node) free(p);
+    return node;
 }
 
 // --- Общий рендер текста/прямоугольников (для консоли и будущего UI) ---------
@@ -314,6 +320,11 @@ float hud_text_width(const char *s)
         s += utf8_decode(s, &cp);
         w += hud_cp_width(cp);
     }
+#ifdef __ANDROID__
+    // Скейл текста уже применяется в hud_build_line, но ширина для layout тоже должна скейлиться
+    // Берём текущий viewport из g_hud если есть
+    if (g_hud && g_hud->vw) w *= hud_mobile_scale(g_hud->vw, g_hud->vh);
+#endif
     return w;
 }
 
@@ -325,6 +336,9 @@ float hud_text_width_small(const char *s)
         s += utf8_decode(s, &cp);
         w += hud_cp_width_small(cp);
     }
+#ifdef __ANDROID__
+    if (g_hud && g_hud->vw) w *= hud_mobile_scale(g_hud->vw, g_hud->vh);
+#endif
     return w;
 }
 
@@ -455,10 +469,24 @@ float hud_text_descent_big(void)
     return s_font_big.descent_px;
 }
 
+static float hud_mobile_scale(int vw, int vh)
+{
+#ifdef __ANDROID__
+    float s = fminf((float)vw / 1280.0f, (float)vh / 720.0f);
+    if (s < 1.3f) s = 1.3f;
+    if (s > 2.2f) s = 2.2f;
+    return s;
+#else
+    (void)vw; (void)vh; return 1.0f;
+#endif
+}
+
 void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
                    const float color[4])
 {
     if (!g_hud) return;
+    // Позиции панелей уже скейлятся вызывающими (app.c), глифы — в
+    // hud_build_line; здесь скейл не нужен.
     float nx0 = -1.0f + 2.0f * x / vw;
     float nx1 = -1.0f + 2.0f * (x + w) / vw;
     float ny0 =  1.0f - 2.0f * (y + h) / vh;
@@ -476,6 +504,54 @@ void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
+// Квад с RGBA-текстурой: игровые кнопки/иконки HUD (shaders/ui_tex.fs).
+// Шейдер общий с текстом (text.vs: NDC-позиции + UV), программа кешируется.
+void hud_tex_quad_draw(int vw, int vh, GLuint tex,
+                       float x, float y, float w, float h,
+                       const float color[4])
+{
+    if (!g_hud || !tex) return;
+    static GLuint prog = 0;
+    static GLint u_tex = -1, u_color = -1;
+    if (!prog) {
+        prog = resources_program("shaders/text.vs", "shaders/ui_tex.fs");
+        if (!prog) return;
+        u_tex = glGetUniformLocation(prog, "uTex");
+        u_color = glGetUniformLocation(prog, "uColor");
+    }
+    float nx0 = -1.0f + 2.0f * x / vw;
+    float nx1 = -1.0f + 2.0f * (x + w) / vw;
+    float ny0 =  1.0f - 2.0f * (y + h) / vh;
+    float ny1 =  1.0f - 2.0f * y / vh;
+    float q[6][4] = {
+        {nx0, ny0, 0, 1}, {nx1, ny0, 1, 1}, {nx0, ny1, 0, 0},
+        {nx0, ny1, 0, 0}, {nx1, ny0, 1, 1}, {nx1, ny1, 1, 0},
+    };
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(u_tex, 0);
+    glUniform4f(u_color, color[0], color[1], color[2], color[3]);
+    glBindVertexArray(g_hud->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_hud->vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
+void hud_button_draw(int vw, int vh, const char *img_path,
+                     float x, float y, float w, float h,
+                     const float tint[4])
+{
+    // Кеш + счётчик ссылок в resources; отсутствующий файл автоматически
+    // подменяется img/notfound.png (лог: "not found -> using notfound").
+    GLuint tex = resources_texture(img_path, 4, GL_CLAMP_TO_EDGE, 1);
+    if (!tex) {
+        hud_rect_draw(vw, vh, x, y, w, h, tint);   // даже notfound.png нет
+        return;
+    }
+    hud_tex_quad_draw(vw, vh, tex, x, y, w, h, tint);
+}
+
 // Добавляет глифы строки в буфер vb (позиции NDC + uv атласа).
 // y_base — БАЗОВАЯ ЛИНИЯ строки (от верха окна, в пикселях). Каждый глиф
 // ставится по своим метрикам (advance/беринг) — буквы не прыгают.
@@ -485,18 +561,21 @@ static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
                            float x_px, float y_base, const char *s)
 {
     float vw = p->vw, vh = p->vh;
+    float sc = hud_mobile_scale((int)vw, (int)vh);
     while (*s && *nv < HUD_MAX_GLYPHS - 6) {
         int cp = 0;
         int l = utf8_decode(s, &cp);
         int slot = font_slot(cp);
         if (slot < 0) slot = font_slot('?');
         const HudGlyph *g = &f->glyphs[slot];
-        float gx = x_px + g->xoff;                 // верхний левый угол глифа
-        float gy = y_base + g->yoff;
+        float gx = x_px + g->xoff * sc;
+        float gy = y_base + g->yoff * sc;
+        float gw = g->w * sc, gh = g->h * sc;
+        float adv = g->advance * sc;
         float nx0 = -1.0f + 2.0f * gx / vw;
-        float nx1 = -1.0f + 2.0f * (gx + g->w) / vw;
-        float ny0 =  1.0f - 2.0f * gy / vh;                    // верх (v0)
-        float ny1 =  1.0f - 2.0f * (gy + g->h) / vh;           // низ  (v1)
+        float nx1 = -1.0f + 2.0f * (gx + gw) / vw;
+        float ny0 =  1.0f - 2.0f * gy / vh;
+        float ny1 =  1.0f - 2.0f * (gy + gh) / vh;
         // CCW (как панель): TL-BL-BR, TL-BR-TR — иначе backface-cull
         // съедает глифы (в сцене GL_CULL_FACE включён).
         float quad[6][4] = {
@@ -507,7 +586,7 @@ static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
         };
         memcpy(vb + *nv * 4, quad, sizeof quad);
         *nv += 6;
-        x_px += g->advance;
+        x_px += adv;
         s += l;
     }
 }

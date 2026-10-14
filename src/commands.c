@@ -28,6 +28,7 @@
 #include "mesh.h"
 #include "png.h"
 #include "renderer.h"
+#include "resources.h"
 #include "selection.h"
 #include "shader.h"
 #include "splat.h"
@@ -123,13 +124,71 @@ void cmd_pause(const char *args)
 // Выбор карты: map <имя> — "map" (папка) или имя из maps/*.zip.
 // Если мир загружен — перезапускает игру на новой карте прямо сейчас.
 static int s_map_switching = 0;   // рекурсия: скрипт/команда грузит карту внутри game_load_world
+static int map_reload(Game *g, const char *name, int force)
+{
+    if (!g || !name || g->world_loading || s_map_switching) {
+        console_print("map: вложенный вызов игнорируется (карта уже грузится)");
+        return -1;
+    }
+    char target_name[sizeof g->map_name];
+    char old_name[sizeof g->map_name];
+    snprintf(target_name, sizeof target_name, "%s", name);
+    snprintf(old_name, sizeof old_name, "%s", g->map_name);
+    if (!force && g->world_loaded && strcmp(target_name, old_name) == 0) {
+        console_print("map \"%s\" уже загружена", target_name);
+        return 0;
+    }
+    // Проверяем пакет до разрушения текущего мира. Полноценная загрузка всё ещё
+    // может упасть позднее, но простая опечатка больше не выбрасывает игрока.
+    if (strcmp(target_name, "map") != 0) {
+        char path[160], resolved[512];
+        snprintf(path, sizeof path, "maps/%s.zip", target_name);
+        if (!resources_resolve_path(path, resolved, sizeof resolved)) {
+            console_print("map: нет %s", path);
+            return -1;
+        }
+    }
+    snprintf(g->map_name, sizeof g->map_name, "%s", target_name);
+    if (!g->world_loaded) {
+        SDL_Log("Map selected: %s (загрузится при НОВОЙ ИГРЕ)", g->map_name);
+        return 0;
+    }
+    s_map_switching = 1;
+    game_unload_world(g);
+    int rc = game_load_world(g);
+    if (rc != 0) {
+        SDL_Log("Map %s load failed; restoring %s", target_name, old_name);
+        if (g->world_loaded) game_unload_world(g);
+        snprintf(g->map_name, sizeof g->map_name, "%s", old_name);
+        int rollback_rc = game_load_world(g);
+        s_map_switching = 0;
+        if (rollback_rc == 0) {
+            app_set_state(APP_PLAY);
+            console_print("map: загрузка %s не удалась, восстановлена %s",
+                          target_name, old_name);
+        } else {
+            SDL_Log("Map rollback %s failed", old_name);
+            app_set_state(APP_MENU);
+        }
+        return -1;
+    }
+    s_map_switching = 0;
+    game_demo_stop(g);
+    bool was_load = g->player.pending_spawn != 0;
+    if (g->player.pending_spawn) {
+        game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
+                         g->player.save_pitch);
+        g->player.pending_spawn = 0;
+    }
+    if (was_load) commands_apply_saved_world_state();
+    app_set_state(APP_PLAY);
+    SDL_Log("Map loaded: %s", g->map_name);
+    return 0;
+}
+
 void cmd_map_select(const char *args)
 {
     Game *g = game_instance();
-    if (s_map_switching) {
-        console_print("map: вложенный вызов игнорируется (карта уже грузится)");
-        return;
-    }
     char name[64];
     if (sscanf(args, "%63s", name) != 1 || !name[0]) {
         console_print("current map: %s", g->map_name);
@@ -137,39 +196,7 @@ void cmd_map_select(const char *args)
         console_print("maps — список карт");
         return;
     }
-    if (g->world_loaded && strcmp(name, g->map_name) == 0) {
-        console_print("map \"%s\" уже загружена", name);
-        return;
-    }
-    snprintf(g->map_name, sizeof g->map_name, "%s", name);
-    if (g->world_loaded) {
-        // Перезагрузка мира на новой карте: выгрузить -> загрузить -> в игру.
-        // Флаг рекурсии: game_load_world -> map_apply/скрипт карты может сам
-        // выполнить "map X" — вложенный cmd_map_select мы отбрасываем, иначе
-        // мир выгрузится внутри собственной загрузки (UAF/double free сцены).
-        s_map_switching = 1;
-        game_unload_world(g);
-        int rc = game_load_world(g);
-        s_map_switching = 0;
-        if (rc != 0) {
-            SDL_Log("Map %s load failed", g->map_name);
-            snprintf(g->map_name, sizeof g->map_name, "map1");
-            app_set_state(APP_MENU);
-            return;
-        }
-        game_demo_stop(g);
-        bool was_load = g->player.pending_spawn != 0;
-        if (g->player.pending_spawn) { // load: телепорт в сохранённую точку
-            game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
-                             g->player.save_pitch);
-            g->player.pending_spawn = 0;
-        }
-        if (was_load) commands_apply_saved_world_state(); // восстановить мир при load
-        app_set_state(APP_PLAY);
-        SDL_Log("Map loaded: %s", g->map_name);
-    } else {
-        SDL_Log("Map selected: %s (загрузится при НОВОЙ ИГРЕ)", g->map_name);
-    }
+    map_reload(g, name, 0);
 }
 
 // Список доступных карт (команда maps)
@@ -184,7 +211,8 @@ void cmd_maps_list(const char *args)
 void cmd_restart(const char *args)
 {
     (void)args;
-    cmd_map_select(game_instance()->map_name);   // перезапустить текущую карту
+    Game *g = game_instance();
+    map_reload(g, g->map_name, 1);
 }
 
 void cmd_changelevel(const char *args)
@@ -299,7 +327,7 @@ static void take_shot_png(const char *path, int vw, int vh)
 {
     unsigned char *px = malloc((size_t)vw * vh * 3);
     if (!px) return;
-    glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px);
+    renderer_read_pixels(px, vw, vh);
     // Строки GL идут снизу вверх — переворачиваем для PNG
     size_t row = (size_t)vw * 3;
     unsigned char *flip = malloc(row * (size_t)vh);
@@ -1111,4 +1139,90 @@ void cmd_matlist(const char *args)
                 m->tint[0], m->tint[1], m->tint[2], m->alpha, m->blend,
                 m->tile[0], m->tile[1]);
     }
+}
+
+// --- Здоровье (HP) -------------------------------------------------------------
+void cmd_hp(const char *args)
+{
+    (void)args;
+    Game *g = game_instance();
+    if (!g) return;
+    const Health *h = &g->player.hp;
+    console_print("HP %.0f/%.0f  реген %.0f/с  god %s%s",
+                  h->hp, h->max, h->regen, h->god ? "ON" : "OFF",
+                  h->dead ? "  [МЁРТВ]" : "");
+}
+
+void cmd_hurt(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    float amt = 25.0f;
+    if (args && args[0]) sscanf(args, "%f", &amt);
+    float took = health_damage(&g->player.hp, amt);
+    console_print("hurt %.0f -> HP %.0f", took, g->player.hp.hp);
+}
+
+void cmd_heal(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    float amt = g->player.hp.max;   // без аргумента — до полного
+    if (args && args[0]) sscanf(args, "%f", &amt);
+    health_heal(&g->player.hp, amt);
+    console_print("heal -> HP %.0f", g->player.hp.hp);
+}
+
+void cmd_god(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    if (cvar_get("sv_cheats") < 0.5f) {
+        console_print("god: требуется sv_cheats 1");
+        return;
+    }
+    int on = -1;
+    if (args && args[0]) { int v; if (sscanf(args, "%d", &v) == 1) on = v ? 1 : 0; }
+    g->player.hp.god = (on < 0) ? !g->player.hp.god : on;
+    console_print("god: %s", g->player.hp.god ? "ON" : "OFF");
+}
+
+void cmd_kill(const char *args)
+{
+    (void)args;
+    Game *g = game_instance();
+    if (!g) return;
+    health_kill(&g->player.hp);
+}
+
+void cmd_sethp(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    if (cvar_get("sv_cheats") < 0.5f) {
+        console_print("sethp: требуется sv_cheats 1");
+        return;
+    }
+    float v = 0;
+    if (!args || sscanf(args, "%f", &v) != 1) {
+        console_print("usage: sethp <значение>");
+        return;
+    }
+    Health *h = &g->player.hp;
+    if (h->dead && v > 0.0f) health_revive(h);
+    h->hp = v < 0.0f ? 0.0f : (v > h->max ? h->max : v);
+    console_print("HP = %.0f", h->hp);
+}
+
+void cmd_maxhp(const char *args)
+{
+    Game *g = game_instance();
+    if (!g) return;
+    float v = 0;
+    if (!args || sscanf(args, "%f", &v) != 1 || v <= 0.0f) {
+        console_print("usage: maxhp <значение>");
+        return;
+    }
+    health_set_max(&g->player.hp, v, 1);
+    console_print("max HP = %.0f (долит до полного)", g->player.hp.max);
 }

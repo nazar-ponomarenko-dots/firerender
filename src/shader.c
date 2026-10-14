@@ -11,17 +11,64 @@
 #include "resources.h"
 
 #include <SDL3/SDL.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static uint64_t stamp_mix(uint64_t h, uint64_t v)
+{
+    h ^= v;
+    return h * UINT64_C(1099511628211);
+}
+
+static uint64_t shader_stamp_recursive(const char *path, int depth)
+{
+    char *text = resources_read_text(path);
+    if (!text) return 0;
+    uint64_t h = UINT64_C(1469598103934665603);
+    for (const unsigned char *s = (const unsigned char *)text; *s; s++)
+        h = stamp_mix(h, *s);
+    if (depth >= 8) { free(text); return h; }
+    char dir[512] = "";
+    const char *slash = strrchr(path, '/');
+    if (slash) {
+        size_t n = (size_t)(slash - path) + 1;
+        if (n >= sizeof dir) n = sizeof dir - 1;
+        memcpy(dir, path, n);
+        dir[n] = 0;
+    }
+    for (const char *p = text; *p;) {
+        const char *eol = strchr(p, '\n');
+        size_t n = eol ? (size_t)(eol - p) : strlen(p);
+        char line[1024], inc[256];
+        size_t copy = n < sizeof line - 1 ? n : sizeof line - 1;
+        memcpy(line, p, copy);
+        line[copy] = 0;
+        if (!strncmp(line, "#include ", 9) &&
+            sscanf(line, "#include \"%255[^\"]\"", inc) == 1) {
+            char child[512];
+            snprintf(child, sizeof child, "%s%s", dir, inc);
+            h = stamp_mix(h, shader_stamp_recursive(child, depth + 1));
+        }
+        p = eol ? eol + 1 : p + n;
+    }
+    free(text);
+    return h;
+}
+
+uint64_t shader_source_stamp(const char *path)
+{
+    return path ? shader_stamp_recursive(path, 0) : 0;
+}
 
 // Префикс GLSL для текущей платформы
 static const char *shader_version(GLenum type)
 {
 #ifdef USE_GLES_PATH
-    if (type == GL_FRAGMENT_SHADER)
-        return "#version 300 es\nprecision highp float;\n";  // GLES: точность обязательна
-    return "#version 300 es\n";
+    if (type == GL_COMPUTE_SHADER)
+        return "#version 310 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
+    return "#version 300 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
 #else
     if (type == GL_COMPUTE_SHADER)
         return "#version 430 core\n";   // compute-шейдеры требуют GLSL 4.30+
@@ -32,15 +79,26 @@ static const char *shader_version(GLenum type)
 // Разворачивает #include "файл" — рекурсивно подставляет содержимое
 // (глубина до 8, циклы не проверяются). Пути — относительно директории
 // шейдера. Так вся сцена делит общий код (shaders/snow.glsl, csm.glsl).
-static void buf_grow(char **buf, size_t *len, size_t *cap, const char *s)
+static int buf_grow(char **buf, size_t *len, size_t *cap, const char *s)
 {
     size_t sl = strlen(s);
-    while (*len + sl + 1 > *cap)
-        *cap = *cap ? *cap * 2 : 4096;
-    *buf = realloc(*buf, *cap);
+    if (sl > SIZE_MAX - *len - 1) return 0;
+    size_t need = *len + sl + 1;
+    size_t next = *cap;
+    while (need > next) {
+        if (next > SIZE_MAX / 2) { next = need; break; }
+        next = next ? next * 2 : 4096;
+    }
+    if (next != *cap) {
+        char *p = realloc(*buf, next);
+        if (!p) return 0;
+        *buf = p;
+        *cap = next;
+    }
     memcpy(*buf + *len, s, sl);
     *len += sl;
     (*buf)[*len] = 0;
+    return 1;
 }
 
 static char *shader_expand_includes(const char *text, const char *dir, int depth)
@@ -56,7 +114,7 @@ static char *shader_expand_includes(const char *text, const char *dir, int depth
         memcpy(line, p, cl);
         line[cl] = 0;
         char inc[256];
-        buf_grow(&out, &len, &cap, "");   // гарантированная строка
+        if (!buf_grow(&out, &len, &cap, "")) goto oom;
         if (depth < 8 && !strncmp(line, "#include ", 9) &&
             sscanf(line, "#include \"%255[^\"]\"", inc) == 1) {
             char path[512];
@@ -64,20 +122,26 @@ static char *shader_expand_includes(const char *text, const char *dir, int depth
             char *body = resources_read_text(path);
             if (body) {
                 char *exp = shader_expand_includes(body, dir, depth + 1);
-                buf_grow(&out, &len, &cap, exp);
-                free(exp);
                 free(body);
+                if (!exp || !buf_grow(&out, &len, &cap, exp)) {
+                    free(exp);
+                    goto oom;
+                }
+                free(exp);
             } else {
                 // файла нет — оставляем как есть (ошибка будет в GLSL-логе)
-                buf_grow(&out, &len, &cap, line);
+                if (!buf_grow(&out, &len, &cap, line)) goto oom;
             }
         } else {
-            buf_grow(&out, &len, &cap, line);
+            if (!buf_grow(&out, &len, &cap, line)) goto oom;
         }
-        buf_grow(&out, &len, &cap, "\n");
+        if (!buf_grow(&out, &len, &cap, "\n")) goto oom;
         p = eol ? eol + 1 : p + ll;
     }
     return out;
+oom:
+    free(out);
+    return NULL;
 }
 
 GLuint compile_shader_file(GLenum type, const char *path)
@@ -98,10 +162,17 @@ GLuint compile_shader_file(GLenum type, const char *path)
     }
     char *expanded = shader_expand_includes(body, dir, 0);
     free(body);
+    if (!expanded) {
+        SDL_Log("Shader include expansion OOM: %s", path);
+        return 0;
+    }
     body = expanded;
     const char *version = shader_version(type);
-    size_t n = strlen(version) + strlen(body) + 1;
+    size_t vn = strlen(version), bn = strlen(body);
+    if (bn > SIZE_MAX - vn - 1) { free(body); return 0; }
+    size_t n = vn + bn + 1;
     char *buf = malloc(n);
+    if (!buf) { free(body); return 0; }
     snprintf(buf, n, "%s%s", version, body);
     free(body);
     const char *src = buf;

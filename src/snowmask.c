@@ -53,12 +53,18 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
             float ax = tri[9 * t + 0], az = tri[9 * t + 2];
             float bx = tri[9 * t + 3], bz = tri[9 * t + 5];
             float cx = tri[9 * t + 6], cz = tri[9 * t + 8];
-            if (ax < xmin) xmin = ax; if (ax > xmax) xmax = ax;
-            if (bx < xmin) xmin = bx; if (bx > xmax) xmax = bx;
-            if (cx < xmin) xmin = cx; if (cx > xmax) xmax = cx;
-            if (az < zmin) zmin = az; if (az > zmax) zmax = az;
-            if (bz < zmin) zmin = bz; if (bz > zmax) zmax = bz;
-            if (cz < zmin) zmin = cz; if (cz > zmax) zmax = cz;
+            if (ax < xmin) xmin = ax;
+            if (ax > xmax) xmax = ax;
+            if (bx < xmin) xmin = bx;
+            if (bx > xmax) xmax = bx;
+            if (cx < xmin) xmin = cx;
+            if (cx > xmax) xmax = cx;
+            if (az < zmin) zmin = az;
+            if (az > zmax) zmax = az;
+            if (bz < zmin) zmin = bz;
+            if (bz > zmax) zmax = bz;
+            if (cz < zmin) zmin = cz;
+            if (cz > zmax) zmax = cz;
             t++;
         }
     }
@@ -81,10 +87,14 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
         float mnz = fminf(az, fminf(bz, cz)), mxz = fmaxf(az, fmaxf(bz, cz));
         int i0 = (int)((mnx - xmin) / cs), i1 = (int)((mxx - xmin) / cs);
         int j0 = (int)((mnz - zmin) / cs), j1 = (int)((mxz - zmin) / cs);
-        if (i0 < 0) i0 = 0; if (i0 >= nx) i0 = nx - 1;
-        if (i1 < 0) i1 = 0; if (i1 >= nx) i1 = nx - 1;
-        if (j0 < 0) j0 = 0; if (j0 >= nz) j0 = nz - 1;
-        if (j1 < 0) j1 = 0; if (j1 >= nz) j1 = nz - 1;
+        if (i0 < 0) i0 = 0;
+        if (i0 >= nx) i0 = nx - 1;
+        if (i1 < 0) i1 = 0;
+        if (i1 >= nx) i1 = nx - 1;
+        if (j0 < 0) j0 = 0;
+        if (j0 >= nz) j0 = nz - 1;
+        if (j1 < 0) j1 = 0;
+        if (j1 >= nz) j1 = nz - 1;
         for (int j = j0; j <= j1; j++)
             for (int i = i0; i <= i1; i++)
                 cnt[(size_t)j * nx + i]++;
@@ -102,10 +112,14 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
         float mnz = fminf(az, fminf(bz, cz)), mxz = fmaxf(az, fmaxf(bz, cz));
         int i0 = (int)((mnx - xmin) / cs), i1 = (int)((mxx - xmin) / cs);
         int j0 = (int)((mnz - zmin) / cs), j1 = (int)((mxz - zmin) / cs);
-        if (i0 < 0) i0 = 0; if (i0 >= nx) i0 = nx - 1;
-        if (i1 < 0) i1 = 0; if (i1 >= nx) i1 = nx - 1;
-        if (j0 < 0) j0 = 0; if (j0 >= nz) j0 = nz - 1;
-        if (j1 < 0) j1 = 0; if (j1 >= nz) j1 = nz - 1;
+        if (i0 < 0) i0 = 0;
+        if (i0 >= nx) i0 = nx - 1;
+        if (i1 < 0) i1 = 0;
+        if (i1 >= nx) i1 = nx - 1;
+        if (j0 < 0) j0 = 0;
+        if (j0 >= nz) j0 = nz - 1;
+        if (j1 < 0) j1 = 0;
+        if (j1 >= nz) j1 = nz - 1;
         for (int j = j0; j <= j1; j++)
             for (int i = i0; i <= i1; i++)
                 lst[cur[(size_t)j * nx + i]++] = (size_t)k;
@@ -120,8 +134,10 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
             float x = v[3 * i + 0], y = v[3 * i + 1], z = v[3 * i + 2];
             int ix = (int)((x - xmin) / cs);
             int iz = (int)((z - zmin) / cs);
-            if (ix < 0) ix = 0; if (ix >= nx) ix = nx - 1;
-            if (iz < 0) iz = 0; if (iz >= nz) iz = nz - 1;
+            if (ix < 0) ix = 0;
+            if (ix >= nx) ix = nx - 1;
+            if (iz < 0) iz = 0;
+            if (iz >= nz) iz = nz - 1;
             size_t cell = (size_t)iz * nx + ix;
             int open = 1;
             for (size_t e = off[cell]; e < off[cell + 1]; e++) {

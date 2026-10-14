@@ -27,6 +27,12 @@ SceneNode *field_make_node(const WorldState *w, const float *center,
     glBindVertexArray(0);
 
     FieldParams *p = calloc(1, sizeof *p);
+    if (!p) {
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+        resources_program_release(prog);
+        return NULL;
+    }
     p->prog = prog;
     p->vao = vao;
     p->vbo = vbo;
@@ -34,8 +40,15 @@ SceneNode *field_make_node(const WorldState *w, const float *center,
     p->rc = rc;
     p->u_viewproj = glGetUniformLocation(prog, "uViewProj");
     p->u_color    = glGetUniformLocation(prog, "uColor");
-    return node_new("FieldArea", "FieldArea3D", center, size, p,
-                    NULL, field_node_render);
+    SceneNode *node = node_new("FieldArea", "FieldArea3D", center, size, p,
+                               NULL, field_node_render);
+    if (!node) {
+        glDeleteBuffers(1, &p->vbo);
+        glDeleteVertexArrays(1, &p->vao);
+        resources_program_release(p->prog);
+        free(p);
+    }
+    return node;
 }
 
 void field_node_render(SceneNode *n, float dt)

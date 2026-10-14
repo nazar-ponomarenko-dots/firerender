@@ -36,6 +36,7 @@ typedef struct {
     MinimapParams *mm;         // параметры узла Minimap
     HudParams *hud;            // параметры узла DebugHUD
     int world_loaded;
+    int world_loading;          // транзакция load: запрещает map/restart из map config/Lua
 
     // Текущая карта: maps/<имя>.zip (единственный формат — карта-пак)
     char map_name[64];

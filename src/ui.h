@@ -71,6 +71,8 @@ void ui_focus_first(Ui *u);
 
 // Начинает колонку виджетов в (x, y), ширина w.
 void ui_col(Ui *u, float x, float y, float w);
+float ui_layout_scale(Ui *u);
+float ui_layout_item_h(Ui *u);
 
 // --- Виджеты (возвращают true при активации/изменении) ------------------------
 bool ui_button(Ui *u, const char *label);

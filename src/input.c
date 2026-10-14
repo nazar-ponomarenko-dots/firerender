@@ -8,10 +8,13 @@
 #include "input.h"
 
 #include "app.h"
+#include "actions.h"
 #include "binds.h"
 #include "console.h"
+#include "gamepad.h"
 #include "gl_loader.h"
 #include "renderer.h"
+#include "touch.h"
 #include "world.h"
 
 #include <SDL3/SDL.h>
@@ -21,6 +24,17 @@ static Game *s_game = NULL;     // состояние мира (для реса�
 static int s_ui_mode = -1;      // текущий режим мыши
 static int s_text_input = -1;   // текущее состояние text input
 static int s_quit = 0;          // SDL_EVENT_QUIT получен
+static int s_background = 0;
+static int s_resumed = 0;
+
+static void input_release_all(void)
+{
+    action_clear_source(ACTION_SRC_BIND);
+    action_clear_source(ACTION_SRC_TOUCH);
+    action_clear_source(ACTION_SRC_GAMEPAD);
+    gamepad_reset();
+    touch_set_ui_mode(1);
+}
 
 void input_init(SDL_Window *win, Game *g)
 {
@@ -35,12 +49,26 @@ int input_quit(void)
     return s_quit;
 }
 
+int input_background(void)
+{
+    return s_background;
+}
+
+int input_take_resumed(void)
+{
+    int resumed = s_resumed;
+    s_resumed = 0;
+    return resumed;
+}
+
 // --- Синк режима ввода ---------------------------------------------------------
 void input_sync_mode(void)
 {
     bool ui_mode = (app_state() != APP_PLAY) || console_active();
     if (ui_mode != s_ui_mode) {
         s_ui_mode = ui_mode;
+        touch_set_ui_mode(ui_mode);
+        gamepad_reset();
         if (s_win) SDL_SetWindowRelativeMouseMode(s_win, !ui_mode);
         if (ui_mode) {
             SDL_ShowCursor();
@@ -69,7 +97,21 @@ void input_process(void)
 {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
-        if (ev.type == SDL_EVENT_QUIT) s_quit = 1;
+        if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_TERMINATING)
+            s_quit = 1;
+        if (ev.type == SDL_EVENT_WINDOW_FOCUS_LOST) input_release_all();
+        if (ev.type == SDL_EVENT_WILL_ENTER_BACKGROUND ||
+            ev.type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+            s_background = 1;
+            input_release_all();
+        }
+        if (ev.type == SDL_EVENT_WILL_ENTER_FOREGROUND ||
+            ev.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+            s_background = 0;
+            s_resumed = 1;
+            s_ui_mode = -1;
+            s_text_input = -1;
+        }
         if (ev.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
             s_ui_mode = -1;
             s_text_input = -1;
@@ -91,6 +133,13 @@ void input_process(void)
         }
         if (console_active()) continue;
 
+        if (gamepad_event(&ev)) continue;
+#ifdef __ANDROID__
+        if (s_game->world_loaded && app_state() == APP_PLAY) {
+            if (touch_event(&ev)) continue;
+        }
+#endif
+
         // Бинды (Half-Life): клавиша -> команда. KEYDOWN выполняет
         // команду (или комбинацию "cmd1; cmd2"), KEYUP снимает "+действия".
         // Запись биндов из меню "Клавиши" перехватывает клавиши первой.
@@ -106,14 +155,17 @@ void input_process(void)
             binds_wheel(ev.wheel.y > 0);
         }
 
-        // ESC: пауза (в игре), назад (в меню) — обрабатывается в app
+        // ESC / Android Back (жест назад): пауза/назад — в app
         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat &&
-            ev.key.key == SDLK_ESCAPE) {
+            (ev.key.key == SDLK_ESCAPE || ev.key.key == SDLK_AC_BACK)) {
             app_escape();
             continue;
         }
 
-        // Прочие клавиши — только во время игры (в меню ими управляет UI)
         if (!s_game->world_loaded || app_state() != APP_PLAY) continue;
     }
+#ifdef __ANDROID__
+    touch_frame();
+#endif
+    gamepad_frame();
 }

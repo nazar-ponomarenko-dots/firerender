@@ -11,8 +11,11 @@
 #include "audio.h"
 #include "hud.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <SDL3/SDL.h>
+
+float ui_layout_scale(Ui *u);
 #include <stdio.h>
 
 // Звук клика по элементу меню (audio/click.wav — движковый или из карты).
@@ -60,6 +63,8 @@ static float ui_baseline(Ui *u, float y, float h)
 {
     float asc = u->big ? hud_text_ascent() : hud_text_ascent_small();
     float desc = u->big ? hud_text_descent() : hud_text_descent_small();
+    float sc = ui_layout_scale(u);
+    asc *= sc; desc *= sc;
     return y + h * 0.5f - (desc - asc) * 0.5f;
 }
 
@@ -216,12 +221,11 @@ void ui_focus_first(Ui *u)
 }
 
 // Слот бинда: действие слева, [клавиша] справа (экран "Клавиши")
-static float ui_item_h(Ui *u);
 
 bool ui_key_slot(Ui *u, const char *action, const char *key)
 {
     int id = ++u->id;
-    float ih = ui_item_h(u);
+    float ih = ui_layout_item_h(u);
     int hover = ui_hit(u, id, u->cx, u->cy, u->col_w, ih);
     bool act = ui_activated(u, id, hover);
 
@@ -245,9 +249,20 @@ void ui_col(Ui *u, float x, float y, float w)
     u->col_w = w;
 }
 
-static float ui_item_h(Ui *u)
+float ui_layout_scale(Ui *u)
 {
-    return u->font_h + 10.0f;
+#ifdef __ANDROID__
+    float s = fminf((float)u->vw / 1280.0f, (float)u->vh / 720.0f);
+    if (s < 1.3f) s = 1.3f;
+    if (s > 2.2f) s = 2.2f;
+    return s;
+#else
+    (void)u; return 1.0f;
+#endif
+}
+float ui_layout_item_h(Ui *u)
+{
+    return (u->font_h + 10.0f) * ui_layout_scale(u);
 }
 
 // Кнопка в колонке: текст по центру строки, при фокусе/наведении — жёлтый.
@@ -255,7 +270,7 @@ static float ui_item_h(Ui *u)
 bool ui_button(Ui *u, const char *label)
 {
     int id = ++u->id;
-    float ih = ui_item_h(u);
+    float ih = ui_layout_item_h(u);
     int hover = ui_hit(u, id, u->cx, u->cy, u->col_w, ih);
     bool act = ui_activated(u, id, hover);
 
@@ -276,7 +291,7 @@ bool ui_button(Ui *u, const char *label)
 bool ui_checkbox(Ui *u, const char *label, int *value)
 {
     int id = ++u->id;
-    float ih = ui_item_h(u);
+    float ih = ui_layout_item_h(u);
     int hover = ui_hit(u, id, u->cx, u->cy, u->col_w, ih);
     bool changed = false;
     if (ui_activated(u, id, hover)) {
@@ -298,8 +313,7 @@ bool ui_slider(Ui *u, const char *label, float *value,
                float min, float max, const char *fmt)
 {
     int id = ++u->id;
-    float ih = ui_item_h(u) + 8.0f;
-    int hover = ui_hit(u, id, u->cx, u->cy, u->col_w, ih);
+    float ih = ui_layout_item_h(u) + 8.0f;
     bool changed = false;
 
     // Трек: сразу после label, до зоны значения. Бегунок всегда идёт

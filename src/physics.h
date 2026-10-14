@@ -55,6 +55,10 @@ void physics_set_ground(float (*fn)(float x, float z));
 // Шаг симуляции (вызывать с фиксированным dt, 1/100 с — как логика игры).
 void physics_step(PhysWorld *w, float dt);
 
+// Только релаксация связей (без интеграции): внешние ограничения (лимиты
+// суставов) сдвинули частицы — связи дожимаются, чередуясь с ними.
+void physics_relax(PhysWorld *w, int iterations);
+
 // Частицы и связи. Возвращает индекс (-1 при переполнении).
 int physics_add_part(PhysWorld *w, const float pos[3], float inv_mass,
                      float radius);

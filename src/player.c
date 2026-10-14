@@ -12,6 +12,7 @@ void player_init(Player *p)
     memset(p, 0, sizeof *p);
     p->spawn_yaw = 3.14159f;
     p->spawn_pitch = -0.5f;
+    health_init(&p->hp, 0.0f);   // 0 -> дефолтный максимум (100)
 }
 
 void player_set_spawn(Player *p, const float pos[3], float yaw, float pitch)

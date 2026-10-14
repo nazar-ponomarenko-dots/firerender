@@ -35,6 +35,10 @@ SceneNode *node_new(const char *name, const char *type,
                     void *params, NodeFn update, NodeFn render)
 {
     SceneNode *n = calloc(1, sizeof *n);
+    if (!n) {
+        SDL_Log("scene: cannot allocate node %s", name ? name : "<unnamed>");
+        return NULL;
+    }
     n->name = name;
     n->type = type;
     if (pos)  memcpy(n->pos, pos, sizeof n->pos);

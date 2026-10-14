@@ -13,6 +13,7 @@
 SceneNode *sun_make_node(void)
 {
     SunParams *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
     // По умолчанию: солнце на высоте ~39° (тени длинные), азимут чуть
     // восточнее юга. normalize(0.25, 0.6, 0.7). Если в map/map.json задан
     // направленный свет (lights[]) — берём направление/цвет/силу оттуда.
@@ -54,8 +55,10 @@ SceneNode *sun_make_node(void)
     SDL_Log("Lights total: %d (directional)", p->light_count);
     const float pos[3] = { 0, 100, 0 };        // высоко над миром
     const float size[3] = { 1, 1, 1 };
-    return node_new("Sun", "DirectionalLight3D", pos, size, p,
-                    sun_node_update, NULL);
+    SceneNode *node = node_new("Sun", "DirectionalLight3D", pos, size, p,
+                               sun_node_update, NULL);
+    if (!node) free(p);
+    return node;
 }
 
 void sun_node_update(SceneNode *n, float dt)

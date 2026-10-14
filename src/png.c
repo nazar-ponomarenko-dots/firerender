@@ -9,6 +9,7 @@
 #include "miniz.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,7 +49,9 @@ int png_save(const char *path, int w, int h, const unsigned char *rgb)
     if (!f) return -1;
 
     // Сырые scanline'ы: каждая строка — байт фильтра (0) + RGB пиксели
+    if ((size_t)w > (SIZE_MAX - 1) / 3) { fclose(f); return -1; }
     size_t row_bytes = (size_t)w * 3;
+    if ((size_t)h > SIZE_MAX / (row_bytes + 1)) { fclose(f); return -1; }
     size_t raw_len = (row_bytes + 1) * (size_t)h;
     unsigned char *raw = malloc(raw_len);
     if (!raw) { fclose(f); return -1; }

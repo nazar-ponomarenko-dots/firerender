@@ -78,6 +78,15 @@ void cmd_attach(const char *args);
 void cmd_sprite(const char *args);
 void cmd_matlist(const char *args);
 
+// Здоровье (HP): статус, урон/лечение, бессмертие, смерть, лимиты
+void cmd_hp(const char *args);
+void cmd_hurt(const char *args);
+void cmd_heal(const char *args);
+void cmd_god(const char *args);
+void cmd_kill(const char *args);
+void cmd_sethp(const char *args);
+void cmd_maxhp(const char *args);
+
 // Эффекты (fx) — частицы на точке попадения луча взгляда в рельеф
 void cmd_fx_sparks(const char *args);
 void cmd_fx_smoke(const char *args);

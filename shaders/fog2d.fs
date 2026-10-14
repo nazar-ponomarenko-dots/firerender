@@ -39,6 +39,7 @@ uniform vec4 uFogP;              // x: ρ0 (плотность у земли, 1/
                                  // спада, м), z: множитель силы, w: дальность, м
 
 out vec4 FragColor;
+uniform float uFogOnly;          // 1 = вывести только туман (цвет+trans)
 
 float linz(float ndc_z) {
     return (2.0 * uZ.x * uZ.y) / (uZ.y + uZ.x - ndc_z * (uZ.y - uZ.x));
@@ -50,9 +51,18 @@ vec3 wpos(vec2 uv, float depth) {
     return wp.xyz / wp.w;
 }
 
+float sample_height16(vec2 uv) {
+    vec2 h = texture(uHeightmap, uv).rg;
+#ifdef FR_HEIGHT_RG8
+    return (h.r * 65280.0 + h.g * 255.0) / 65535.0;
+#else
+    return h.r;
+#endif
+}
+
 // Высота рельефа в мировой точке (та же формула, что в volumetric.fs)
 float terrain_h(vec2 xz) {
-    return mix(uHeightMin, uHeightMax, texture(uHeightmap, xz / uWorldSize).r);
+    return mix(uHeightMin, uHeightMax, sample_height16(xz / uWorldSize));
 }
 
 void main() {
@@ -104,6 +114,10 @@ void main() {
     // Ореол у самого солнца (Mie-пик)
     float glare = pow(sunHit, 8.0) * uGlare * rainDim;
 
+    if (uFogOnly > 0.5) {
+        FragColor = vec4(fcol * (1.0 - trans) * (lit + glare * trans), trans);
+        return;
+    }
     vec3 col = scene * trans + fcol * (1.0 - trans) * (lit + glare * trans);
     FragColor = vec4(col, 1.0);
 }

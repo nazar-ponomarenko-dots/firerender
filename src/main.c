@@ -18,7 +18,8 @@
 //  При выходе в главное меню мир выгружается (память освобождается).
 // ============================================================================
 
-#include <SDL3/SDL.h>        // SDL3: окна, события, таймеры, GL-контекст
+#include <SDL3/SDL.h>
+#include <math.h>        // SDL3: окна, события, таймеры, GL-контекст
 #include <SDL3/SDL_main.h>   // Переносимый main(): на Windows закрывает
                              // собой WinMain, на Android — точку входа
                              // из Java-обёртки SDLActivity.
@@ -29,12 +30,15 @@
 #include "commands.h"
 #include "events.h"
 #include "renderer.h"
+#include "srender.h"
 #include "buildnum.h"
 #include "input.h"
 #include "lua_engine.h"
 #include "shader.h"   // shader_hot_reload (см. reload_shaders)
+#include "android.h"
 #include "app.h"
 #include "console.h"
+#include "touch.h"
 #include "cvars.h"
 #include "hud.h"
 #include "resources.h"
@@ -56,6 +60,94 @@
 
 #include <stdio.h>           // printf (FPS)
 #include <stdlib.h>          // getenv
+#include <string.h>
+
+#define BENCH_MAX_SAMPLES 65536
+
+typedef struct {
+    double samples[BENCH_MAX_SAMPLES];
+    double warm_time;
+    double sample_time;
+    double gpu_ms_sum;
+    unsigned int gpu_q[8];
+    unsigned char gpu_pending[8];
+    int warm_frames;
+    int count;
+    int gpu_count;
+    int gpu_slot;
+    int active;
+    int done;
+} FrameBench;
+
+static int bench_cmp(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+static void bench_gpu_init(FrameBench *b)
+{
+    if (!b->active || !p_glGenQueries || !p_glBeginQuery ||
+        !p_glEndQuery || !p_glGetQueryObjectiv || !p_glGetQueryObjectui64v) return;
+    glGenQueries(8, b->gpu_q);
+}
+
+static void bench_gpu_begin(FrameBench *b)
+{
+    if (!b->active || !b->gpu_q[0]) return;
+    int slot = b->gpu_slot;
+    if (b->gpu_pending[slot]) {
+        GLint ready = 0;
+        glGetQueryObjectiv(b->gpu_q[slot], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (!ready) return;
+        GLuint64 ns = 0;
+        glGetQueryObjectui64v(b->gpu_q[slot], GL_QUERY_RESULT, &ns);
+        if (b->warm_frames >= 600 && b->warm_time >= 10.0) {
+            b->gpu_ms_sum += (double)ns / 1000000.0;
+            b->gpu_count++;
+        }
+        b->gpu_pending[slot] = 0;
+    }
+    glBeginQuery(GL_TIME_ELAPSED, b->gpu_q[slot]);
+}
+
+static void bench_gpu_end(FrameBench *b)
+{
+    if (!b->active || !b->gpu_q[0]) return;
+    glEndQuery(GL_TIME_ELAPSED);
+    b->gpu_pending[b->gpu_slot] = 1;
+    b->gpu_slot = (b->gpu_slot + 1) & 7;
+}
+
+static void bench_gpu_cleanup(FrameBench *b)
+{
+    if (b->gpu_q[0]) glDeleteQueries(8, b->gpu_q);
+}
+
+static void bench_frame(FrameBench *b, double frame_s)
+{
+    if (!b->active || b->done || frame_s <= 0.0) return;
+    if (b->warm_frames < 600 || b->warm_time < 10.0) {
+        b->warm_frames++;
+        b->warm_time += frame_s;
+        return;
+    }
+    if (b->count < BENCH_MAX_SAMPLES) b->samples[b->count++] = frame_s * 1000.0;
+    b->sample_time += frame_s;
+    if (b->sample_time < 30.0 && b->count < 60000) return;
+    qsort(b->samples, (size_t)b->count, sizeof b->samples[0], bench_cmp);
+    double sum = 0.0;
+    for (int i = 0; i < b->count; i++) sum += b->samples[i];
+    int p50 = (int)((b->count - 1) * 0.50);
+    int p95 = (int)((b->count - 1) * 0.95);
+    int p99 = (int)((b->count - 1) * 0.99);
+    SDL_Log("BENCH native wall-clock: %d frames %.2f s | %.1f fps | "
+            "mean %.3f ms p50 %.3f p95 %.3f p99 %.3f | GPU %.3f ms",
+            b->count, b->sample_time, b->count / b->sample_time,
+            sum / b->count, b->samples[p50], b->samples[p95], b->samples[p99],
+            b->gpu_count ? b->gpu_ms_sum / b->gpu_count : 0.0);
+    b->done = 1;
+}
 #ifdef _WIN32
 #  include <direct.h>        // _chdir
 #else
@@ -79,7 +171,10 @@ static void sync_cvars(Game *g)
         // CSM рендерится в режимах 1 (только динамика) и 2 (динамика вблизи
         // игрока, статика — по всему миру)
         shadow_set(sh == 1.0f || sh == 2.0f);
-        if (sh == 2.0f && g->world_loaded)  // статические: пересчитать сейчас
+        // Статические: пересчитываем карту теней ТОЛЬКО если нет запечённого
+        // лайтмапа. Есть готовый (map/baked) — режим 2 читает его, а CPU-бейк
+        // был бы 2+ сек впустую (его результат шейдер игнорирует).
+        if (sh == 2.0f && g->world_loaded && !terrain_baked_light_have())
             terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
         SDL_Log("Shadows mode: %d", (int)sh);
     }
@@ -96,7 +191,8 @@ static void sync_cvars(Game *g)
     float vs = cvar_get("r_vsync");
     if (vs != s_sync_vsync) {
         s_sync_vsync = vs;
-        SDL_GL_SetSwapInterval(vs > 0.5f ? 1 : 0);
+        SDL_Log("VSync request %d: %s", vs > 0.5f ? 1 : 0,
+                SDL_GL_SetSwapInterval(vs > 0.5f ? 1 : 0) ? "ok" : "failed");
     }
     float wr = cvar_get("r_wireframe");
     if (wr != s_sync_wire) {
@@ -138,7 +234,6 @@ static int fr_test_apply(Game *g)
     const char *fr_test = getenv("FR_TEST");
     if (!fr_test) return 0;
     if (strchr(fr_test, 'x')) console_selftest();
-    if (strchr(fr_test, 's')) shadow_toggle();
     if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
     if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // кэш статических каскадов off
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
@@ -147,7 +242,6 @@ static int fr_test_apply(Game *g)
     if (strchr(fr_test, 'c')) g_shadow_cull = 0;
     if (strchr(fr_test, 'e')) veg_set_static_main(0);
     if (strchr(fr_test, 'f')) veg_set_dyn_main(0);
-    if (strchr(fr_test, 'o')) voxfog_set(1);
     if (game_load_world(g) != 0) {
         SDL_Log("FR_TEST: world load failed");
         return -1;
@@ -260,7 +354,26 @@ static float phys_ground(float x, float z)
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    srand((unsigned)SDL_GetTicks());   // частицы/фауна — различаются между запусками
+
+    // 1) Инициализация SDL — должна быть ДО любых SDL_* вызовов
+    //    (включая SDL_GetPrefPath/SDL_LoadFile в fr_android_prepare на Android)
+    //    Раньше стояла после — на девайсе падал с SIGSEGV до показа окна.
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        // SDL ещё не поднялась — пишем в stderr
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    srand((unsigned)SDL_GetTicks());
+
+    // Android: распаковать APK-assets в хранилище и перейти туда (до base_dir).
+    // Вызываем ПОСЛЕ SDL_Init — на Android здесь уже есть JNI/env и AAssetManager.
+    if (!fr_android_prepare()) {
+#ifdef __ANDROID__
+        SDL_Log("android: подготовка ресурсов не удалась");
+        SDL_Quit();
+        return 1;
+#endif
+    }
 
     // Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
     // Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
@@ -309,34 +422,94 @@ int main(int argc, char *argv[])
 #endif
     }
 
-    // 1) Инициализация SDL -----------------------------------------------------
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
-        SDL_Log("SDL_Init failed: %s", SDL_GetError());
-        return 1;
+    // 2) Окно и контекст -------------------------------------------------------
+    // Выбор бэкенда на этапе компиляции: make vulkan / make metal дают окна
+    // БЕЗ GL-контекста (Vulkan/Metal-девайс поднимает sr_create()). Пока
+    // рендер-пайплайн на этих API не портирован — девайс поднимается,
+    // статус логируется, движок завершается корректно.
+    int ww = WIN_W, wh = WIN_H;
+    {
+        const char *ew = getenv("FR_W"), *eh = getenv("FR_H");
+        if (ew && eh) { ww = atoi(ew); wh = atoi(eh); }
     }
-
-    // 2) Атрибуты GL-контекста -------------------------------------------------
+#if defined(FR_BACKEND_VULKAN) || defined(FR_BACKEND_METAL)
+    {
+        unsigned win_flags = SDL_WINDOW_RESIZABLE
+#ifdef FR_BACKEND_VULKAN
+            | SDL_WINDOW_VULKAN;
+#else
+            | SDL_WINDOW_METAL;
+#endif
+        g_win = SDL_CreateWindow("firerender", ww, wh, win_flags);
+        if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
+        sr_api_report();
+        SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
+        SrDevice *dev = sr_create();
+        if (dev) {
+            const SrCaps *c = sr_caps(dev);
+            SDL_Log("Backend %s: device OK (%s %s), но рендер-пайплайн на этот "
+                    "API ещё не портирован (sr_* заглушки) — завершение.",
+                    sr_api_name(
+#ifdef FR_BACKEND_VULKAN
+                        SR_API_VULKAN
+#else
+                        SR_API_METAL
+#endif
+                    ),
+                    c->vendor, c->version);
+            sr_destroy(dev);
+        } else {
+            SDL_Log("Backend %s: sr_create() не удался",
+                    sr_api_name(
+#ifdef FR_BACKEND_VULKAN
+                        SR_API_VULKAN
+#else
+                        SR_API_METAL
+#endif
+                    ));
+        }
+        SDL_DestroyWindow(g_win);
+        SDL_Quit();
+        return 0;
+    }
+#endif
 #ifdef USE_GLES_PATH
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    // GLES 3.0; если драйвер не отдаёт — пробуем любой, что есть.
+    static const int ctx_try[][3] = {
+        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES }, { 0, 0, 0 },
+    };
 #else
     // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
     // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
-    // раньше. Если драйвер не даст 4.5, SDL вернёт ближайший доступный, и
-    // vegetation.c сам откатится на инстансный путь (g_gl_gpu_driven == 0).
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    // раньше. Если драйвер не даст 4.5, vegetation.c сам откатится на
+    // инстансный путь (g_gl_gpu_driven == 0).
+    // Старые GLX-драйверы (Mesa <= 3.1, NVIDIA legacy 340/470) НЕ понижают
+    // запрос, а падают с GLXBadFBConfig — поэтому перебираем версии вниз и
+    // пересоздаём контекст: SDL перечитывает атрибуты на каждом вызове.
+    static const int ctx_try[][3] = {
+        { 4, 5, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 4, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 1, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 0, 0, 0 },
+    };
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
-    // 3) Окно и контекст -------------------------------------------------------
-    g_win = SDL_CreateWindow("firerender", WIN_W, WIN_H,
+    g_win = SDL_CreateWindow("firerender", ww, wh,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
-    SDL_GLContext ctx = SDL_GL_CreateContext(g_win);
+    SDL_GLContext ctx = NULL;
+    for (unsigned ci = 0; ci < sizeof ctx_try / sizeof ctx_try[0] && !ctx; ci++) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, ctx_try[ci][0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, ctx_try[ci][1]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
+        ctx = SDL_GL_CreateContext(g_win);
+        if (!ctx && ctx_try[ci][0] > 0)
+            SDL_Log("Контекст GL %d.%d не доступен (%s); пробую ниже",
+                    ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
+    }
     if (!ctx) { SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
                 SDL_DestroyWindow(g_win); SDL_Quit(); return 1; }
     SDL_GL_MakeCurrent(g_win, ctx);
@@ -353,14 +526,23 @@ int main(int argc, char *argv[])
     game_init(&game);            // единственный экземпляр состояния мира
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
-    SDL_Log("OpenGL: %s", glGetString(GL_VERSION));
+#ifdef USE_GLES_PATH
+    SDL_Log("Renderer profile: GLES LOW-END (LDR, cheap fog, instanced culling)");
+#else
+    SDL_Log("Renderer profile: DESKTOP GL");
+#endif
+    sr_api_report();   // статус рендерных API (GL/GLES + заготовки Vulkan/Metal)
+    SDL_Log("Graphics API: %s", glGetString(GL_VERSION));
     SDL_Log("GPU-driven veg (compute+indirect): %s",
             g_gl_gpu_driven ? "ENABLED" : "disabled (instanced fallback)");
     SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
     // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------
-    int vw = WIN_W, vh = WIN_H;
+    int vw = ww, vh = wh;
     SDL_GetWindowSizeInPixels(g_win, &vw, &vh);
+    SDL_Log("Drawable: %dx%d (requested %dx%d)", vw, vh, ww, wh);
+    if (getenv("FR_BENCH") && (vw != ww || vh != wh))
+        SDL_Log("BENCH warning: drawable differs from requested size");
     glViewport(0, 0, vw, vh);
     renderer_set_viewport(vw, vh);
 
@@ -376,101 +558,251 @@ int main(int argc, char *argv[])
     input_init(g_win, &game);
 
     // 9) Главный цикл: фаза APP_BOOT (boot_init) -> MENU/PLAY/PAUSE -------------
+    FrameBench bench = {0};
+    bench.active = getenv("FR_BENCH") != NULL;
+    if (getenv("FR_BENCH_GPU")) bench_gpu_init(&bench);
     Uint64 last = SDL_GetPerformanceCounter();
     float fps_accum = 0;
     int fps_frames = 0;
+    float sim_acc = 0.0f;
     bool running = true;
     while (running) {
         Uint64 now = SDL_GetPerformanceCounter();
-        float dt = (float)(now - last) / SDL_GetPerformanceFrequency();
+        float frame_dt = (float)(now - last) / SDL_GetPerformanceFrequency();
         last = now;
-        if (dt > 0.1f) dt = 0.1f;
-        dt *= cvar_get("sv_timescale");     // sv_timescale — скорость времени
+        if (frame_dt > 0.1f) frame_dt = 0.1f;
+        float dt = frame_dt * cvar_get("sv_timescale");
 
-        float inst_fps = 1.0f / (dt > 0.0001f ? dt : 0.0001f);
+        float inst_fps = 1.0f / (frame_dt > 0.000001f ? frame_dt : 0.000001f);
         if (game.hud) game.hud->fps = game.hud->fps * 0.95f + inst_fps * 0.05f;
+
+        // FR_STAGES — временная инструметация кадра: средние по стадиям
+        // печатаются в лог при выходе (поиск CPU-хотспотов движка).
+        static int s_stages = -1;
+        static double s_st_in = 0, s_st_logic = 0, s_st_sync = 0,
+                      s_st_render = 0, s_st_end = 0, s_st_swap = 0,
+                      s_st_gu = 0, s_st_phys = 0, s_st_aux = 0,
+                      s_st_reload = 0, s_st_demo = 0;
+        static double s_st_frame_max = 0, s_st_gu_max = 0, s_st_render_max = 0;
+        static int s_st_n = 0;
+        Uint64 st_t = SDL_GetPerformanceCounter(), st_p;
+        double st_f = (double)SDL_GetPerformanceFrequency();
+        if (s_stages < 0) s_stages = getenv("FR_STAGES") ? 1 : 0;
+#define ST_ACC(v) do { st_p = SDL_GetPerformanceCounter(); v += (st_p - st_t) / st_f; st_t = st_p; } while (0)
 
         input_process();                    // события: консоль, бинды, ресайз
         if (input_quit()) running = false;
+        if (input_take_resumed()) {
+            last = SDL_GetPerformanceCounter();
+            sim_acc = 0.0f;
+            frame_dt = dt = 0.0f;
+        }
+        if (input_background()) {
+            SDL_Delay(50);
+            last = SDL_GetPerformanceCounter();
+            sim_acc = 0.0f;
+            continue;
+        }
+        ST_ACC(s_st_in);
 
         // Фаза APP_BOOT: поднять системы один раз (в конце — APP_MENU/PLAY)
         if (app_state() == APP_BOOT) {
             boot_init(&game);
+            if (bench.active) {
+                const char *preset = getenv("FR_BENCH_PRESET");
+                app_apply_benchmark_preset(preset ? atoi(preset) : 0);
+            }
             if (fr_test_apply(&game) != 0) goto fail;   // FR_TEST: мир
 
             if (getenv("FR_CONSOLE")) console_toggle();   // консоль при старте
-            // cvar-синки не должны перетирать FR_TEST на первом кадре —
-            // примайниваем только то, что трогает FR_TEST (тени/туман).
-            // Полноэкран/VSync/каркас применит первый sync_cvars из config.cfg.
+            // Ресинк подсистем с cvar'ами ПОСЛЕ загрузки мира. shadow_init/
+            // voxfog_init читают режим в начале game_load_world, но map_apply,
+            // графические пресеты и скрипт карты могут сменить r_shadows_mode/
+            // r_fog_mode уже ПОСЛЕ инициализации. Раньше мы лишь пресеедили
+            // трекеры текущим значением — и sync_cvars, не видя «изменения»,
+            // НИКОГДА не приводил g_shadow_on/туман в соответствие: CSM оставался
+            // включён в режиме blob/выкл (карта теней рисовалась впустую), а
+            // туман застревал в режиме из инициализации. Теперь принудительно
+            // синхронизируем состояние с итоговым режимом.
             s_sync_shadows = cvar_get("r_shadows_mode");
+            shadow_set(s_sync_shadows == 1.0f || s_sync_shadows == 2.0f);
             s_sync_fog = cvar_get("r_fog_mode");
+            voxfog_set_mode((int)s_sync_fog);
+            // FR_TEST 's'/'o' переключают подсистему ПОВЕРХ режима (A/B-кадры) —
+            // применяем после ресинка, иначе shadow_init/voxfog_init их затирали.
+            {
+                const char *ft = getenv("FR_TEST");
+                if (ft && strchr(ft, 's')) shadow_toggle();
+                if (ft && strchr(ft, 'o')) voxfog_set(1);
+            }
         }
 
-        // Hot-reload шейдеров и текстур: раз в ~30 кадров проверяем mtime
+        // В APK assets неизменяемы, а периодические stat() только будят storage.
+#ifndef __ANDROID__
         {
-            static int s_reload = 0;
-            if (++s_reload >= 30) {
-                s_reload = 0;
+            static double s_reload_at = 0.0;
+            double t = (double)SDL_GetTicks() * 0.001;
+            if (!bench.active && t >= s_reload_at) {
+                s_reload_at = t + 1.0;
                 shader_hot_reload();
                 resources_texture_reload();
             }
         }
+#endif
+        ST_ACC(s_st_reload);
 
         game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
+        ST_ACC(s_st_demo);
 
-        // Фиксированный тик логики/физики: 100 Гц. Мир обновляется постоянным
-        // шагом 1/100 с независимо от FPS — стабильная физика, триггеры и Lua.
-        // Аккумулятор: накладка времени, сброс "спирали смерти" (макс 8 тиков).
+        // Фиксированный тик логики/физики: 100 Гц десктоп, 60 Гц на телефоне (экономия CPU)
         {
-            static float s_sim_acc = 0.0f;
+#ifdef __ANDROID__
+            const float step = 1.0f / 60.0f;
+            const int max_ticks = 4;
+#else
             const float step = 1.0f / 100.0f;
-            s_sim_acc += dt;
-            if (s_sim_acc >= 0.25f) s_sim_acc = 0.25f;   // лаг >250 мс — не крутим вперёд
-            for (int ticks = 0; s_sim_acc >= step && ticks < 8; ticks++) {
-                game_update(&game, step);   // мир: узлы, триггеры/use, туман
-                physics_set_ground(phys_ground);
-                physics_step(physics_world(), step);   // мини-физика (Verlet)
-                glb_anim_ragdoll_step_all(step);       // рэгдоллы аним-моделей
-                audio_update();             // фоновые петли и 3D-источники
-                lua_engine_update(step);    // per-frame колбэк скрипта
-                s_sim_acc -= step;
+            const int max_ticks = 8;
+#endif
+            sim_acc += dt;
+            if (sim_acc >= 0.25f) sim_acc = 0.25f;
+            for (int ticks = 0; sim_acc >= step && ticks < max_ticks; ticks++) {
+                if (app_state() == APP_PLAY) {
+                    game_update(&game, step);   // мир: узлы, триггеры/use, туман
+                    ST_ACC(s_st_gu);
+                    physics_set_ground(phys_ground);
+                    physics_step(physics_world(), step);   // мини-физика (Verlet)
+                    glb_anim_ragdoll_step_all(step);       // рэгдоллы аним-моделей
+                    ST_ACC(s_st_phys);
+                    audio_update();             // фоновые петли и 3D-источники
+                    lua_engine_update(step);    // per-frame колбэк скрипта
+                    ST_ACC(s_st_aux);
+                }
+                sim_acc -= step;
             }
+        }
+        ST_ACC(s_st_logic);
+        {
+            static double s_gu_prev = 0;
+            double gu_frame = s_st_gu - s_gu_prev;
+            s_gu_prev = s_st_gu;
+            if (gu_frame > s_st_gu_max) s_st_gu_max = gu_frame;
         }
 
         sync_cvars(&game);
         input_sync_mode();
 
+        // FR_CVAR="name value;name value" — переопределить cvar'ы для
+        // headless-тестов ПОСЛЕ config.cfg (иначе архивные значения перетрут).
+        {
+            static int s_fr_cvar_done = 0;
+            const char *fc = getenv("FR_CVAR");
+            if (fc && !s_fr_cvar_done) {
+                s_fr_cvar_done = 1;
+                char buf[512];
+                snprintf(buf, sizeof buf, "%s", fc);
+                for (char *tok = strtok(buf, ";"); tok; tok = strtok(NULL, ";")) {
+                    char name[64]; float val;
+                    if (sscanf(tok, "%63s %f", name, &val) == 2) {
+                        cvar_set(name, val);
+                        SDL_Log("FR_CVAR: %s = %g", name, val);
+                    }
+                }
+            }
+        }
+
+        // FR_TEST 'H': автонаведение камеры на рэгдолл каждый кадр —
+        // головной тест физики не должен зависеть от того, куда уползла
+        // модель (без этого она уезжает из кадра и баг не видно).
+        if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'H') &&
+            game.world_loaded && app_state() == APP_PLAY) {
+            float aim[3];
+            if (glb_anim_ragdoll_aim(aim)) {
+                Camera *cam = &game.cam->cam;
+                float d[3] = { aim[0] - cam->pos[0], aim[1] - cam->pos[1],
+                               aim[2] - cam->pos[2] };
+                float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                if (len > 0.5f) {
+                    cam->yaw = atan2f(d[0], d[2]);
+                    cam->pitch = asinf(d[1] / len < -1.0f ? -1.0f :
+                                       (d[1] / len > 1.0f ? 1.0f :
+                                        d[1] / len));
+                    camera_sync_look(cam);
+                }
+            }
+        }
+
+        // FR_TEST 'K': убить игрока за ~1.2 c до снимка (headless FR_TEST=SK) —
+        // проверка экрана смерти, «завала» камеры и заморозки ввода.
+        if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'K') &&
+            game.world_loaded && app_state() == APP_PLAY &&
+            !health_is_dead(&game.player.hp)) {
+            static float k_t = 0.0f;
+            k_t += dt;
+            if (k_t > 0.1f) { health_kill(&game.player.hp);
+                              SDL_Log("FR_TEST K: player killed"); }
+        }
+
         // Отложенные события (events_emit_deferred) — безопасная точка после
         // всех тиков, до рендера: колбэки не могут переиспользовать списки
         // слушателей посреди итерации.
         events_flush_deferred();
+        ST_ACC(s_st_sync);
 
         // Рендер: сцена -> bloom/туман -> оверлеи (см. renderer.c)
+        bench_gpu_begin(&bench);
         renderer_begin();
         renderer_frame(&game, dt, game.world_loaded &&
                                    (app_state() != APP_MENU || !app_bg_has()));
-        renderer_end(&game, dt);
-
+        ST_ACC(s_st_render);
+        {
+            static double s_rd_prev = 0;
+            double rd_frame = s_st_render - s_rd_prev;
+            s_rd_prev = s_st_render;
+            if (rd_frame > s_st_render_max) s_st_render_max = rd_frame;
+        }
         // FR_TEST 'S': автоскриншот на 450-м кадре и выход на 480-м —
-        // headless-проверка картинки + стабильный прогрев для профайлера
-        // (SDL_VIDEODRIVER=offscreen FR_TEST=S).
+        // headless-проверка картинки + стабильный прогрев для профайлера.
+        // Запрос ставится до renderer_end, чтобы чтение было в том же кадре:
+        // некоторые EGL backbuffer'ы после overlay draw уже discard-нуты.
         if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'S')) {
             static int s_frames = 0, s_shot_at = -1;
             if (s_shot_at < 0) {
                 const char *fs = getenv("FR_SHOT");
-                s_shot_at = fs ? atoi(fs) : 450;   // кадр скриншота настраивается
+                s_shot_at = fs ? atoi(fs) : 450;
             }
             if (++s_frames == s_shot_at) cmd_screenshot(NULL);
-            if (s_frames >= s_shot_at + 30) running = false;
+            // FR_BENCH живёт десятки секунд (прогрев + замер) — выход только
+            // по bench.done; снимок всё равно делается на s_shot_at.
+            if (s_frames >= s_shot_at + 30 && !bench.active) running = false;
         }
+        // FR_BAKE: офлайн-компиляция света карты (make mapbake). Прогреваем
+        // несколько кадров (солнце/CSM/rc устаканиваются), печём RGB-люксель
+        // рельефа + сетку зондов в map/baked/ и выходим. Движок потом только
+        // ЧИТАЕТ их (после make mapzip кладёт baked/ в zip карты).
+        if (getenv("FR_BAKE") && game.world_loaded &&
+            app_state() == APP_PLAY && game.sun_node) {
+            static int s_bake_warm = 0;
+            if (++s_bake_warm == 30) {
+                SDL_Log("FR_BAKE: запекаю свет карты...");
+                terrain_light_bake(&game.world,
+                                   (SunParams *)game.sun_node->params,
+                                   renderer_context());
+                SDL_Log("FR_BAKE: готово. Свет в map/baked/ — запусти make mapzip.");
+                running = false;
+            }
+        }
+        renderer_end(&game, dt);
+        ST_ACC(s_st_end);
 
         // Меню (главное/пауза/настройки) — поверх замороженной сцены
         if (app_state() != APP_PLAY) {
             int act = app_menu(renderer_vw(), renderer_vh());
             if (act == APP_ACT_START || act == APP_ACT_RESUME) {
                 if (!game.world_loaded && game_load_world(&game) != 0) {
-                    SDL_Log("World load failed");
-                    goto fail;
+                    SDL_Log("World load failed — остаёмся в меню");
+                    console_print("ошибка загрузки карты");
+                    // не выходим из приложения, даём шанс выбрать другую карту
+                    continue;
                 }
                 app_set_state(APP_PLAY);
                 if (act == APP_ACT_START) {
@@ -504,8 +836,11 @@ int main(int argc, char *argv[])
             }
         }
         commands_shot_take(renderer_vw(), renderer_vh());     // скриншот (F12)
+        if (app_state() == APP_PLAY)
+            touch_hud_draw(renderer_vw(), renderer_vh());     // виртуальный джойстик
         console_drain();                                      // отложенные wait-команды
         console_render(renderer_vw(), renderer_vh());         // консоль — поверх всего (`)
+        bench_gpu_end(&bench);
 
         // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland).
         // Значение — номер кадра для снимка (FR_SHOT=60), пустое = 60.
@@ -519,7 +854,7 @@ int main(int argc, char *argv[])
                 else if (shot_frame < target) shot_frame++;
                 if (shot_frame == target) {
                     unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
-                    glReadPixels(0, 0, renderer_vw(), renderer_vh(), GL_RGB, GL_UNSIGNED_BYTE, px);
+                    renderer_read_pixels(px, renderer_vw(), renderer_vh());
                     FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
                     if (f) {
                         fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());
@@ -537,6 +872,12 @@ int main(int argc, char *argv[])
         }
 
         SDL_GL_SwapWindow(g_win);
+        ST_ACC(s_st_swap);
+        s_st_n++;
+        {
+            double fr = (SDL_GetPerformanceCounter() - now) / st_f;
+            if (fr > s_st_frame_max) s_st_frame_max = fr;
+        }
 
         // host_framerate — лимит FPS (задержка до следующего кадра)
         {
@@ -557,15 +898,49 @@ int main(int argc, char *argv[])
             running = false;
         }
 
-        fps_accum += dt;
+        if (!running && s_stages && s_st_n > 0) {
+            SDL_Log("FR_STAGES (среднее по %d кадрам, мс): input %.3f | "
+                    "logic %.3f [reload %.3f | demo %.3f | game_update %.3f | "
+                    "phys %.3f | audio+lua %.3f]"
+                    " | sync %.3f | render %.3f | end %.3f | "
+                    "swap %.3f | СУММА %.3f",
+                    s_st_n, s_st_in * 1000.0 / s_st_n,
+                    s_st_logic * 1000.0 / s_st_n,
+                    s_st_reload * 1000.0 / s_st_n,
+                    s_st_demo * 1000.0 / s_st_n,
+                    s_st_gu * 1000.0 / s_st_n, s_st_phys * 1000.0 / s_st_n,
+                    s_st_aux * 1000.0 / s_st_n,
+                    s_st_sync * 1000.0 / s_st_n,
+                    s_st_render * 1000.0 / s_st_n, s_st_end * 1000.0 / s_st_n,
+                    s_st_swap * 1000.0 / s_st_n,
+                    (s_st_in + s_st_logic + s_st_sync + s_st_render +
+                     s_st_end + s_st_swap) * 1000.0 / s_st_n);
+            SDL_Log("FR_STAGES max (мс): кадр %.1f | game_update %.1f | "
+                    "render %.1f  (boot-кадр портит reload-среднее — не смотри туда)",
+                    s_st_frame_max * 1000.0, s_st_gu_max * 1000.0,
+                    s_st_render_max * 1000.0);
+        }
+
+        fps_accum += frame_dt;
+        bench_frame(&bench, frame_dt);
+        if (bench.done) running = false;
         if (++fps_frames >= 60) {
-            printf("fps: %.0f\n", fps_frames / fps_accum);
+            if (!bench.active) {
+                float fps = fps_frames / fps_accum;
+#ifdef __ANDROID__
+                SDL_Log("fps: %.0f (dt %.1f ms) vw %d vh %d", fps,
+                        dt * 1000.0f, renderer_vw(), renderer_vh());
+#else
+                printf("fps: %.0f\n", fps);
+#endif
+            }
             fps_frames = 0;
             fps_accum = 0;
         }
     }
 
     // 11) Очистка --------------------------------------------------------------
+    bench_gpu_cleanup(&bench);
     console_save_config();       // config.cfg: cvar'ы на диск
     game_map_config_save(&game); // + выбранная карта
     game_unload_world(&game);    // выгрузить мир (если загружен)

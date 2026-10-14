@@ -35,6 +35,11 @@ typedef struct {
     GLint u_walk;                       // 1 = ходьба (малый ветер)
     GLint u_dyn;                        // 1 = динамический слой (только lod0/lod1)
     GLint u_windboost;                  // ветер: 1 = штиль, 2 = дождь (x2)
+    GLint u_lodshift;                   // сдвиг LOD пшеницы (мобильный картошка)
+    GLint u_depthonly;                  // 1 = z-prepass (только глубина, без света)
+    GLint u_simple;                     // 1 = упрощённый рендер: циклы света/SSS/обводка → 0
+    GLint u_grassfall;                  // дистанция спада плотности травы (м) — плавное прореживание в шейдере
+    GLint u_grassfloor;                 // доля floor/полная (к чему прореживается трава к краю)
 } VegParams;
 
 // Создаёт узел Vegetation: компилирует шейдер, грузит спрайты в 2D-массив,

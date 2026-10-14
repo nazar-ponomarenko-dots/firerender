@@ -124,7 +124,7 @@ void console_drain(void)
             // Строку копируем ДО exec: console_later вложенного wait может
             // дописать хвост, а уплотнение ниже — перезаписать ячейку.
             char cmd[sizeof s_pend[0].cmd];
-            snprintf(cmd, sizeof cmd, "%s", s_pend[i].cmd);
+            if (snprintf(cmd, sizeof cmd, "%s", s_pend[i].cmd) < 0) cmd[0] = 0;
             console_exec_one(cmd);          // может добавить новые (wait)
         } else {
             if (kept != i) s_pend[kept] = s_pend[i];
@@ -917,6 +917,47 @@ void console_init(void)
     cvar_register_ex("sv_maxslope", 60.0f, 0.0f, 89.0f, CVAR_ARCHIVE, "крутизна склона, который можно взойти, градусы (0 = отключено)");
     cvar_register_ex("sv_jumpspeed", 7.0f, 0.0f, 50.0f, CVAR_ARCHIVE, "скорость прыжка, м/с");
     cvar_register_ex("r_shadows_mode", 1.0f, 0, 3, CVAR_ARCHIVE, "тени: 0=выкл, 1=CSM, 2=статические, 3=пятна");
+    // Заранее (до мира): пресет-подсветка в меню должна работать до загрузки
+    cvar_register_ex("r_gi", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "глобальное освещение");
+    cvar_register_ex("r_msaa", 0.0f, 0.0f, 16.0f, CVAR_ARCHIVE, "MSAA 0/4/16");
+    cvar_register_ex("r_bloom", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE, "свечение (bloom)");
+    cvar_register_ex("r_gamma", 1.0f, 0.5f, 2.5f, CVAR_ARCHIVE, "гамма-коррекция");
+    cvar_register_ex("r_exposure", 1.0f, 0.1f, 5.0f, CVAR_ARCHIVE, "экспозиция HDR");
+    cvar_register_ex("r_saturation", 1.4f, 0.0f, 3.0f, CVAR_ARCHIVE, "насыщенность");
+    cvar_register_ex("r_contrast", 1.0f, 0.5f, 2.0f, CVAR_ARCHIVE, "контраст");
+    cvar_register_ex("r_veg_vis_mult", 1.0f, 0.25f, 1.0f, CVAR_ARCHIVE,
+                     "множитель радиуса прорисовки пшеницы (1 = карта)");
+    cvar_register_ex("r_veg_minpix", 1.0f, 0.0f, 8.0f, CVAR_ARCHIVE,
+                     "мин. размер спрайта травы в пикселях");
+    cvar_register_ex("r_terr_detail_dist", 0.0f, 0.0f, 500.0f, CVAR_ARCHIVE,
+                     "LOD деталей террейна: дальше — базовая карта (0 = выкл)");
+    // Плотности и GI: дефолты систем (карта может переопределить через
+    // cvar_set_default) — регистрируем СРАЗУ, чтобы меню до первого запуска
+    // показывало реальные значения, а не нули незнакомых cvar'ов
+    cvar_register_ex("r_wheat_density", 140.0f, 0.0f, 200.0f, CVAR_ARCHIVE, "пшеница шт/м2");
+    cvar_register_ex("r_grass_density", 1.2f, 0.0f, 10.0f, CVAR_ARCHIVE, "трава шт/м2");
+    cvar_register_ex("r_dandelion_density", 0.05f, 0.0f, 2.0f, CVAR_ARCHIVE, "одуванчики шт/м2");
+    cvar_register_ex("r_gi_scale", 0.5f, 0.25f, 1.0f, CVAR_ARCHIVE, "масштаб GI");
+    cvar_register_ex("r_gi_rays", 6.0f, 2.0f, 32.0f, CVAR_ARCHIVE, "GI: лучей на пиксель");
+    cvar_register_ex("r_gi_steps", 10.0f, 4.0f, 32.0f, CVAR_ARCHIVE, "GI: шагов марша");
+    cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
+                     "масштаб рендера сцены (1 = полное разрешение окна)");
+    cvar_register_ex("r_simple_render", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "упрощённый рендер: пакет фпс-ухищрений для слабых GPU");
+    cvar_register_ex("r_baked_light", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "читать запечённый свет карты (map/baked), если он есть");
+    cvar_register_ex("r_lowend_profile", 0.0f, 0.0f, 2.0f, CVAR_ARCHIVE,
+                     "профиль: 0=balanced, 1=старый смартфон, 2=Celeron iGPU");
+    cvar_register_ex("r_dynamic_resolution", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "динамическое разрешение для low-end профиля");
+    cvar_register_ex("r_veg_falloff_mult", 1.0f, 0.3f, 1.0f, CVAR_ARCHIVE,
+                     "спад плотности поля: <1 — реже уже к среднему кольцу");
+    cvar_register_ex("r_veg_regen_budget", 4096.0f, 1.0f, 4096.0f,
+                     CVAR_ARCHIVE, "чанков регенерации за кадр");
+    cvar_register_ex("r_cheap_fog", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "туман только в шейдерах (без voxfog-проходов)");
+    cvar_register_ex("r_scene_ldr", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "сцена в RGBA8 без HDR (картошка: быстрее на слабых GPU)");
     cvar_register_ex("r_fog_mode", 1.0f, 0, 2, CVAR_ARCHIVE, "туман: 0=выкл, 1=объёмный, 2=простой");
     cvar_register_ex("r_bloom", 1.0f, 0, 1, CVAR_ARCHIVE, "свечение (bloom)");
     cvar_register_ex("r_crosshair", 1.0f, 0, 1, CVAR_ARCHIVE, "прицел (точка в центре)");
@@ -969,7 +1010,7 @@ void console_init(void)
 void console_autoload(void)
 {
     if (cvar_load_config("config.cfg"))
-        console_print("config.cfg loaded");
+            console_print("config.cfg loaded");
     binds_load_config();        // bind-строки из config.cfg
     alias_load_config();        // alias-строки из config.cfg
 }

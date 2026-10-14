@@ -1,355 +1,280 @@
 # firerender
 
-Минимальный 3D-проект на чистом C: SDL3 (окно) + OpenGL (графика). Отрисовывает
-карту мира `map/map.png` как рельеф с «псевдо-PBR» освещением в стиле Half-Life 2
-(base map + normal map + Blinn-Phong спекуляр + дешёвый fresnel + туман).
+![firerender menu](img/menu.png)
 
-## Структура
+A 3D engine and sandbox game in **pure C**: SDL3 (window, input, audio) +
+OpenGL. The architecture is hybrid: a scene tree and render passes in the
+spirit of Godot, a console, cvars and binds in the spirit of GoldSrc/Source,
+resource resolution and missing files handled the way the Source Engine does
+it. All GPU code goes through the engine's own RHI (`sr_*`, `src/srender.h`),
+so swapping the graphics API never touches render logic.
 
-```
-firerender/
-├── src/                # исходники
-│   # Ядро приложения
-│   ├── main.c          # точка входа: SDL/GL; фазы APP_BOOT->MENU/PLAY/PAUSE; цикл
-│   ├── game.c/.h       # состояние мира (структура Game), загрузка/обновление, демо
-│   ├── commands.c/.h   # консольные команды-действия (регистрация — в main)
-│   ├── input.c/.h      # события главного цикла и режим мыши
-│   ├── app.c/.h        # меню (главное/пауза/настройки) и состояния
-│   ├── ui.c/.h         # immediate-mode UI (кнопки/слайдеры/чекбоксы)
-│   ├── renderer.c/.h   # оркестрация рендера кадра + единый RendererContext
-│   ├── render_ctx.h    # RendererContext и общий uniform-набор сцены (SceneUniforms)
-│   ├── material.c/.h   # материал поверхности: состояние GL + uniform'ы (data-driven)
-│   # Рендер
-│   ├── gl_loader.c/.h  # загрузчик функций OpenGL (SDL_GL_GetProcAddress)
-│   ├── linalg.c/.h     # векторы и матрицы 4x4
-│   ├── resources.c/.h  # кеш ресурсов: файлы/картинки/текстуры/шейдеры (+hot-reload)
-│   ├── shader.c/.h     # компиляция GLSL-шейдеров + hot-reload по mtime
-│   ├── assets.c/.h     # создание текстур (загрузка картинок — в resources)
-│   ├── world.c/.h      # мир: WorldState (карта высот, размеры, поле)
-│   ├── mapdata.c/.h    # данные карты из map/map.json (поле, свет, объекты)
-│   ├── scene.c/.h      # дерево сцены (SceneNode): node_new/add/remove/find
-│   ├── entity.c/.h     # сущности поверх дерева: классы, spawn/kill/think
-│   ├── events.c/.h     # событийная шина (подписка/рассылка)
-│   ├── camera.c/.h     # камера от первого лица (полёт/ходьба)
-│   ├── sun.c/.h        # солнце (DirectionalLight3D, настройки из JSON)
-│   ├── sky.c/.h        # небосвод из панорамы + цвет тумана
-│   ├── shadow.c/.h     # каскадные тени (CSM): FBO, матрицы, единый теневой проход
-│   ├── terrain.c/.h    # рельеф + материал земли (+ теневой проход рельефа)
-│   ├── vegetation.c/.h # трава и пшеница (инстансинг, 2 слоя, теневой проход)
-│   ├── objects.c/.h    # объекты-биллборды из map.json (+ материалы и тени)
-│   ├── field.c/.h      # рамка поля пшеницы
-│   ├── selection.c/.h  # рамки выделения узлов (Godot-стиль)
-│   ├── minimap.c/.h    # мини-карта
-│   ├── bloom.c/.h      # постобработка glow (bright -> blur -> композит)
-│   ├── voxfog.c/.h     # воксельный объёмный туман (3D-каскады)
-│   ├── fauna.c/.h      # живая карта: светлячки, бабочки, птицы
-│   ├── frustum.c/.h    # отсечение фрустумом (Gribb-Hartmann, сфера/AABB/точка)
-│   ├── particles.c/.h  # instanced-частицы (пул 4096, альфа/аддитив, стрики)
-│   ├── decals.c/.h     # декали на рельефе (квад с посадкой по высотам)
-│   ├── fx.c/.h         # эффекты: именованные пресеты + эмиттеры (HL2-стиль)
-│   ├── hud.c/.h        # дебаг-HUD, шрифт TTF и общий рендер текста (консоль)
-│   ├── profiler.c/.h   # тайминги по модулям (CPU + GPU timer queries)
-│   ├── png.c/.h        # сохранение скриншота в PNG (через miniz)
-│   ├── json.c/.h       # мини-парсер JSON без зависимостей
-│   # Система (консоль/GoldSrc-стиль)
-│   ├── cvars.c/.h      # переменные движка (консоль + config.cfg)
-│   ├── binds.c/.h      # привязки клавиш к командам (config.cfg)
-│   ├── actions.c/.h    # +forward/-forward и прочие +/-команды
-│   ├── console.c/.h    # консоль разработчика: команды, история, SDL_Log
-│   ├── audio.c/.h      # звук (SDL3): эффекты, петли, 3D-позиционные
-│   ├── utf8.h          # inline-помощники UTF-8 (ввод/вывод текста)
-│   └── stb_image.h     # single-header загрузчик PNG (публичное достояние)
-├── map/                # ВСЁ про карту: данные подтягиваются игрой отсюда
-│   ├── map.png         # карта высот (2000x1125): яркость = высота, цвет = цвет
-│   └── map.json        # метаданные: поле, источники света, объекты (см. ниже)
-├── img/                # материалы: ground, grass, wheat, skybox
-├── shaders/            # GLSL-шейдеры (загружаются с диска)
-├── build/              # собранный бинарник (можно удалять)
-├── Makefile            # сборка и запуск
-└── README.md
-```
+**This project is written by neural networks** — Claude, DeepSeek, GLM and
+other models working in a pair with a human: code, sanitizer debugging,
+documentation and the agent working rules ([AGENTS.md](AGENTS.md)) are a joint
+effort of people and LLMs.
 
-## Данные карты (map/map.json)
+> Repository: <https://github.com/nazar-ponomarenko-dots/firerender>
+> License: **MIT** ([LICENSE](LICENSE)).
 
-Всё, что касается карты, хранится в папке `map/`. Метаданные — в
-`map/map.json` (мини-парсер `src/json.c`, без внешних библиотек):
+Open-world terrain: heightmap from a PNG height map, a procedural wheat and
+grass field, billboard objects, water (puddles/lakes/rivers/sea), a sky with a
+panorama and procedural clouds, cascaded shadow maps, screen-space GI and SSR,
+voxel volumetric fog, particles/decals/weather, per-map Lua scripts.
 
-```json
-{
-    "map":    { "image": "map.png" },               // карта высот (яркость = высота)
-    "field":  { "center": [1000.0, 562.5],          // центр поля пшеницы (x, z)
-                "size":   [500.0, 300.0] },         // размер поля (w, d)
-    "lights": [                                     // источники света
-        { "type": "directional",                    // directional | point | spot
-          "name": "sun",
-          "dir": [0.25, 0.6, 0.7],                  // направление
-          "color": [1.0, 0.95, 0.85],               // цвет света
-          "intensity": 1.0,                         // сила света
-          "shadow": {                               // тени этого источника
-              "enabled": true,                      // отбрасывает тени?
-              "bias": 4.0,                          // bias рельефа (текселей)
-              "bias_veg": 2.0 }                     // bias растительности
-        }
-    ],
-    "objects": []                                   // модели с расстановкой
-}
-```
+---
 
-- Поле: координаты `center` и размер `size` в метрах; используются рельефом
-  (цвет почвы), растительностью (где растёт пшеница) и рамкой FieldArea.
-- Свет: солнце читает первый `directional`-источник из `lights`; без него —
-  стандартное солнце ~39° над горизонтом. `point`/`spot` — задел на будущее.
-- Тени: `shadow.enabled` — этот источник рисует каскадные карты (глобальный
-  тумблер — клавиша `[`); `bias`/`bias_veg` — смещение карт глубин против
-  acne в латеральных текселях (на дальнем каскаде bias берётся вдвое меньше).
-  Значения по умолчанию совпадают с прежними константами (4/2).
-- Объекты: `objects` — список моделей (`name`, `model`, `pos`, `rot`, `scale`,
-  `class`). Каждый объект становится сущностью (entity-система); `class` —
-  класс сущности (по умолчанию `prop_static`).
-- Вода: `waters` — список водоёмов четырёх типов:
-  `puddle` (лужа: круг, почти гладкая) / `lake` (озеро: круг, мягкая волна) /
-  `river` (река: осевая линия `points` + ширина `width`, течение `flow_speed`) /
-  `sea` (море: `radius=0` — глобальный уровень на весь мир, крупная волна).
-  Общие поля: `name`, `level` (высота поверхности, м), `pos`/`radius` (круг),
-  `color` (тон на глубине), `alpha` (прозрачность), `depth` (просвет дна),
-  `wave_amp`/`wave_speed`, `foam` (пена у берега 0..1), а для реки ещё `width`,
-  `points`, `flow`/`flow_speed`. Вода рисуется там, где рельеф ниже `level`
-  (на берегу сходит на нет); в глубокой воде игрок плавает, а река сносит его
-  по течению. Значения по умолчанию подобраны по типу (см. `mapdata.c`).
-- Если блока в JSON нет — модули используют значения по умолчанию.
-- Файлы с диска имеют приоритет над вшитыми: правки `map/` и `shaders/`
-  видны сразу, вшитые данные (`make embed`) — fallback для самодостаточного
-  exe (Windows-пакет).
-
-## Консоль разработчика
-
-Клавиша `` ` `` (ё/~) — открыть/закрыть. Ввод строки: `←`/`→` — курсор,
-`Home`/`End`, `Delete`, `Ctrl+V` — вставить, `Ctrl+C` — копировать,
-`Ctrl+U`/`Ctrl+K` — стереть до/после курсора, `Ctrl+W` — стереть слово,
-`Tab` — дополнение имени команды/переменной (цикл по совпадениям).
-Прокрутка вывода: колесо мыши, `PgUp`/`PgDn`. История: `↑`/`↓`.
-В консоль пишется весь вывод движка (SDL_Log). Команды:
-
-- `help` — список команд, `cvarlist` — список переменных
-- `set <name> [value]` — переменные: `fov`, `cl_sens`, `cl_walkspeed`,
-  `cl_flightspeed`, `sv_gravity`, `sv_jumpspeed`, `r_shadows`, `r_fog`,
-  `developer` (значения зажимаются в диапазон). Для строковых переменных
-  (флаг `CVAR_STRING`, напр. `name`) — `set <name> "строка"`.
-- `fly`, `map`, `hud` — переключатели (те же, что клавиши F/G/H)
-- `exec <file>` — выполнить команды из файла, `clear` — очистить консоль
-- `wait` / `wait N` — отложить выполнение следующих команд строки на
-  1 / N кадров (как в GoldSrc; `cmd1; wait; cmd2`)
-- `alias <имя> <команда[; команда]>` — макрос; `unalias`, `aliaslist`
-- `matlist` — список зарегистрированных материалов по имени
-- `mesh <obj> [x y z] [scale] [tex]` — поставить статичный меш (Wavefront .obj,
-  prop_static) как узел MeshInstance3D; пример: `mesh models/crate.obj 0 2 0 1`
-- `glb <glb> [x y z] [scale]` — поставить бинарный glTF 2.0 (.glb)
-  (prop_static) как узел GlbInstance3D; пример: `glb models/vaz-2105.glb 0 5 0 1`
-- `glbanim <glb> [x y z] [scale]` — поставить анимир. glTF (.glb) со скелетной
-  анимацией (skinning) как узел AnimInstance3D; если в модели есть скин+анимация,
-  `glb` сам выбирает этот путь. Пример: `glbanim models/handpaint_-_girl_01.glb 0 5 0 1`
-- `glbclips [имя-узла]` — список клипов анимации узла (в GLB их может быть
-  несколько) и активный сейчас; `glbclip <индекс|имя> [имя-узла]` — переключить
-  клип. Скининг работает на любом числе костей: кости ужимаются per-примитив и
-  не требуют больше 64 jointMatrix на draw (гарантия GL 3.3). Поддерживаются
-  несколько кож (каждый примитив привязан к своей), не-скиненные дети иерархии
-  и управление воспроизведением: `glbanim_pause [имя]`, `glbanim_play [имя]`,
-  `glbanim_speed <x> [имя]`, `glbanim_loop <0|1> [имя]`.
-- `cubemap_capture [x y z] [size]` — захват кубомапа отражений воды: 6 граней
-  рендерятся из позиции игрока (или точки `x y z`), сохраняются как 6 PNG в
-  `cubemaps/cubemap_*_{px..nz}.png`, и захваченный куб тут же используется
-  живым отражением воды. Размер грани — 16..512, дефолт 256. Центром служит
-  XZ игрока, Y — уровень воды (из map.json) или высота камеры, если воды нет.
-  Кубомап обновляется В РЕАЛЬНОМ ВРЕМЕНИ — все 6 граней рендерятся каждый
-  кадр до основного прохода, отражения воды и мокрой земли/деревьев не
-  запаздывают при движении.
-- `quit` — выход; `cfg load|save` — config.cfg; `version` — версия
-  и номер сборки (каждый `make` инкрементирует buildnum.txt — см. Makefile)
-
-Переменные сохраняются в `config.cfg` (рядом с exe) при выходе и грузятся
-при старте поверх значений по умолчанию. Проверка консоли: `FR_TEST=x make run`.
-
-## Сборка и запуск
-
-Нужна система со SDL3 (3.x), gcc и pkg-config.
+## Quick start
 
 ```sh
-make          # сборка
-make run      # сборка + запуск
-make clean    # удалить бинарник
+make            # builds ./build/firerender AND re-bakes light for all maps
+make run
 ```
 
-### Windows (один самодостаточный exe)
+> ⚠️ **`make` bakes every map by default** (`BAKE ?= 1`,
+> `Makefile:208-211`; the `build/.baked.stamp` stamp protects from re-baking,
+> but after any shader/map change this is minutes of work). For ordinary code
+> iteration:
+>
+> ```sh
+> make BAKE=0        # engine only
+> make build/firerender
+> ```
 
-Все данные (map/, img/, shaders/) вшиты в бинарник —
-файлы рядом с exe не нужны.
+Requirements: `gcc` (or `clang`), SDL3 **3.x** for `pkg-config`, `python3` for
+map packing. OpenGL functions are loaded at runtime via
+`SDL_GL_GetProcAddress`, so there is no need to link `-lGL`/GLEW/EGL — SDL
+itself picks GLX/EGL/WGL/CGL. Lua 5.4 and miniz are vendored in
+`third_party/`, so the build depends on no system libraries.
 
 ```sh
-make win      # собрать build/firerender.exe (нужны mingw и SDL3 для Windows)
-make winpkg   # положить exe в build/win/
-make embed    # перегенерировать вшитые данные после правки ресурсов
+make BAKE=0 && ./build/firerender            # run
+FR_CONSOLE=1 ./build/firerender              # start with the console open
 ```
 
-## Карты (zip)
+The data the engine uses lives **in the same folders as the sources**: nothing
+is embedded, resources are looked up on disk or in a map's zip pak (see
+“Maps”).
 
-Карты лежат в `maps/*.zip` (движок + его `img/`, `audio/` — рядом). Внутри
-zip — корень карты: `map.json`, `map.png`, `img/` (текстуры карты),
-`audio/` (звуки карты) и в будущем `models/`, `scripts/`, `sounds/`.
-Ресурсов, которых нет в zip, движок подсосёт из движка — карта может
-переопределять текстуры/звуки или пользоваться движковыми.
+---
 
-- Собрать карту: `make mapzip` (или `make mapzip MAP=имя`) —
-  `tools/make_map_zip.py` упакует `map/` + все ресурсы из map.json.
-- Выбрать: меню → «Выбор карты» или команда `map <имя>` (запускает сразу).
-- «map» — дисковая папка `map/` (режим разработки, правки видны сразу).
+## Features
 
-## Звук
+| Area | What is there |
+|---|---|
+| Rendering | CSM shadows (including a static/baked shadow mode and “blobs”), screen-space GI with temporal accumulation, SSR with a wetness mask, volumetric fog (3 R8 3D cascades) with history accumulation, bloom + tonemapping, procedural clouds, four water types with static reflection cubemaps |
+| Scatter light | Forward+ clusters: directional/point/spot/rect/tube emitters, a light that follows the player |
+| Baked light | Offline lightmap, sunvis and probe baking (`make mapbake`); runtime only reads (`r_baked_light`) |
+| Vegetation | GPU-driven path: compute-cull (`shaders/veg_cull.cs`) + `glDrawElementsIndirect`; instanced CPU fallback for GLES/older drivers |
+| World | Surface splat masks (soil/sand/gravel/asphalt), roads with shoulders and ruts, manual territory painting, triggers, positional sounds, fauna (fireflies/butterflies/birds) |
+| Models | `.obj` and `.glb` (static, skinning, skeletal animations, clips), attaching files to a bone, sprites |
+| Physics | Verlet mini-world: ropes, ragdolls on animated models |
+| Player | Walk/run/crouch/jump/fly, HP with death and killcam, position saves |
+| UI | Immediate-mode menu (UTF-8 Russian, TTF atlas), console with history and autocompletion, HUD, minimap, debug panel, profiler |
+| Input | Keyboard/mouse, gamepad, touch (joystick + buttons), Android lifecycle |
+| Scripting | Lua 5.4 in a sandbox: commands, events, entities, materials, FX |
+| Performance | Dynamic resolution, low-end profiles, “PO-TATO/MEDIUM/ULTRA” presets, chunk regeneration budget, grass z-prepass |
 
-Эффекты: шаги (3 варианта), прыжок, приземление, клик меню (audio/click.wav).
-Фоновые петли (ветер — audio/wind.wav) готовы через API audio_loop_start.
-Карта может переопределить любой звук — положить свой `audio/<имя>.wav`
-в zip. Клик меню звучит при наведении/переключении пунктов.
+Full references: [cvars](docs/cvars.md) ·
+[commands](docs/commands.md) · [map.json](docs/map-json.md) ·
+[Lua API](docs/lua-api.md).
 
-## Частицы и декали
+For reading and working on the code: [architecture](docs/architecture.md) ·
+[headless testing](docs/testing.md) ·
+[code conventions](docs/conventions.md) ·
+[traps and limitations](docs/pitfalls.md) ·
+[AGENTS.md](AGENTS.md) — rules for AI agents.
 
-- Частицы (`src/particles.c`): instanced-спрайты двумя draw call (альфа-бленд
-  и аддитив); пул 4096. Параметры — `ParticleParams`: направление + конус
-  разброса, скорость/жизнь/размер/альфа в диапазонах, гравитация (отриц. =
-  вверх), сопротивление воздуха, ветер, покачивание (снег), стрик (вытянутая
-  капля дождя), отскок от земли (кровь). API: `particles_emit/burst`.
-- Эффекты (`src/fx.c`): именованные пресеты (blood, smoke, explosion, sparks,
-  fire, rain, snow, dust, muzzle_flash) + непрерывные эмиттеры с частотой.
-  Как «particle definitions» в HL2.
-- Декали (`src/decals.c`): квады, приклеенные к рельефу (высота углов по
-  карте высот + 0.12 м против z-fighting), с поворотом и цветом.
-  API: `decal_place`.
-- Тест: `FR_TEST=md make run` — взрыв частиц и декаль у игрока; `a` — дождь,
-  `n` — снег, `y` — взрыв+искры+дым.
+---
 
-### Эффекты из консоли и Lua
+## Controls
+
+Default bindings (`src/binds.c:14-36`, restored with `bind_reset`):
+
+| Key | Action |
+|---|---|
+| `W` `A` `S` `D` | movement |
+| `SPACE` | jump / up in flight |
+| `LCTRL` | down in flight |
+| `LSHIFT` | run |
+| `C` | crouch |
+| `E` | interact with an object |
+| `F` | `noclip` (fly through the world) |
+| `[` / `P` | shadows / fog toggle |
+| `G` / `H` | minimap / debug panel |
+| `Q` | demo fly |
+| `M` `,` `.` | sparks / smoke / blood at the look point |
+| `F5` / `F9` | save / load |
+| `F12` | screenshot into `screenshots/` |
+| `` ` `` (tilde) | console |
+| ESC | pause / back |
+
+Everything is rebindable from the console: `bind B +jump`, `bindlist`,
+`unbindall`. Gamepad and touch controls activate automatically
+(`r_touch_ui`, `src/touch.c`, `src/gamepad.c`).
+
+## Console
+
+```
+fov 90                      // cvars are just "name value"
+bind F "+jump; +speed"      // a semicolon inside quotes is one body
+alias turbo "sv_timescale 2; fov 100"
+exec autoexec.cfg
+wait 3; screenshot          // defer the rest by 3 frames
+map map1                    // change the map
+weather rain 150            // weather following the player
+```
+
+`help` — command list, `cvarlist` — variable list, `toggle <cvar>` — flip 0/1.
+Changed `CVAR_ARCHIVE` variables, binds and aliases are written to
+`config.cfg` on exit. Details — [docs/commands.md](docs/commands.md).
+
+---
+
+## Maps
+
+A map is a resource folder and `map/map.json`. The shipping format is a zip
+pak `maps/<name>.zip` (data only, the engine code is untouched):
 
 ```sh
-fx_list                       # список пресетов
-fx fire                       # burst огня у игрока
-fx blood 10 5 20              # кровь в точке
-fx_emit rain 0 20 0 200 15    # эмиттер дождя (rate=200/сек, 15 сек)
-fx_stop rain                  # остановить дождь
-fx_clear                      # все эмиттеры + пул
+make mapzip MAP=map1        # re-pack the map from the map/ dev folder
+make mapbake MAP=map1       # bake light (the map as selected in config) + re-pack
+make bake-maps              # bake light for ALL maps/*.zip (each with its own FR_MAP)
+FR_MAP=map1 …               # force the map choice for the engine (src/game.c:722-725)
 ```
 
-```lua
-engine.fx_burst("explosion", x, y, z)         -- взрыв в точке
-engine.fx_emit("rain", x, y, z, 200, 15)      -- дождь на 15 сек
-engine.fx_stop("rain")                        -- остановить
-engine.fx_clear()                             -- всё очистить
-engine.fx_register("magic", {                 -- свой пресет
-    dir = {0,1,0}, spread = 0.7,
-    speed = {1,3}, life = {0.5,1.2},
-    size = {0.3,0.05}, alpha = {1,0},
-    color = {0.4,1,0.8}, gravity = -0.5,
-    blend = 1, count = 20,
-})
+Resolution of any path (`src/resources.c:85-164`):
+
+**open map pak → file in CWD → `<base_dir>/path` → `<base_dir>/../path`
+→ `../path`**. A missing image is replaced with `img/notfound.png` with a
+single log line — editing content does not require a restart.
+
+Inside the map folder (or inside the zip) live its own `map.json`, `map.png`,
+`img/`, `audio/`, `shaders/`, `baked/`, `lua/maps/<name>.lua` — all of them
+override the engine resources. For development it is convenient to keep an
+unpacked map in `map/` next to the binary.
+
+The `map.json` structure is described in [docs/map-json.md](docs/map-json.md).
+
+---
+
+## Architecture
+
+**Application phases** (`src/app.h:13-31`): `APP_BOOT` → `APP_MENU` →
+`APP_PLAY` ⇄ `APP_PAUSE`. `boot_init` (`src/main.c:209-224`) brings up
+resources → console → audio → binds → FX → command registry → HUD → menu →
+`config.cfg` → Lua, and only then starts the loop.
+
+**The loop** (`src/main.c`): rendering at free frequency, logic and physics on
+a fixed 100 Hz step (60 Hz on Android to spare the CPU), with an accumulator
+and a cap of 8 ticks per frame. Inside a tick: `game_update` → Verlet physics
+→ ragdolls → audio → `engine.update`.
+
+**World loading is 4 phases with per-phase rollback** (`src/game.c:325-645`):
+1) world geometry (pak, `map.json`, heights/normals, field);
+2) scene (node tree, entities, render FBOs, first frame);
+3) applying the map (its `cvars` and `commands`);
+4) audio (music, ambient, positional sources).
+A failure at any phase rolls back what was already done instead of leaving a
+half-loaded world; unloading runs in reverse order.
+
+**A frame** (`src/renderer.c:881-1035`, state lives in one `RendererContext`,
+`src/render_ctx.h`):
+
+```
+shadows (CSM, one pass for all cascades)
+  → scene into FBO: terrain, water, objects, grass/wheat, sky, particles, decals
+  → resolve (MSAA) → GI (screen-space, temporal)
+  → SSR → volumetric fog (3D cascades)
+  → bloom + tonemapping + underwater grade → present
+  → HUD/console/menu (2D on top)
 ```
 
-Строковые переменные и материалы (data-driven, как material library в HL2):
+Objects are drawn through `SceneNode` trees with their own render functions;
+every node has a shadow pass where it makes sense.
 
-```lua
-engine.cvar_set_string("name", "имя")         -- строковый cvar
-engine.cvar_get_string("name")
-engine.bind("k", "+forward")                  -- привязка клавиши из Lua
-engine.unbind("k")
-engine.material_register("gold", {            -- регистрация материала по имени
-    tint = {1, 0.8, 0.2}, alpha = 1, blend = 0, tile = {1, 1},
-})
-engine.material_list()                        -- "gold ..." (для отладки)
-engine.mesh("models/crate.obj", 0, 2, 0, 1,   -- статичный меш (.obj) в мире
-            "img/crate.png")                  -- (путь, x, y, z, scale, текстура)
-engine.glb("models/vaz-2105.glb", 0, 5, 0, 1) -- статичный меш (.glb) в мире
+---
+
+## Platforms and backends
+
+| Backend | Status |
+|---|---|
+| OpenGL (desktop, 4.5 CORE) | **works** — `make` |
+| OpenGL ES 3.0–3.2 | **works** — `make gles` (Android, Raspberry Pi); GPU-driven grass switches off by capability |
+| Vulkan | groundwork: a device is brought up (`src/srender_vk.c`), the render pipeline is not ported — `make vulkan` |
+| Metal | skeleton (`src/srender_metal.c`, builds only on macOS) — `make metal` |
+| Web / Emscripten | **none** |
+
+| Platform | How to build |
+|---|---|
+| Linux | `make` (or `make linux` — a static portable binary via zig + glibc 2.28) |
+| Windows | `make win` / `make winpkg` (mingw; the data must be **next to the exe**, nothing is embedded in the exe) |
+| Android | `make apk` (SDK + NDK r28+; resources as assets, GLES path) |
+| macOS | SDL3 + `make` (CGL under the hood) |
+
+`make backends` prints this status from the Makefile; at runtime — the
+`Render API: …` line in the startup log.
+
+---
+
+## Testing and benchmarking (headless)
+
+The engine can run without a display. Real headless rendering uses the
+`offscreen` driver (it creates a GL context without X/Wayland); `dummy` only
+checks “did the binary start”:
+
+```sh
+SDL_VIDEODRIVER=offscreen FR_TEST=S ./build/firerender    # screenshot at frame 450, then exit
+SDL_VIDEODRIVER=offscreen FR_TEST=SlS ./build/firerender  # + .glb and a skeletal-animated model
+SDL_VIDEODRIVER=offscreen FR_TEST=Sx ./build/firerender   # + console self-check
+SDL_VIDEODRIVER=offscreen FR_BENCH=1 FR_BENCH_PRESET=2 ./build/firerender  # fps/p50/p95/p99
+SDL_VIDEODRIVER=dummy timeout 5 ./build/firerender || true # CI-style smoke (see the caveat below)
 ```
 
-Примеры в `lua/main.lua` (команды `lua_fx`, `lua_rain`).
+> ⚠️ `dummy` does **not** create a GL window: `SDL_CreateWindow failed …
+> driver (dummy)`, `exit 1`. That is exactly why this step in CI runs with
+> `|| true` and only covers the path up to `SDL_CreateWindow`, not rendering.
 
-## Глобальное освещение (GI)
+The `FR_TEST` letters add up: `x` console, `S` screenshot+exit, `D` demo fly,
+`g`/`l` glb and animated model, `R` rope, `H` ragdoll, `K` killcam,
+`a`/`n`/`y` rain/snow/explosion, `s`/`o`/`v`/`p`/`q`/`c`/`e`/`f`/`t`/`k`/`r`/`C`/`w`
+— subsystem switches off for A/B frames. Other variables: `FR_MAP`, `FR_POS`
+(teleport for shots), `FR_W`/`FR_H`, `FR_MSAA`, `FR_BAKE`, `FR_CONSOLE`.
+Sanitizers (as in CI — build from scratch, otherwise the target is already
+“fresh”): `make clean && make BAKE=0 EXTRA_CFLAGS="-fsanitize=address,undefined -O1 -g"`.
+The full harness, every `FR_TEST` letter and A/B recipes —
+[docs/testing.md](docs/testing.md).
 
-Динамическое GI в стиле Lumen (UE5): экранная трассировка лучей по буферу
-глубины на полразрешении, темпоральное накопление, билатеральный денойз и
-joint bilateral upsample. Без предвычислений — свет меняется в том же кадре.
+---
 
-- Непрямой свет несёт цвет РЕАЛЬНОГО неба: промахнувшийся луч берёт цвет
-  с панорамы скайбокса по своему направлению (тень под деревом синеватая,
-  на закате тёплая, в дождь серая). Переотражения поверхностей (включая
-  свет ламп) — с альбедо < 1: непрямой свет всегда слабее падающего.
-- Затенение двух масштабов: контактное (щели, подкронье) и крупное
-  (закрытость небосвода) — из одного набора лучей.
-- Отражённый свет ограничен локальной яркостью окрестности: рефлекс лампы
-  в тени проходит, свечение «из ниоткуда» — нет.
-- Оптимизации: LOD лучей по дистанции, отсев зеркального луча по френелю,
-  радиус денойза растёт с дистанцией. Стоимость ~0.5 мс GPU на 1080p.
-- Консоль: `r_gi` (вкл), `r_gi_strength`, `r_gi_ao`, `r_gi_skylight`
-  (сила небесного света), `r_gi_rays`, `r_gi_steps`, `r_gi_radius`,
-  `r_gi_temporal`, `r_gi_blur`, `r_gi_debug 1|2` (только свет / только AO).
-- Headless-проверка картинки: `SDL_VIDEODRIVER=offscreen FR_TEST=S ./build/firerender`
-  — грузит мир, снимает скриншот в `screenshots/` и выходит (`D` — демо-полёт).
+## Project structure
 
-## Производительность
+```
+src/            ~70 modules of pure C (core, render, scene, world, UI, scripts)
+shaders/        GLSL: single sources, `#version` substituted for GLES or
+                desktop (`src/shader.c`), hot-reload by mtime
+map/            dev version of a map: map.json, map.png, img/, baked/, shaders/
+maps/           shipping paks: map1.zip
+img/ audio/     engine textures and sounds
+lua/            main.lua (engine script) and maps/<map>.lua
+models/         test .glb/.obj models (in .gitignore)
+cubemaps/       captured water reflection faces (cubemap_capture)
+tools/          make_map_zip.py, inject_baked.py, make_apk.sh, texture generators
+third_party/    SDL3 (optional), Lua 5.4, miniz, stb
+docs/           references (cvars, commands, map.json, Lua API) and developer
+                docs (architecture, testing, conventions, pitfalls)
+AGENTS.md       working rules for AI agents
+```
 
-Ключевые оптимизации рендера (замер — профайлер HUD, `H`):
+`buildnum.txt` is a local counter: every `make` increments it and writes
+`src/buildnum.h`; the number is visible in `version`
+(`firerender 0.4 build #N`).
 
-- **Тени**: каскады 2/3 (только статика — рельеф и деревья) не
-  перерисовываются, пока не сдвинулась снапнутая матрица (кэш карты глубины
-  в FBO). Растительность в ближних каскадах рисуется каждый кадр: обновление
-  через кадр даёт видимое мерцание качания (проверено). FR_TEST-тумблеры:
-  `C` — кэш выкл, `q` — растительность в тенях выкл.
-- **Полутень**: у ног тень резкая; дальше ~10 м радиус PCF плавно растёт до
-  2.5 текселей — сглаживает ступенчатость дальних карт, край остаётся читким.
-- **Погода**: блоки мокрости/снега в шейдерах рельефа и объектов пропускаются
-  целиком в ясную погоду (uniform-ветвление, −3..4 выборки на пиксель).
-- **GI**: LOD лучей по дистанции, отсев зеркального луча по френелю, денойз
-  с радиусом по дистанции. ~0.5 мс GPU на 720p.
-- Headless-замер/скриншот: `SDL_VIDEODRIVER=offscreen FR_TEST=S ./build/firerender`
-  (450 кадров прогрева, автоскриншот, выход; `SD` — с демо-полётом).
+## License
 
-## Отсутствующие ресурсы (Source Engine style)
+**MIT** — full text in [LICENSE](LICENSE). The code and engine assets of this
+repository are free: you may use, modify and distribute them provided the
+copyright notice is kept.
 
-Если текстура/картинка не найдена — движок подставляет `img/notfound.png`
-вместо чёрной дыры или вылета (как "missing texture" в Source Engine).
-Исключение — карта высот рельефа (`resources_image_strict`): подмена
-сделала бы мир плоским, поэтому отсутствие карты — честная ошибка.
-
-## Меню
-
-При запуске — главное меню (мир и карта НЕ грузятся, пока не нажмёте
-«Новая игра»). Фон — картинка `img/menu.png` (замените на свою). Логотип —
-слева по центру, пункты — слева внизу. Подменю (настройки, пауза) — окна
-с крестиком закрытия. Навигация: мышь или стрелки + Enter (как в HL1).
-
-- Новая игра — загрузка мира, старт на спавне; Продолжить — с места паузы
-- Настройки: Графика (полноэкранный, VSync, FOV, тени, туман, bloom)
-  и Управление (чувствительность, инверсия). Всё применяется сразу
-  и сохраняется в `config.cfg`.
-- ESC в игре — пауза; «В главное меню» — мир выгружается.
-
-## Управление (бинды, как в Half-Life)
-
-ВСЁ управление — через команды, привязанные к клавишам (`bind`). Движение —
-через `+команды`: `+forward` при нажатии, `-forward` при отпускании.
-
-- `bind <клавиша> <команда>` — привязать (можно комбинацию через `;`)
-- `unbind <клавиша>` — убрать, `bindlist` — список
-- Меню: Настройки → Управление → **Клавиши** — переназначить мышью
-- Бинды хранятся в `config.cfg` (строки `bind W +forward`)
-
-Команды по умолчанию: `WASD` — `+forward/+back/+left/+right`, `Space` —
-`+jump`, `Ctrl` — `+down`, `Shift` — `+speed`, `F` — `toggle_fly`,
-`[` — `toggle_shadows`, `P` — `toggle_fog`, `G` — `toggle_map`,
-`H` — `toggle_debug` (дебаг-панель, по умолчанию выключена), `Q` — `demo`.
-
-Мышь — обзор (колесо — FOV), `` ` `` — консоль, `ESC` — пауза/назад.
-
-## Платформы
-
-- Десктоп: Linux (Wayland/EGL, X11/GLX), Windows (WGL), macOS (CGL) — OpenGL 3.3 Core.
-- Мобильные/встраиваемые: Android, Web (Emscripten), `-DUSE_GLES` — OpenGL ES 3.0.
-
-Функции GL грузятся через `SDL_GL_GetProcAddress` — GLEW не нужен
-(он завязан на GLX и не работает на Wayland).
+Vendored third-party libraries keep their own licenses: Lua 5.4 (MIT),
+miniz (MIT), `stb_truetype.h` / `font8x8_basic.h` (public domain / MIT).

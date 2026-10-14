@@ -66,12 +66,21 @@ uniform mat4 uShadowMatrix3;
 uniform float uShadowBias3;
 uniform sampler2D uShadowDepth3;
 uniform float uShadowGrad3;
-uniform float uShadowOn;         // 1 = тени включены (клавиша [)
+uniform float uShadowOn;         // 1 = тени включены (клавиша [])
+uniform float uDetailDist;       // LOD деталей: дальше — чистая базовая карта
+                                 // (0 = полный сплаттинг везде, как было)
+uniform float uSimple;           // 1 = упрощённый рендер: циклы точек/прожекторов
+                                 // → 0, вторая октава детального шума пропущена.
+                                 // На СРЕДНИХ/УЛЬТРА uSimple=0 — путь не меняется.
 
 // Статические тени (режим 2): baked-карта на весь мир
 uniform sampler2D uStaticShadow;   // R8: 1 = свет, ~0.25 = тень
 uniform float uStaticOn;           // 1 = применять статическую карту
 uniform vec2 uWorldSize;           // размер мира (для UV)
+uniform sampler2D uBakedLM;        // RGB8 запечённый свет (offline, unit 11)
+uniform float uBakedOn;            // 1 = читать запечённый люксель вместо расчёта
+uniform sampler2D uSunVis;         // grayscale видимость солнца (offline, unit 16)
+uniform float uSunVisOn;           // 1 = подмешивать статику в дальние тени (режим 1)
 
 // Маска мокрости: запечённая R8 текстура, 0 = под нависающим (сухо), 1 = открытое небо
 uniform sampler2D uWetnessMask;
@@ -114,13 +123,12 @@ uniform float uSpotRange[SCENE_MAX_SPOT];
 uniform float uSpotAngle[SCENE_MAX_SPOT];
 uniform int uSpotCount;
 
-// границы каскадов — ПОЛОВИНЫ боксов: фрагмент на дистанции d гарантированно
-// в боксе каскада. На границах каскады СМЕШИВАЮТСЯ (зона ~20% от границы) —
-// иначе bias/мягкость прыгают и появляются кольца-полосы и дыры.
-#define SHADOW_BOX0 4.0f
-#define SHADOW_BOX1 8.0f
-#define SHADOW_BOX2 48.0f
-#define SHADOW_LIMIT 256.0f     // дальше — теней нет вообще
+// границы каскадов — uShadowBox[4]: РАДИУС покрытия каскада (половина
+// стороны бокса; бокс центрирован на камере, источник правды — SHADOW_BOX_*
+// в shadow.h) = {4,8,48,256}. На границах каскады СМЕШИВАЮТСЯ (зона ~20% от
+// границы) — иначе bias/мягкость прыгают и появляются кольца-полосы и дыры.
+// За uShadowBox[3] (256 м) теней нет — это край покрытия каскада 3.
+uniform float uShadowBox[4];
 
 out vec4 FragColor;
 
@@ -180,23 +188,23 @@ float shadow_soft(float dist) {
 
 // Тень по дистанции: выбор каскада с ПЛАВНЫМ смешиванием на границах
 // (зона ~20% перед границей) — убирает кольца-полосы и дыры между
-// каскадами. Дальше SHADOW_LIMIT — тени нет.
+// каскадами. Дальше uShadowBox[3] — тени нет.
 float shadow_at(vec3 wp, vec3 n) {
     float dist = distance(uCamPos, wp);
-    if (dist >= SHADOW_LIMIT) return 1.0;
+    if (dist >= uShadowBox[3]) return 1.0;
     float soft = shadow_soft(dist);
-    if (dist < SHADOW_BOX0) {
-        float t = smoothstep(SHADOW_BOX0 * 0.8, SHADOW_BOX0, dist);
+    if (dist < uShadowBox[0]) {
+        float t = smoothstep(uShadowBox[0] * 0.8, uShadowBox[0], dist);
         return mix(shadow_cascade(uShadowMap0, uShadowMatrix0, uShadowBias0, wp, n, soft),
                    shadow_cascade(uShadowMap1, uShadowMatrix1, uShadowBias1, wp, n, soft), t);
     }
-    if (dist < SHADOW_BOX1) {
-        float t = smoothstep(SHADOW_BOX1 * 0.8, SHADOW_BOX1, dist);
+    if (dist < uShadowBox[1]) {
+        float t = smoothstep(uShadowBox[1] * 0.8, uShadowBox[1], dist);
         return mix(shadow_cascade(uShadowMap1, uShadowMatrix1, uShadowBias1, wp, n, soft),
                    shadow_cascade(uShadowMap2, uShadowMatrix2, uShadowBias2, wp, n, soft), t);
     }
-    if (dist < SHADOW_BOX2) {
-        float t = smoothstep(SHADOW_BOX2 * 0.8, SHADOW_BOX2, dist);
+    if (dist < uShadowBox[2]) {
+        float t = smoothstep(uShadowBox[2] * 0.8, uShadowBox[2], dist);
         return mix(shadow_cascade(uShadowMap2, uShadowMatrix2, uShadowBias2, wp, n, soft),
                    shadow_cascade(uShadowMap3, uShadowMatrix3, uShadowBias3, wp, n, soft), t);
     }
@@ -204,6 +212,28 @@ float shadow_at(vec3 wp, vec3 n) {
 }
 
 void main() {
+    // Дальний туман — ранний выход. За uFogEnd fog = smoothstep(...) = 1.0,
+    // и весь шейдер сводится к col = mix(col, uFogColor, 1.0) = uFogColor.
+    // Значит base/normal/сплат/мокрость/свет/тени на этих пикселях считать
+    // незачем — результат ровно uFogColor. Срезает ВЕСЬ материал рельефа на
+    // дальней кромке (горизонт, вид сверху при полёте) — 8-12 текстурных
+    // выборок и цикл света на каждый такой пиксель. Байт-в-байт с прежним
+    // путём для ВСЕХ пресетов (условие uFogEnd > uFogStart гарантирует, что
+    // smoothstep в основном пути дал бы ровно 1.0).
+    if (uFogOn > 0.5 && uFogEnd > uFogStart &&
+        distance(uCamPos, vWorldPos) >= uFogEnd) {
+        FragColor = vec4(uFogColor, 1.0);
+        return;
+    }
+    // LOD деталей (uDetailDist > 0, режим «КАРТОШКА»): дальше дистанции
+    // детали не видны — шум нормалей и сплат-слои фейдятся в ноль, остаётся
+    // базовая карта (в неё уже вшита дальняя трава/дороги) + туман. Это
+    // срезает 6-8 текстурных выборок на БОЛЬШУЮ часть экрана.
+    float det_f = 0.0;
+    if (uDetailDist > 0.5) {
+        float dcam = distance(uCamPos, vWorldPos);
+        det_f = smoothstep(uDetailDist * 0.55, uDetailDist, dcam);
+    }
     vec3 base = texture(uBasemap, vUV * uTexScale).rgb;
     vec3 N = normalize(texture(uNormalmap, vUV).rgb * 2.0 - 1.0);
     // Детальные нормали на основе шума: у мелкомасштабного рельефа
@@ -214,10 +244,13 @@ void main() {
     // шума дают интерференцию — регулярную диагональную «рябь» на плоских
     // пространствах (у берега читалась как фальшивые дюны). С маской рябь
     // живёт пятнами, как настоящая microgeometry.
-    {
+    // Упрощённый рендер (КАРТОШКА): микрорельеф выключен целиком — 3
+    // текстурные выборки шума + normalize на каждый ближний пиксель земли
+    // срезаны, остаётся гладкая базовая нормаль. На СРЕДНИХ/УЛЬТРА — как было.
+    if (det_f < 0.999 && uSimple < 0.5) {
         vec2 nd = vWorldPos.xz;
         float mask = texture(uNoise, nd / 48.0 + 1.37).r;
-        float amp = 0.25 * (0.25 + 0.75 * mask * mask);
+        float amp = 0.25 * (0.25 + 0.75 * mask * mask) * (1.0 - det_f);
         float w1 = texture(uNoise, nd / 2.0 + 7.11).r;
         float w2 = texture(uNoise, nd / 8.0 + 3.77).r;
         vec2 perturb = vec2(w1 * 2.0 - 1.0, w2 * 2.0 - 1.0);
@@ -230,9 +263,9 @@ void main() {
     // шумовое возмущение нормали на асфальте (он ровный).
     float smooth_layer = 0.0;
     float layer_sum = 0.0;
-    if (uSplatOn > 0.5) {
+    if (uSplatOn > 0.5 && det_f < 0.999) {
         vec4 sp = texture(uSplat, vWorldPos.xz / uWorldSize);
-        layer_sum = min(sp.r + sp.g + sp.b + sp.a, 1.0);
+        layer_sum = min(sp.r + sp.g + sp.b + sp.a, 1.0) * (1.0 - det_f);
         if (layer_sum > 0.002) {
             vec3 c0 = texture(uLayer0, vWorldPos.xz / max(uLayerScale.x, 0.01)).rgb;
             vec3 c1 = texture(uLayer1, vWorldPos.xz / max(uLayerScale.y, 0.01)).rgb;
@@ -309,6 +342,15 @@ void main() {
     // вблизи игрока (2..3 м); дальше — статика. В режиме 1 (CSM) статика
     // выключена (uStaticOn = 0) — тени чистые каскадные на всю дистанцию.
     float shadow = csm;
+    // Режим 1 (CSM): за пределом каскадов (140..250 м) динамическая тень гаснет —
+    // подмешиваем ЗАПЕЧЁННУЮ статичную видимость солнца (uSunVis). Далёкие
+    // деревья и поле снова отбрасывают тень на горизонте, а вблизи всё честно
+    // динамическое. Плавный переход совпадает с затуханием CSM выше.
+    if (uSunVisOn > 0.5) {
+        float far = smoothstep(140.0, 250.0, distance(uCamPos, vWorldPos));
+        float svis = texture(uSunVis, vWorldPos.xz / uWorldSize).r;
+        shadow = mix(shadow, svis, far);
+    }
     if (uStaticOn > 0.5) {
         float st = texture(uStaticShadow, vWorldPos.xz / uWorldSize).r;
         shadow = mix(csm, st, smoothstep(2.0, 3.0, distance(uCamPos, vWorldPos)));
@@ -317,7 +359,16 @@ void main() {
     // Прямой свет: КАЖДЫЙ направленный источник из map.json освещает
     // землю ОТДЕЛЬНО (солнце = индекс 0, дальше — фоновые света).
     // Максимальная темнота глубже: в тени полусферный свет гаснет до 1/4.
-    vec3 light = amb * mix(0.25, 1.0, shadow);
+    vec3 light;
+    if (uBakedOn > 0.5) {
+        // Запечённый свет (offline, ТОЛЬКО режим 2 «статика»): RGB-люксель уже
+        // содержит ambient + AO по небу + прямой свет + СТАТИЧНУЮ тень +
+        // переотражённый бонс. Ни каскадов, ни полусферы — иначе тень
+        // считалась бы дважды (люксель × CSM). Динамику даёт режим 1 через
+        // ветку ниже.
+        light = texture(uBakedLM, vWorldPos.xz / uWorldSize).rgb;
+    } else {
+    light = amb * mix(0.25, 1.0, shadow);
     for (int i = 0; i < uLightCount; i++) {
         vec3 li = normalize(uLightDir[i]);
         float diff = max(dot(N, li), 0.0);
@@ -334,6 +385,12 @@ void main() {
                    * (rim * 0.35 + pow(diff, 8.0) * 0.18 * sh * (1.0 - wet));
         }
     }
+    }
+
+    // Точечные источники и прожекторы — только полный рендер. На картошке
+    // оба цикла схлопываются в ноль: землю освещает солнце, локальные
+    // источники на далёком поле почти не читаются.
+    if (uSimple < 0.5) {
     // Точечные источники: затухание по дистанции, локальный свет
     for (int i = 0; i < uPointCount; i++) {
         vec3 Lp = uPointPos[i] - vWorldPos;
@@ -355,6 +412,7 @@ void main() {
         float edge = smoothstep(uSpotAngle[i] - 0.08, uSpotAngle[i], cone);
         float diff = max(dot(N, lip), 0.0);
         light += uSpotColor[i] * uSpotIntensity[i] * (0.5 + 0.5 * diff) * att * edge;
+    }
     }
     light = min(light, vec3(1.0));
     vec3 col = base * light;

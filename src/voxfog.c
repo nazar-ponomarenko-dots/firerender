@@ -37,6 +37,16 @@ static const WorldState *s_world;   // рельеф и поле (плотнос�
 static float  s_wcol[3] = { 0.05f, 0.15f, 0.22f };   // тон тумана над водой
 
 static GLuint s_fbo = 0, s_tex = 0;   // приёмник композита bloom (полный экран)
+static GLuint s_fbo_half = 0, s_tex_half = 0;  // марш тумана в полразмера
+// Временное накопление (анти-мерцание джиттера): ping-pong истории полразмера
+static GLuint s_prog_temp = 0;                 // смешивание cur+prev (fog_temporal.fs)
+static GLuint s_tex_hist[2] = { 0, 0 }, s_fbo_hist = 0;
+static int    s_hist_idx = 0;                  // индекс DST-текстуры кадра
+static int    s_hist_valid = 0;                // 0 = истории нет (телепорт/старт)
+static GLint  u_temp_blend = -1;
+static GLuint s_prog_comp = 0;         // композит тумана на экране
+static GLint u_comp_scene = -1, u_comp_fog = -1;
+static GLint u_fogonly = -1, u_fogonly2d = -1;
 static GLuint s_prog = 0, s_vao = 0, s_vbo = 0;
 // Аналитический туман режима «Простой» (shaders/fog2d.fs): без 3D-текстур
 // и марша — высота рельефа из карты высот в 4 точках луча, замкнутые
@@ -58,12 +68,18 @@ static GLint u_wcol;    // цвет тумана над водой (средни
 static GLuint s_noise_tex = 0;
 static GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES], u_shadowbias[SHADOW_CASCADES];
 static GLint u_shadowgrad[SHADOW_CASCADES], u_shadowon;
+static GLint u_shadowbox;   // uShadowBox[4] — границы каскадов (god rays)
 
 // Режим тумана: 0 = выкл, 1 = объёмный (полное разрешение),
 // 2 = «дешёвый» объёмный в полном разрешении: марш только по грубому каскаду
 static int s_mode = 1;
 
-int voxfog_is_on(void)          { return s_on; }
+// s_world выставляется только в voxfog_init, а он вызывается лишь на
+// desktop-GL (в GLES-профиле рендерер объёмный туман не инициализирует).
+// Поэтому s_world == NULL — надёжный признак «подсистема не готова»: в этом
+// состоянии туман считается выключенным, и ни один проход, дёргающий
+// рельеф/шейдеры тумана, не запускается (иначе NULL-разыменование).
+int voxfog_is_on(void)          { return s_on && s_world != NULL; }
 void voxfog_toggle(void)        { s_on = !s_on; }
 void voxfog_set(int on)         { s_on = on; if (s_mode != 1) s_mode = on ? 1 : 0; }
 
@@ -191,6 +207,8 @@ static void voxfog_prog_init(void)
         u_shadowgrad[c] = glGetUniformLocation(s_prog, name);
     }
     u_shadowon   = glGetUniformLocation(s_prog, "uShadowOn");
+    u_shadowbox  = glGetUniformLocation(s_prog, "uShadowBox");
+    u_fogonly    = glGetUniformLocation(s_prog, "uFogOnly");
     glUseProgram(s_prog);
     glUniform1i(u_scene, 0);
     glUniform1i(u_scenedepth, 1);
@@ -215,6 +233,29 @@ static void voxfog_reshade(void)
     GLuint p2 = resources_program_replace(s_prog2d, "shaders/postfx.vs",
                                           "shaders/fog2d.fs");
     if (p2) s_prog2d = p2;
+    GLuint pc = resources_program_replace(s_prog_comp, "shaders/postfx.vs",
+                                          "shaders/fog_comp.fs");
+    if (pc) {
+        s_prog_comp = pc;
+        u_comp_scene = glGetUniformLocation(s_prog_comp, "uScene");
+        u_comp_fog   = glGetUniformLocation(s_prog_comp, "uFog");
+        if (s_prog_comp) {
+            glUseProgram(s_prog_comp);
+            glUniform1i(u_comp_scene, 0);
+            glUniform1i(u_comp_fog, 1);
+            glUseProgram(0);
+        }
+    }
+    GLuint pt = resources_program_replace(s_prog_temp, "shaders/postfx.vs",
+                                          "shaders/fog_temporal.fs");
+    if (pt) {
+        s_prog_temp = pt;
+        u_temp_blend = glGetUniformLocation(s_prog_temp, "uBlend");
+        glUseProgram(s_prog_temp);
+        glUniform1i(glGetUniformLocation(s_prog_temp, "uCur"), 0);
+        glUniform1i(glGetUniformLocation(s_prog_temp, "uPrev"), 1);
+        glUseProgram(0);
+    }
     voxfog_prog_init();
 }
 
@@ -288,13 +329,44 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         u2d_hmin      = glGetUniformLocation(s_prog2d, "uHeightMin");
         u2d_hmax      = glGetUniformLocation(s_prog2d, "uHeightMax");
         u2d_fogp      = glGetUniformLocation(s_prog2d, "uFogP");
+        u_fogonly2d   = glGetUniformLocation(s_prog2d, "uFogOnly");
         glUseProgram(s_prog2d);
         glUniform1i(glGetUniformLocation(s_prog2d, "uScene"), 0);
         glUniform1i(glGetUniformLocation(s_prog2d, "uSceneDepth"), 1);
         glUniform1i(u2d_heightmap, 10);
         glUseProgram(0);
     }
+    // Композит тумана на экран (после полразмерного марша)
+    if (!s_prog_comp) {
+        s_prog_comp = resources_program("shaders/postfx.vs",
+                                        "shaders/fog_comp.fs");
+        if (s_prog_comp) {
+            u_comp_scene = glGetUniformLocation(s_prog_comp, "uScene");
+            u_comp_fog   = glGetUniformLocation(s_prog_comp, "uFog");
+            glUseProgram(s_prog_comp);
+            glUniform1i(u_comp_scene, 0);
+            glUniform1i(u_comp_fog, 1);
+            glUseProgram(0);
+        }
+    }
     voxfog_prog_init();    // uniform'ы (для hot-reload)
+    // Временное накопление тумана (анти-мерцание джиттера марша)
+    if (!s_prog_temp) {
+        s_prog_temp = resources_program("shaders/postfx.vs",
+                                        "shaders/fog_temporal.fs");
+        if (s_prog_temp) {
+            u_temp_blend = glGetUniformLocation(s_prog_temp, "uBlend");
+            glUseProgram(s_prog_temp);
+            glUniform1i(glGetUniformLocation(s_prog_temp, "uCur"), 0);
+            glUniform1i(glGetUniformLocation(s_prog_temp, "uPrev"), 1);
+            glUseProgram(0);
+        }
+    }
+    cvar_register_ex("r_fog_accum", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
+                     "временное накопление объёмного тумана (анти-мерцание)");
+    cvar_register_ex("r_fog_accum_blend", 0.8f, 0.0f, 0.95f, CVAR_ARCHIVE,
+                     "вес истории тумана (0.8 = ~5 кадров усреднения)");
+    s_hist_valid = 0;      // новая карта — истории нет
     if (!s_prog) return;
     u_scenedepth = glGetUniformLocation(s_prog, "uSceneDepth");
     u_invviewproj = glGetUniformLocation(s_prog, "uInvViewProj");
@@ -341,6 +413,8 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         u_shadowgrad[c] = glGetUniformLocation(s_prog, name);
     }
     u_shadowon   = glGetUniformLocation(s_prog, "uShadowOn");
+    u_shadowbox  = glGetUniformLocation(s_prog, "uShadowBox");
+    u_fogonly    = glGetUniformLocation(s_prog, "uFogOnly");
     glUseProgram(s_prog);
     glUniform1i(u_scene, 0);
     glUniform1i(u_scenedepth, 1);
@@ -383,6 +457,52 @@ void voxfog_resize(int vw, int vh)
         glDeleteFramebuffers(1, &s_fbo);
         glDeleteTextures(1, &s_tex);
     }
+    if (s_fbo_half) {
+        glDeleteFramebuffers(1, &s_fbo_half);
+        glDeleteTextures(1, &s_tex_half);
+        s_fbo_half = s_tex_half = 0;
+    }
+    for (int i = 0; i < 2; i++)
+        if (s_tex_hist[i]) {
+            glDeleteTextures(1, &s_tex_hist[i]);
+            s_tex_hist[i] = 0;
+        }
+    if (s_fbo_hist) {
+        glDeleteFramebuffers(1, &s_fbo_hist);
+        s_fbo_hist = 0;
+    }
+    s_hist_valid = 0;
+    // Марш тумана в ПОЛРАЗМЕРЕ: RGBA8 (цвет тумана + trans в альфе).
+    // Гладкий туман билинейный апскейл не выдаёт, а фрагментов вчетверо меньше.
+    glGenTextures(1, &s_tex_half);
+    glBindTexture(GL_TEXTURE_2D, s_tex_half);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (vw + 1) / 2, (vh + 1) / 2, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &s_fbo_half);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo_half);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, s_tex_half, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // Ping-pong истории временного накопления — тот же полразмер, RGBA8
+    glGenFramebuffers(1, &s_fbo_hist);
+    for (int i = 0; i < 2; i++) {
+        glGenTextures(1, &s_tex_hist[i]);
+        glBindTexture(GL_TEXTURE_2D, s_tex_hist[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (vw + 1) / 2, (vh + 1) / 2, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo_hist);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, s_tex_hist[0], 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // Полный экран: сюда bloom пишет композит, туман ложится поверх
     glGenTextures(1, &s_tex);
     glBindTexture(GL_TEXTURE_2D, s_tex);
@@ -401,7 +521,7 @@ void voxfog_resize(int vw, int vh)
 
 void voxfog_update(const float cam_pos[3])
 {
-    if (!s_on) return;
+    if (!s_on || !s_world) return;   // не инициализирован (GLES) — ничего не строим
     // Режим 2 (аналитический): 3D-каскады не нужны вовсе — и память, и
     // CPU-перестройки при движении камеры не тратятся.
     if (s_mode == 2) return;
@@ -465,7 +585,8 @@ static void mat4_invert(const float *m, float *o)
 // проходят в полном разрешении экрана.
 static void render_volumetric(int vw, int vh, GLuint target_fbo,
                               const RendererContext *rc,
-                              GLuint scene_tex, GLuint scene_depth)
+                              GLuint scene_tex, GLuint scene_depth,
+                              int fogonly)
 {
     float invvp[16];
     mat4_invert(rc->viewproj, invvp);
@@ -481,6 +602,7 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     // 3D-текстур, марша и теневых запросов.
     if (s_mode == 2 && s_prog2d) {
         glUseProgram(s_prog2d);
+        if (u_fogonly2d >= 0) glUniform1f(u_fogonly2d, fogonly ? 1.0f : 0.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, scene_tex);
         glActiveTexture(GL_TEXTURE1);
@@ -516,6 +638,7 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     }
 
     glUseProgram(s_prog);
+    if (u_fogonly >= 0) glUniform1f(u_fogonly, fogonly ? 1.0f : 0.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_tex);
     glActiveTexture(GL_TEXTURE1);
@@ -580,19 +703,76 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         }
     }
     glUniform1f(u_shadowon, rc->shadow_on ? 1.0f : 0.0f);
+    if (u_shadowbox >= 0)
+        glUniform1fv(u_shadowbox, SHADOW_CASCADES, rc->shadow_box);
     glBindVertexArray(s_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glEnable(GL_DEPTH_TEST);
 }
 
-void voxfog_render(int vw, int vh, const RendererContext *rc,
-                   GLuint scene_tex, GLuint scene_depth)
+void voxfog_render(int scene_w, int scene_h, int out_w, int out_h,
+                   const RendererContext *rc, GLuint scene_tex, GLuint scene_depth)
 {
-    if (!s_on) return;
+    if (!s_on || !s_world) return;
     if (!s_prog || !s_fbo) return;
+    // Марш тумана в ПОЛРАЗМЕРЕ (цвет тумана + trans в альфе RGBA8),
+    // композит на экране — один сэмпл тумана и один сцены. Картинка та же
+    // (гладкий туман), фрагментов марша вчетверо меньше.
+    if (s_fbo_half && s_prog_comp) {
+        GLint prev_fbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+        render_volumetric((scene_w + 1) / 2, (scene_h + 1) / 2, s_fbo_half,
+                          rc, scene_tex, scene_depth, 1);
+        // Временное накопление: прошлый кадр тумана гасит покадровое зерно
+        // анимированного джиттера марша. Кламп в AABB соседей текущего кадра
+        // не даёт шлейфа при движении. Гейт — r_fog_accum; режим 2 (аналитический
+        // fog2d) без джиттера — накопление не нужно.
+        GLuint fog_tex = s_tex_half;
+        int hw = (scene_w + 1) / 2, hh = (scene_h + 1) / 2;
+        if (s_mode != 2 && s_prog_temp && cvar_get("r_fog_accum") > 0.5f) {
+            int cur = s_hist_idx;
+            glBindFramebuffer(GL_FRAMEBUFFER, s_fbo_hist);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, s_tex_hist[cur], 0);
+            glViewport(0, 0, hw, hh);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_BLEND);
+            glUseProgram(s_prog_temp);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, s_tex_half);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, s_tex_hist[1 - cur]);
+            glUniform1f(u_temp_blend, s_hist_valid
+                                          ? cvar_get("r_fog_accum_blend")
+                                          : 0.0f);
+            glBindVertexArray(s_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glActiveTexture(GL_TEXTURE0);
+            s_hist_idx = 1 - cur;   // следующий кадр пишет в другую половину
+            s_hist_valid = 1;
+            fog_tex = s_tex_hist[cur];
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, out_w, out_h);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glUseProgram(s_prog_comp);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, scene_tex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, fog_tex);
+        glBindVertexArray(s_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glEnable(GL_DEPTH_TEST);
+        glActiveTexture(GL_TEXTURE0);
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+        return;
+    }
     // Один и тот же проход в ПОЛНОМ разрешении экрана. Режим 2 отличается
     // только выборкой каскада (uFogMode): марш по одному грубому каскаду.
-    render_volumetric(vw, vh, 0, rc, scene_tex, scene_depth);
+    render_volumetric(out_w, out_h, 0, rc, scene_tex, scene_depth, 0);
 }
 
 void voxfog_cleanup(void)
@@ -602,6 +782,29 @@ void voxfog_cleanup(void)
     if (s_fbo) {
         glDeleteFramebuffers(1, &s_fbo);
         glDeleteTextures(1, &s_tex);
+    }
+    if (s_fbo_half) {
+        glDeleteFramebuffers(1, &s_fbo_half);
+        glDeleteTextures(1, &s_tex_half);
+        s_fbo_half = s_tex_half = 0;
+    }
+    for (int i = 0; i < 2; i++)
+        if (s_tex_hist[i]) {
+            glDeleteTextures(1, &s_tex_hist[i]);
+            s_tex_hist[i] = 0;
+        }
+    if (s_fbo_hist) {
+        glDeleteFramebuffers(1, &s_fbo_hist);
+        s_fbo_hist = 0;
+    }
+    s_hist_valid = 0;
+    if (s_prog_temp) {
+        resources_program_release(s_prog_temp);
+        s_prog_temp = 0;
+    }
+    if (s_prog_comp) {
+        resources_program_release(s_prog_comp);
+        s_prog_comp = 0;
     }
     if (s_prog) resources_program_release(s_prog);
     if (s_prog2d) resources_program_release(s_prog2d);
@@ -613,4 +816,5 @@ void voxfog_cleanup(void)
     s_prog2d = 0;
     s_noise_tex = 0;
     s_on = 0;
+    s_world = NULL;   // мир выгружен — до следующего voxfog_init подсистема мертва
 }

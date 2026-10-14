@@ -47,8 +47,13 @@ void main() {
     }
 
     vec3 sc = texture(uScene, uv).rgb;
-    vec3 gl = texture(uGlow, uv).rgb;
-    vec3     c = sc + gl * uStrength;
+    // glow-выборку берём только когда bloom реально включён (uStrength > 0).
+    // При выключенном bloom (КАРТОШКА, uStrength = 0) glow всё равно умножался
+    // бы на ноль — фуллскрин-выборка glow-текстуры впустую. Пропуск байт-в-байт
+    // с прежним путём (sc + 0), а на iGPU экономит полный проход по glow-буферу.
+    vec3     c = sc;
+    if (uStrength > 0.0)
+        c += texture(uGlow, uv).rgb * uStrength;
 
     c *= uExposure;
 

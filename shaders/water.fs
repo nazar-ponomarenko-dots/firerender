@@ -84,10 +84,19 @@ float waveY(vec2 p, float t) {
                                  + t * uWaveSpeed * 1.6);
 }
 
+float sample_height16(vec2 uv) {
+    vec2 h = texture(uHeightmap, uv).rg;
+#ifdef FR_HEIGHT_RG8
+    return (h.r * 65280.0 + h.g * 255.0) / 65535.0;
+#else
+    return h.r;
+#endif
+}
+
 void main() {
     // Глубина: рельеф под водой (карта высот), вода есть, где ниже uLevel.
     float terrainH = mix(uHeightMin, uHeightMax,
-                         texture(uHeightmap, vWorldPos.xz / uWorldSize).r);
+                         sample_height16(vWorldPos.xz / uWorldSize));
     float waterDepth = uLevel - terrainH;
     if (waterDepth <= 0.02) discard;          // сухой берег
 

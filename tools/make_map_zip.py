@@ -57,6 +57,15 @@ for rel in sorted(set(refs)):
         files.append((rel, src))
         added.add(rel)
 
+# Запечённый свет (make mapbake): всё из map/baked/ кладём в zip как baked/*.
+# Движок читает baked/lightmap.png и baked/probes.bin (см. terrain.c).
+baked_dir = os.path.join(MAP_DIR, "baked")
+if os.path.isdir(baked_dir):
+    for fn in sorted(os.listdir(baked_dir)):
+        src = os.path.join(baked_dir, fn)
+        if os.path.isfile(src):
+            files.append(("baked/" + fn, src))
+
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
     for name, src in files:

@@ -17,6 +17,7 @@
 #include "objects.h"
 
 #include "assets.h"
+#include "bloom.h"
 #include "cvars.h"
 #include "gl_loader.h"
 #include "linalg.h"
@@ -216,6 +217,29 @@ static GLuint texture_custom(const unsigned char *img, int w, int h,
     return tex;
 }
 
+static void objects_params_release(ObjectsParams *p)
+{
+    if (!p) return;
+    if (s_objs == p) s_objs = NULL;
+    s_col_n = 0;
+    s_box_n = 0;
+    for (int i = 0; i < p->count; i++) {
+        if (p->inst[i].tex_custom)
+            glDeleteTextures(1, &p->inst[i].tex_custom);
+        else if (p->inst[i].tex)
+            resources_texture_release(p->inst[i].tex);
+        if (p->inst[i].prog) resources_program_release(p->inst[i].prog);
+    }
+    if (p->prog) resources_program_release(p->prog);
+    if (p->flat_prog) resources_program_release(p->flat_prog);
+    if (p->shadow_prog) resources_program_release(p->shadow_prog);
+    if (p->blob_prog) resources_program_release(p->blob_prog);
+    if (p->blob_tex) resources_texture_release(p->blob_tex);
+    if (p->vbo) glDeleteBuffers(1, &p->vbo);
+    if (p->ibo) glDeleteBuffers(1, &p->ibo);
+    if (p->vao) glDeleteVertexArrays(1, &p->vao);
+}
+
 SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
 {
     ObjectsParams *p = calloc(1, sizeof *p);
@@ -336,7 +360,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
 
     // --- Шейдеры ---
     p->prog = make_program("shaders/object.vs", "shaders/object.fs");
-    if (!p->prog) { free(p); return NULL; }
+    if (!p->prog) { objects_params_release(p); free(p); return NULL; }
     p->locs = obj_locs(p->prog);
     p->flat_prog = make_program("shaders/object.vs", "shaders/object_flat.fs");
     if (p->flat_prog) p->flat_locs = obj_locs(p->flat_prog);
@@ -401,7 +425,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     // --- Теневой шейдер (глубина с альфа-тестом) ---
     p->shadow_prog = make_program("shaders/object_shadow.vs",
                                   "shaders/object_shadow.fs");
-    if (!p->shadow_prog) { free(p); return NULL; }
+    if (!p->shadow_prog) { objects_params_release(p); free(p); return NULL; }
     p->s_viewproj = glGetUniformLocation(p->shadow_prog, "uViewProj");
     p->s_objpos   = glGetUniformLocation(p->shadow_prog, "uObjPos");
     p->s_objsize  = glGetUniformLocation(p->shadow_prog, "uObjSize");
@@ -432,8 +456,13 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     shader_on_reshade(objects_reshade);
 
     const float size[3] = { 100.0f, OBJECT_BASE_H * 4.0f, 100.0f };
-    return node_new("Objects", "MeshInstance3D", NULL, size, p,
-                    NULL, objects_node_render);
+    SceneNode *node = node_new("Objects", "MeshInstance3D", NULL, size, p,
+                               NULL, objects_node_render);
+    if (!node) {
+        objects_params_release(p);
+        free(p);
+    }
+    return node;
 }
 
 // Теневой проход (RP_SHADOW): та же геометрия и выбор грани, что в цветном
@@ -515,6 +544,13 @@ void objects_node_render(SceneNode *n, float dt)
         glBindTexture(GL_TEXTURE_2D, p->blob_tex);
         for (int i = 0; i < p->count; i++) {
             ObjectInst *it = &p->inst[i];
+            // Пятно не во фрустуме — мимо (и uniform'ы не льём): без этого
+            // слабый iGPU перемалывал тысячи невидимых квадов каждый кадр
+            if (!frustum_test_sphere(&p->rc->frustum, it->pos[0],
+                                     it->pos[1] + it->height * 0.5f,
+                                     it->pos[2],
+                                     it->height + it->width))
+                continue;
             float h = it->height;
             float sz = it->width * 0.65f;
             float px = it->pos[0] - sdx * h * 0.55f;
@@ -532,7 +568,15 @@ void objects_node_render(SceneNode *n, float dt)
         glUseProgram(0);
     }
 
-    GLuint cur = 0;
+    GLuint cur = 0, cur_tex = 0;
+    Material mat_cache;
+    int mat_valid = 0;
+    // MSAA не сглаживает alpha-cutout края (discard) — для альфа-тестовых
+    // материалов включаем alpha-to-coverage (полупрозрачная кромка текселя
+    // даёт частичное покрытие сэмплов). Блендинговые материалы не трогаем:
+    // там частичное покрытие умножалось бы на блендинг (a*a на краях).
+    const int msaa_on = bloom_msaa_active() > 0;
+    int a2c = 0;
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
         // Отсечение фрустумом: сфера (позиция + максимальный размер)
@@ -546,19 +590,31 @@ void objects_node_render(SceneNode *n, float dt)
             const ObjLocs *l = it->prog ? &it->locs : &p->locs;
             glUseProgram(prog);
             set_per_frame(l, p);
+            mat_valid = 0;
         }
         const ObjLocs *l = it->prog ? &it->locs : &p->locs;
 
-        // Материал: состояние GL (блендинг/отсечение/глубина) + uniform'ы
-        // (tint/alpha/blend/UV-анимация) — см. material.h
-        material_bind(&it->r, &l->mat, s_time);
+        material_bind_cached(&it->r, &l->mat, s_time, &mat_cache, &mat_valid);
 
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, it->tex);
+        int want_a2c = msaa_on && mat_cache.blend == MAT_BLEND_ALPHATEST;
+        if (want_a2c != a2c) {
+            a2c = want_a2c;
+            if (a2c) glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+            else     glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        }
+
+        if (it->tex != cur_tex) {
+            cur_tex = it->tex;
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, it->tex);
+        }
         glUniform3f(l->u_objpos, it->pos[0], it->pos[1], it->pos[2]);
         glUniform2f(l->u_objsize, it->width, it->height);
         if (l->u_objslope >= 0)
             glUniform2f(l->u_objslope, it->slope[0], it->slope[1]);
+        // Запечённый свет: сэмплим пробу в середине высоты объекта (крона).
+        scene_uniforms_probe(&l->su, it->pos[0], it->pos[1] + it->height * 0.5f,
+                             it->pos[2]);
         // Ось ширины квада:
         //  - биллборд: перпендикуляр к направлению на камеру (квад к ней);
         //  - крест: статичный выбор грани по углу обзора.
@@ -576,6 +632,7 @@ void objects_node_render(SceneNode *n, float dt)
         }
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
     }
+    if (a2c) glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     glDisable(GL_CULL_FACE);
@@ -623,24 +680,5 @@ void objects_cleanup(SceneNode *n)
     if (!n) return;
     ObjectsParams *p = n->params;
     if (!p) return;
-    if (s_objs == p) s_objs = NULL;
-    s_col_n = 0;
-    s_box_n = 0;
-    for (int i = 0; i < p->count; i++) {
-        if (p->inst[i].tex_custom)
-            glDeleteTextures(1, &p->inst[i].tex_custom);
-        else
-            resources_texture_release(p->inst[i].tex);
-        if (p->inst[i].prog) resources_program_release(p->inst[i].prog);
-    }
-    resources_program_release(p->prog);
-    if (p->flat_prog) resources_program_release(p->flat_prog);
-    resources_program_release(p->shadow_prog);
-    if (p->blob_prog) {
-        resources_program_release(p->blob_prog);
-        resources_texture_release(p->blob_tex);
-    }
-    glDeleteBuffers(1, &p->vbo);
-    glDeleteBuffers(1, &p->ibo);
-    glDeleteVertexArrays(1, &p->vao);
+    objects_params_release(p);
 }
