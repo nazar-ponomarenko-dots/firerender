@@ -1,12 +1,12 @@
 // ============================================================================
-//  Text — вершинный шейдер HUD-текста
+//  Text — vertex shader for HUD text
 // ----------------------------------------------------------------------------
-//  Как мини-карта: позиции вершин уже готовы в NDC (их считает узел
-//  DebugHUD в main.c), матрицы не нужны.
+//  Like the minimap: vertex positions are already prepared in NDC (computed by
+//  the DebugHUD node in main.c), no matrices needed.
 // ============================================================================
 
-layout (location = 0) in vec2 aPos;   // позиция в NDC
-layout (location = 1) in vec2 aUV;    // uv в атласе шрифта
+layout (location = 0) in vec2 aPos;   // position in NDC
+layout (location = 1) in vec2 aUV;    // uv in the font atlas
 
 out vec2 vUV;
 

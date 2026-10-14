@@ -1,5 +1,5 @@
 // ============================================================================
-//  mapdata.c — загрузка map/map.json: поле, свет, объекты (см. mapdata.h)
+//  mapdata.c — loading map/map.json: field, light, objects (see mapdata.h)
 // ============================================================================
 #include "mapdata.h"
 
@@ -12,9 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAP_MAX_LIGHTS   16    // потолок источников света из JSON
-#define MAP_MAX_OBJECTS  256   // потолок объектов (моделей) из JSON
-#define MAP_MAX_COLLISIONS 256 // потолок коллизий-квадратов
+#define MAP_MAX_LIGHTS   16    // cap on light sources from JSON
+#define MAP_MAX_OBJECTS  256   // cap on objects (models) from JSON
+#define MAP_MAX_COLLISIONS 256 // cap on square colliders
 
 static MapLight s_lights[MAP_MAX_LIGHTS];
 static int s_light_count;
@@ -38,7 +38,7 @@ static float s_player_pos[3];
 static float s_player_yaw, s_player_pitch, s_player_fov = 60.0f;
 static int s_player_set;
 
-// Финальный формат карты: info, ambient/music, commands[], cvars{}
+// Final map format: info, ambient/music, commands[], cvars{}
 static MapInfo s_info;
 static MapSound s_ambient, s_music;
 static int s_ambient_set, s_music_set;
@@ -48,7 +48,7 @@ static char s_cvar_names[MAP_MAX_CVARS][64];
 static float s_cvar_values[MAP_MAX_CVARS];
 static int s_cvar_count;
 
-// Воксельный объёмный туман (fog = { ... } в map.json)
+// Voxel volumetric fog (fog = { ... } in map.json)
 static MapFog s_fog = {
     .enabled = 1,
     .strength = 0.9f,
@@ -58,13 +58,13 @@ static MapFog s_fog = {
     .field_height = 8.0f,
     .density_water = 0.030f,
     .water_height = 4.0f,
-    .color = { 0.52f, 0.56f, 0.60f },      // базовый цвет тумана (дымка)
-    .color_sun = { 0.85f, 0.62f, 0.45f },  // тёплый к солнцу
+    .color = { 0.52f, 0.56f, 0.60f },      // base fog color (haze)
+    .color_sun = { 0.85f, 0.62f, 0.45f },  // warm toward the sun
     .glare = 0.20f,
     .ray_strength = 1.4f,
 };
 
-// Рельеф (terrain = { ... })
+// Terrain (terrain = { ... })
 static MapTerrain s_terrain = {
     .min_height = -100.0f, .max_height = 400.0f,
     .band_t0 = 0.16f, .band_t1 = 0.40f,
@@ -80,7 +80,7 @@ static MapTerrain s_terrain = {
     .fog_start = 0.75f, .fog_end = 1.60f,
 };
 
-// Растительность (veg = { ... })
+// Vegetation (veg = { ... })
 static MapVeg s_veg = {
     .grass_density = 1.2f, .wheat_density = 140.0f,
     .grass_floor = 0.012f, .wheat_floor = 1.0f,
@@ -89,37 +89,37 @@ static MapVeg s_veg = {
     .falloff = 16.0f,
 };
 
-// Небо (sky = { ... })
+// Sky (sky = { ... })
 static MapSky s_sky = {
     .tint = { 1.0f, 1.0f, 1.0f },
     .tex = "img/skybox.png",
 };
 
-// Постобработка (bloom = { ... })
+// Post-processing (bloom = { ... })
 static MapBloom s_bloom = {
     .threshold = 0.75f, .intensity = 1.0f, .strength = 0.425f,
 };
 
-// Тени (shadows = { ... })
+// Shadows (shadows = { ... })
 static MapShadows s_shadows = {
     .size = 2048,
 };
 
-// Поверхности рельефа (surfaces = { ... }) — слои splat-карты.
-// Порядок фиксирован индексами SPLAT_*: dirt, sand, gravel, asphalt.
+// Terrain surfaces (surfaces = { ... }) — splat-map layers.
+// The order is fixed by the SPLAT_* indices: dirt, sand, gravel, asphalt.
 static MapSurfaces s_surfaces = {
     .tex = { "img/dirt.png", "img/sand.png", "img/gravel.png",
              "img/asphalt.png" },
     .scale = { 3.0f, 2.5f, 2.0f, 4.0f },
-    // На грунте трава редкая, на песке/щебне/асфальте её нет вовсе.
+    // Grass is sparse on dirt, absent entirely on sand/gravel/asphalt.
     .grass = { 0.25f, 0.0f, 0.0f, 0.0f },
-    .resolution = 1.0f,      // 1 тексель splat-карты на метр
-    .slope_rock = 42.0f,     // круче 42° — камень проступает сам
+    .resolution = 1.0f,      // one splat-map texel per meter
+    .slope_rock = 42.0f,     // steeper than 42° — rock shows through on its own
     .set = 0,
 };
 
-// Снимок встроенных defaults. Каждая карта разбирается с чистого состояния:
-// отсутствующая секция не должна наследовать параметры предыдущей карты.
+// Snapshot of the built-in defaults. Each map is parsed from a clean state:
+// a missing section must not inherit the previous map's parameters.
 static MapFog s_fog_default;
 static MapTerrain s_terrain_default;
 static MapVeg s_veg_default;
@@ -150,20 +150,20 @@ static void mapdata_reset_defaults(void)
     s_surfaces = s_surfaces_default;
 }
 
-// Покраска поверхности (paints[]) и дороги (roads[])
+// Surface painting (paints[]) and roads (roads[])
 static MapPaint s_paints[MAP_MAX_PAINTS];
 static int s_paint_count;
 static MapRoad s_roads[MAP_MAX_ROADS];
 static int s_road_count;
 
-// Читает map.json через менеджер ресурсов (диск -> ../диск -> вшитые данные).
-// Возвращает malloc'нутый текст или NULL.
+// Reads map.json through the resource manager (disk -> ../disk -> embedded data).
+// Returns malloc'ed text or NULL.
 static char *read_map_json(const char *path)
 {
     return resources_read_text(path);
 }
 
-// Массив [x, y, z] -> float[3] (недостающие элементы = def)
+// Array [x, y, z] -> float[3] (missing elements = def)
 static void parse_vec3(const JsonNode *arr, float out[3], float def)
 {
     out[0] = (float)json_num(json_array_get(arr, 0), def);
@@ -171,7 +171,7 @@ static void parse_vec3(const JsonNode *arr, float out[3], float def)
     out[2] = (float)json_num(json_array_get(arr, 2), def);
 }
 
-// Блок render = { ... } — полная настройка отображения объекта
+// render = { ... } block — full configuration of an object's appearance
 static void parse_render(const JsonNode *obj, Material *r)
 {
     const JsonNode *rd = json_find(obj, "render");
@@ -205,7 +205,7 @@ static void parse_render(const JsonNode *obj, Material *r)
         else if (strcmp(cu, "front") == 0) r->cull = MAT_CULL_FRONT;
     }
     r->depth_write = json_bool(json_find(rd, "depth_write"), r->depth_write);
-    // Текстура: wrap | filter | tile | offset | scroll
+    // Texture: wrap | filter | tile | offset | scroll
     const JsonNode *tx = json_find(rd, "texture");
     if (tx) {
         const char *wr = json_str(json_find(tx, "wrap"), "");
@@ -234,7 +234,7 @@ static void parse_render(const JsonNode *obj, Material *r)
             r->scroll[1] = (float)json_num(json_array_get(scr, 1), 0.0);
         }
     }
-    // Фикс. размер: size = { "width": 10, "height": 6 } (метры)
+    // Fixed size: size = { "width": 10, "height": 6 } (meters)
     const JsonNode *sz = json_find(rd, "size");
     if (sz) {
         r->fixed_size = 1;
@@ -243,7 +243,7 @@ static void parse_render(const JsonNode *obj, Material *r)
     }
 }
 
-// Общий парсер: массив строк "commands" -> массив команд
+// Shared parser: "commands" string array -> command array
 static void parse_commands(const JsonNode *obj, const char *key,
                            char out[MAP_ACTIONS_MAX][MAP_CMD_LEN], int *n)
 {
@@ -257,7 +257,7 @@ static void parse_commands(const JsonNode *obj, const char *key,
     }
 }
 
-// Сообщение + звук (общие поля действий)
+// Message + sound (fields common to actions)
 static void parse_action_sound(const JsonNode *obj, char *message, int msz,
                                char *sound, int ssz)
 {
@@ -267,7 +267,7 @@ static void parse_action_sound(const JsonNode *obj, char *message, int msz,
     if (snd[0]) snprintf(sound, (size_t)ssz, "%s", snd);
 }
 
-// Блок use = { ... } — взаимодействие с объектом по E
+// use = { ... } block — interacting with an object via E
 static void parse_use(const JsonNode *obj, MapUse *u)
 {
     const JsonNode *us = json_find(obj, "use");
@@ -338,9 +338,9 @@ static void parse_fauna(const JsonNode *obj)
     s_fauna_count++;
 }
 
-// Блок water = { type, level, ... }: лужа/озеро/река/море. Значения по
-// умолчанию подобраны для каждого типа (см. water.c — они же используются
-// узлом воды). Неизвестный тип пропускается с руганью в лог.
+// water = { type, level, ... } block: puddle/lake/river/sea. The default
+// values are tuned per type (see water.c — the water node uses the same ones).
+// An unknown type is skipped with a complaint in the log.
 static void parse_water(const JsonNode *obj)
 {
     if (s_water_count >= MAP_MAX_WATERS) return;
@@ -357,7 +357,7 @@ static void parse_water(const JsonNode *obj)
     }
     snprintf(w->name, sizeof w->name, "%s",
              json_str(json_find(obj, "name"), ""));
-    // Уровень и форма: круг (pos+radius) или осевая линия реки (points)
+    // Level and shape: a circle (pos+radius) or a river centerline (points)
     const JsonNode *pos = json_find(obj, "pos");
     if (pos && json_array_len(pos) == 2) {
         w->center[0] = (float)json_num(json_array_get(pos, 0), 0);
@@ -378,16 +378,16 @@ static void parse_water(const JsonNode *obj)
             w->point_n++;
         }
     }
-    // Река без осевой линии смысла не имеет (нечем мазать русло)
+    // A river without a centerline makes no sense (nothing to paint the bed with)
     if (w->type == WATER_RIVER && w->point_n < 2) {
         SDL_Log("Map: river '%s' needs at least 2 points, skipped",
                 w->name[0] ? w->name : "?");
         return;
     }
-    // Уровень воды (м): у моря это ГЛОБАЛЬНЫЙ уровень; по умолчанию —
-    // чуть ниже игровой полосы рельефа, чтобы вода не топила спавн.
+    // Water level (m): for the sea it is the GLOBAL level; the default is
+    // slightly below the gameplay terrain band so water does not drown the spawn.
     w->level = (float)json_num(json_find(obj, "level"), -60.0f);
-    // Вид: дефолтные параметры зависят от типа.
+    // Appearance: default parameters depend on the type.
     switch (w->type) {
     case WATER_PUDDLE:
         w->depth = 0.6f;
@@ -411,7 +411,7 @@ static void parse_water(const JsonNode *obj)
         w->alpha = 0.85f;
         w->wave_amp = 0.05f;
         w->wave_speed = 1.4f;
-        w->flow_speed = 1.2f;   // м/с вдоль осевой линии
+        w->flow_speed = 1.2f;   // m/s along the centerline
         w->foam = 0.5f;
         break;
     case WATER_SEA:
@@ -436,9 +436,9 @@ static void parse_water(const JsonNode *obj)
         w->flow[1] = (float)json_num(json_array_get(fl, 1), 0);
     }
     w->foam = (float)json_num(json_find(obj, "foam"), w->foam);
-    // Направление течения реки: средняя ось -> направление по XZ.
-    // Если в JSON нет flow и ось не задана, берём от первого к последнему
-    // сегменту (вода бежит по цепочке точек).
+    // River flow direction: from the centerline axis -> XZ direction.
+    // If JSON has no flow and the axis is not given, derive it from the first
+    // to the last segment (water runs along the point chain).
     if (w->type == WATER_RIVER && w->flow[0] == 0.0f && w->flow[1] == 0.0f &&
         w->point_n >= 2) {
         float dx = 0, dz = 0;
@@ -452,7 +452,7 @@ static void parse_water(const JsonNode *obj)
     s_water_count++;
 }
 
-// Тип света из строки JSON ("directional"/"point"/"spot"). -1 — неизвестный.
+// Light type from a JSON string ("directional"/"point"/"spot"). -1 — unknown.
 static int parse_light_type(const char *s)
 {
     if (strcmp(s, "directional") == 0) return LIGHT_DIRECTIONAL;
@@ -461,9 +461,9 @@ static int parse_light_type(const char *s)
     return -1;
 }
 
-// --- Поверхности рельефа: имя материала -> индекс слоя splat ------------------
-// Имена совпадают с ключами блока surfaces (dirt/sand/gravel/asphalt).
-// -1 — неизвестное имя (вызывающий ругается в лог и пропускает запись).
+// --- Terrain surfaces: material name -> splat layer index ------------------
+// The names match the surfaces block keys (dirt/sand/gravel/asphalt).
+// -1 — unknown name (the caller complains in the log and skips the entry).
 static int parse_splat_material(const char *s)
 {
     if (!s || !s[0]) return -1;
@@ -474,7 +474,7 @@ static int parse_splat_material(const char *s)
     return -1;
 }
 
-// Читает список точек [[x,z], ...] в out (не больше max). Возвращает сколько.
+// Reads a [[x,z], ...] point list into out (at most max). Returns how many.
 static int parse_points2(const JsonNode *pts, float out[][2], int max)
 {
     if (!pts) return 0;
@@ -489,8 +489,8 @@ static int parse_points2(const JsonNode *pts, float out[][2], int max)
     return k;
 }
 
-// Блок surfaces = { dirt: { tex, scale, grass }, ..., resolution, slope_rock }.
-// Каждый слой можно настроить отдельно; чего нет — остаётся дефолт.
+// surfaces = { dirt: { tex, scale, grass }, ..., resolution, slope_rock } block.
+// Each layer can be configured individually; whatever is missing keeps its default.
 static void parse_surfaces(const JsonNode *obj)
 {
     if (!obj) return;
@@ -515,8 +515,8 @@ static void parse_surfaces(const JsonNode *obj)
     s_surfaces.set = 1;
 }
 
-// Элемент paints[]: { material, shape, ... }. shape по умолчанию выводится
-// из заданных полей (есть points -> path, есть size -> rect, иначе circle).
+// paints[] element: { material, shape, ... }. The default shape is inferred
+// from the given fields (points present -> path, size present -> rect, else circle).
 static void parse_paint(const JsonNode *obj)
 {
     if (s_paint_count >= MAP_MAX_PAINTS) return;
@@ -560,9 +560,9 @@ static void parse_paint(const JsonNode *obj)
     s_paint_count++;
 }
 
-// Элемент roads[]: осевая линия + пресет по типу. Пресеты подобраны так,
-// чтобы «дорога из коробки» выглядела правильно: асфальт ровный с щебневой
-// обочиной, грунтовка с колеями, тропинка узкая и почти не режет рельеф.
+// roads[] element: centerline + a preset per type. The presets are tuned so
+// that an «out-of-the-box road» looks right: asphalt is flat with a gravel
+// shoulder, a dirt road has ruts, a trail is narrow and barely cuts the terrain.
 static void parse_road(const JsonNode *obj)
 {
     if (s_road_count >= MAP_MAX_ROADS) return;
@@ -606,7 +606,7 @@ static void parse_road(const JsonNode *obj)
         break;
     }
     r->veg_clear = 1;
-    // Переопределения из JSON (любое поле пресета)
+    // Overrides from JSON (any preset field)
     const char *mat = json_str(json_find(obj, "material"), "");
     int m = parse_splat_material(mat);
     if (m >= 0) r->material = m;
@@ -651,13 +651,13 @@ static void parse_light(const JsonNode *obj)
     l->intensity = (float)json_num(json_find(obj, "intensity"), 1.0);
     l->range = (float)json_num(json_find(obj, "range"), 20.0);
     l->angle = (float)json_num(json_find(obj, "angle"), 0.6);
-    // Тени источника: shadow = { enabled, bias, bias_veg }. Значения по
-    // умолчанию совпадают с прежними константами (4/2 латеральных текселя).
+    // Light shadows: shadow = { enabled, bias, bias_veg }. The defaults
+    // match the previous constants (4/2 lateral texels).
     const JsonNode *sh = json_find(obj, "shadow");
     l->shadow_on = json_bool(json_find(sh, "enabled"), 1);
     l->shadow_bias = (float)json_num(json_find(sh, "bias"), 4.0);
     l->shadow_bias_veg = (float)json_num(json_find(sh, "bias_veg"), 2.0);
-    // attached — свет следует за игроком (точечный фонарь)
+    // attached — the light follows the player (a point lantern)
     l->attached = json_bool(json_find(obj, "attached"), 0);
     s_light_count++;
 }
@@ -671,7 +671,7 @@ static void parse_object(const JsonNode *obj)
              json_str(json_find(obj, "name"), ""));
     snprintf(o->model, sizeof o->model, "%s",
              json_str(json_find(obj, "model"), ""));
-    // Класс сущности (для entity-системы); по умолчанию — prop_static
+    // Entity class (for the entity system); defaults to prop_static
     snprintf(o->class, sizeof o->class, "%s",
              json_str(json_find(obj, "class"), "prop_static"));
     parse_vec3(json_find(obj, "pos"), o->pos, 0.0f);
@@ -681,11 +681,11 @@ static void parse_object(const JsonNode *obj)
         parse_vec3(sc, o->scale, 1.0f);
     else
         o->scale[0] = o->scale[1] = o->scale[2] = 1.0f;
-    // Биллборд/коллизия/радиус: флаги по умолчанию выключены
+    // Billboard/collision/radius: flags default to off
     o->billboard = json_bool(json_find(obj, "billboard"), 0);
     o->collision = json_bool(json_find(obj, "collision"), 0);
     o->radius = (float)json_num(json_find(obj, "radius"), 1.5);
-    // Шейдер: встроенное имя ("default"/"billboard"/"flat") или свой файл:
+    // Shader: a built-in name ("default"/"billboard"/"flat") or custom files:
     //   "shader": "flat"
     //   "shader": { "vs": "shaders/my.vs", "fs": "shaders/my.fs" }
     o->shader_kind = OBJ_SHADER_DEFAULT;
@@ -709,10 +709,10 @@ static void parse_object(const JsonNode *obj)
             }
         }
     }
-    // Полная настройка отображения (render = { ... })
+    // Full appearance configuration (render = { ... })
     memset(&o->render, 0, sizeof o->render);
     parse_render(obj, &o->render);
-    // Взаимодействие по E (use = { ... })
+    // Interaction via E (use = { ... })
     memset(&o->use, 0, sizeof o->use);
     parse_use(obj, &o->use);
     s_object_count++;
@@ -765,7 +765,7 @@ int mapdata_load(const char *path)
         return -1;
     }
 
-    // --- Карта высот: map/image (путь относительно map/) ---------------------
+    // --- Height map: map/image (path relative to map/) ---------------------
     const JsonNode *mapn = json_find(root, "map");
     const char *img = json_str(json_find(mapn, "image"), NULL);
     if (img) {
@@ -775,7 +775,7 @@ int mapdata_load(const char *path)
         snprintf(s_image, sizeof s_image, "map.png");
     }
 
-    // --- Поле пшеницы: field/center [x,z] и field/size [w,d] (метры) ---------
+    // --- Wheat field: field/center [x,z] and field/size [w,d] (meters) ---------
     s_field_set = 0;
     const JsonNode *fld = json_find(root, "field");
     if (fld) {
@@ -792,10 +792,10 @@ int mapdata_load(const char *path)
     if (!s_field_set)
         SDL_Log("Map data: field not set in %s, default (world center)", path);
 
-    // --- Поле прикреплено к игроку? field/attached (бесконечное поле) --------
+    // --- Is the field attached to the player? field/attached (endless field) --------
     s_field_attached = json_bool(json_find(fld, "attached"), 0);
 
-    // --- Игрок: player/pos [x,y,z], player/yaw, player/pitch (старт) ----------
+    // --- Player: player/pos [x,y,z], player/yaw, player/pitch (start) ----------
     s_player_set = 0;
     const JsonNode *pl = json_find(root, "player");
     if (pl && json_find(pl, "pos")) {
@@ -806,7 +806,7 @@ int mapdata_load(const char *path)
         s_player_set = 1;
     }
 
-    // --- Воксельный объёмный туман: fog = { ... } ------------------------------
+    // --- Voxel volumetric fog: fog = { ... } ------------------------------
     const JsonNode *fg = json_find(root, "fog");
     if (fg) {
         s_fog.enabled = json_bool(json_find(fg, "enabled"), s_fog.enabled);
@@ -834,7 +834,7 @@ int mapdata_load(const char *path)
                                              s_fog.ray_strength);
     }
 
-    // --- Рельеф: terrain = { ... } -------------------------------------------
+    // --- Terrain: terrain = { ... } -------------------------------------------
     const JsonNode *tr = json_find(root, "terrain");
     if (tr) {
         s_terrain.min_height = (float)json_num(json_find(tr, "min_height"),
@@ -872,7 +872,7 @@ int mapdata_load(const char *path)
                                             s_terrain.fog_end);
     }
 
-    // --- Растительность: veg = { ... } --------------------------------------
+    // --- Vegetation: veg = { ... } --------------------------------------
     const JsonNode *vg = json_find(root, "veg");
     if (vg) {
         s_veg.grass_density = (float)json_num(json_find(vg, "grass_density"),
@@ -896,7 +896,7 @@ int mapdata_load(const char *path)
         s_veg.falloff = (float)json_num(json_find(vg, "falloff"), s_veg.falloff);
     }
 
-    // --- Небо: sky = { ... } -------------------------------------------------
+    // --- Sky: sky = { ... } -------------------------------------------------
     const JsonNode *sk = json_find(root, "sky");
     if (sk) {
         const JsonNode *tint = json_find(sk, "tint");
@@ -906,7 +906,7 @@ int mapdata_load(const char *path)
         if (stex[0]) snprintf(s_sky.tex, sizeof s_sky.tex, "%s", stex);
     }
 
-    // --- Постобработка: bloom = { ... } --------------------------------------
+    // --- Post-processing: bloom = { ... } --------------------------------------
     const JsonNode *bl = json_find(root, "bloom");
     if (bl) {
         s_bloom.threshold = (float)json_num(json_find(bl, "threshold"),
@@ -917,15 +917,15 @@ int mapdata_load(const char *path)
                                            s_bloom.strength);
     }
 
-    // --- Тени: shadows = { ... } ---------------------------------------------
+    // --- Shadows: shadows = { ... } ---------------------------------------------
     const JsonNode *shd = json_find(root, "shadows");
     if (shd)
         s_shadows.size = (int)json_num(json_find(shd, "size"), s_shadows.size);
 
-    // --- Поверхности рельефа: surfaces = { ... } -----------------------------
+    // --- Terrain surfaces: surfaces = { ... } -----------------------------
     parse_surfaces(json_find(root, "surfaces"));
 
-    // --- Покраска поверхности: paints[] --------------------------------------
+    // --- Surface painting: paints[] --------------------------------------
     s_paint_count = 0;
     const JsonNode *pnt = json_find(root, "paints");
     if (pnt) {
@@ -933,7 +933,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_paint(json_array_get(pnt, i));
     }
 
-    // --- Дороги: roads[] -----------------------------------------------------
+    // --- Roads: roads[] -----------------------------------------------------
     s_road_count = 0;
     const JsonNode *rds = json_find(root, "roads");
     if (rds) {
@@ -941,7 +941,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_road(json_array_get(rds, i));
     }
 
-    // --- Информация о карте: info = { name, author, description } --------------
+    // --- Map info: info = { name, author, description } --------------
     memset(&s_info, 0, sizeof s_info);
     const JsonNode *inf = json_find(root, "info");
     if (inf) {
@@ -953,7 +953,7 @@ int mapdata_load(const char *path)
         if (d[0]) snprintf(s_info.description, sizeof s_info.description, "%s", d);
     }
 
-    // --- Звук карты: ambient = { sound, volume }, music = { sound, volume } ----
+    // --- Map sound: ambient = { sound, volume }, music = { sound, volume } ----
     s_ambient_set = s_music_set = 0;
     const JsonNode *amb = json_find(root, "ambient");
     if (amb) {
@@ -974,7 +974,7 @@ int mapdata_load(const char *path)
         }
     }
 
-    // --- Cvar'ы карты: cvars = { "имя": число } --------------------------------
+    // --- Map cvars: cvars = { "name": number } --------------------------------
     s_cvar_count = 0;
     const JsonNode *cv = json_find(root, "cvars");
     if (cv) {
@@ -987,7 +987,7 @@ int mapdata_load(const char *path)
         }
     }
 
-    // --- Команды карты: commands = [ "команда", ... ] --------------------------
+    // --- Map commands: commands = [ "command", ... ] --------------------------
     s_command_count = 0;
     const JsonNode *cmds = json_find(root, "commands");
     if (cmds) {
@@ -999,7 +999,7 @@ int mapdata_load(const char *path)
         }
     }
 
-    // --- Источники света: lights[] -------------------------------------------
+    // --- Light sources: lights[] -------------------------------------------
     s_light_count = 0;
     const JsonNode *lights = json_find(root, "lights");
     if (lights) {
@@ -1007,7 +1007,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_light(json_array_get(lights, i));
     }
 
-    // --- Объекты (модели): objects[] — данные из JSON, рендер появится позже --
+    // --- Objects (models): objects[] — data from JSON, rendering comes later --
     s_object_count = 0;
     const JsonNode *objs = json_find(root, "objects");
     if (objs) {
@@ -1015,7 +1015,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_object(json_array_get(objs, i));
     }
 
-    // --- Коллизии-квадраты: collisions[] (с привязкой к объектам) --------------
+    // --- Square colliders: collisions[] (bound to objects) --------------
     s_collision_count = 0;
     const JsonNode *cols = json_find(root, "collisions");
     if (cols) {
@@ -1023,7 +1023,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_collision(json_array_get(cols, i));
     }
 
-    // --- Позиционные звуки: sounds[] -------------------------------------------
+    // --- Positional sounds: sounds[] -------------------------------------------
     s_sound_count = 0;
     const JsonNode *snds = json_find(root, "sounds");
     if (snds) {
@@ -1031,7 +1031,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_sound(json_array_get(snds, i));
     }
 
-    // --- Триггеры: triggers[] ---------------------------------------------------
+    // --- Triggers: triggers[] ---------------------------------------------------
     s_trigger_count = 0;
     const JsonNode *trs = json_find(root, "triggers");
     if (trs) {
@@ -1039,7 +1039,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_trigger(json_array_get(trs, i));
     }
 
-    // --- Фауна: fauna[] ---------------------------------------------------------
+    // --- Fauna: fauna[] ---------------------------------------------------------
     s_fauna_count = 0;
     const JsonNode *fa = json_find(root, "fauna");
     if (fa) {
@@ -1047,7 +1047,7 @@ int mapdata_load(const char *path)
         for (int i = 0; i < n; i++) parse_fauna(json_array_get(fa, i));
     }
 
-    // --- Вода: waters[] ----------------------------------------------------------
+    // --- Water: waters[] ----------------------------------------------------------
     s_water_count = 0;
     const JsonNode *ws = json_find(root, "waters");
     if (ws) {
@@ -1185,7 +1185,7 @@ const MapTrigger *mapdata_trigger(int i)
     return (i >= 0 && i < s_trigger_count) ? &s_triggers[i] : NULL;
 }
 
-// --- Состояние мира для save/load -------------------------------------------
+// --- World state for save/load -------------------------------------------
 int mapdata_trigger_fired(int i)
 {
     return (i >= 0 && i < s_trigger_count) ? s_triggers[i].fired : 0;

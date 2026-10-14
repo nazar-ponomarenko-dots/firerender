@@ -1,10 +1,10 @@
 // ============================================================================
-//  PlayerBox — фрагментный шейдер бокса коллизии персонажа
+//  PlayerBox — fragment shader of the character collision box
 // ----------------------------------------------------------------------------
-//  Сплошной цвет uColor с альфой (для полупрозрачной закраски граней).
+//  Solid uColor with alpha (for translucent face fills).
 // ============================================================================
 
-uniform vec4 uColor;   // rgb + альфа закраски
+uniform vec4 uColor;   // rgb + fill alpha
 
 out vec4 FragColor;
 

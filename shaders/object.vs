@@ -1,26 +1,28 @@
 // ============================================================================
-//  Object — вершинный шейдер биллборда объекта (дерево и пр.)
+//  Object — vertex shader for object billboards (trees, etc.)
 // ----------------------------------------------------------------------------
-//  Каждый объект — ДВА СКРЕЩЁННЫХ СТАТИЧНЫХ квада (крест): оси ширин
-//  (0,0,1) и (1,0,0) — дерево выглядит объёмным с любой стороны и НЕ
-//  крутится за камерой. Квад: x -0.5..0.5 (вдоль uObjRight), y 0..1 (вверх).
+//  Each object is TWO STATIC CROSSED quads (an X): width axes
+//  (0,0,1) and (1,0,0) — a tree looks volumetric from any side and does
+//  NOT swivel to face the camera. Quad: x -0.5..0.5 (along uObjRight),
+//  y 0..1 (up).
 //
-//  НИЗ КВАДА ЛЕЖИТ НА РЕЛЬЕФЕ: uObjPos.y — высота земли в центре, а углы
-//  основания приподняты/опущены по уклону (uObjSlope, посчитан в objects.c
-//  тем же sample_height, что и рельеф). Без этого дерево шириной 12.5 м на
-//  склоне одним углом висело в воздухе, другим уходило в землю.
+//  THE QUAD BOTTOM FOLLOWS THE TERRAIN: uObjPos.y is the ground height at
+//  the centre, and the base corners are raised/lowered along the slope
+//  (uObjSlope, computed in objects.c with the same sample_height as the
+//  terrain). Without it a 12.5 m wide tree on a slope would hang in the air
+//  at one corner and sink into the ground at another.
 // ============================================================================
 
-layout (location = 0) in vec2 aPos;    // локально: x -0.5..0.5, y 0..1
+layout (location = 0) in vec2 aPos;    // local: x -0.5..0.5, y 0..1
 layout (location = 1) in vec2 aUV;
 
 uniform mat4 uViewProj;
 uniform vec3 uObjPos;
-uniform vec2 uObjSize;      // ширина, высота квада в метрах
-uniform vec3 uObjRight;     // ось ширины квада: (0,0,1) или (1,0,0) — крест
-uniform vec2 uObjSlope;     // уклон земли под объектом (dh/dx, dh/dz)
+uniform vec2 uObjSize;      // quad width and height, in meters
+uniform vec3 uObjRight;     // quad width axis: (0,0,1) or (1,0,0) — the cross
+uniform vec2 uObjSlope;     // ground slope under the object (dh/dx, dh/dz)
 
-// Настройка текстуры (render.texture): повтор/сдвиг/анимация UV
+// Texture settings (render.texture): UV tiling/offset/animation
 uniform vec2 uUvTile;
 uniform vec2 uUvOffset;
 uniform vec2 uUvScroll;
@@ -30,12 +32,12 @@ out vec2 vUV;
 out vec3 vWorldPos;
 
 void main() {
-    float hx = aPos.x * uObjSize.x;                  // смещение вдоль ширины
+    float hx = aPos.x * uObjSize.x;                  // offset along the width
     vec3 wp = uObjPos + uObjRight * hx
             + vec3(0.0, 1.0, 0.0) * (aPos.y * uObjSize.y);
-    // Углы основания — по уклону земли (как в wheat.vs для растительности).
+    // Base corners follow the ground slope (as wheat.vs does for vegetation).
     wp.y += (uObjSlope.x * uObjRight.x + uObjSlope.y * uObjRight.z) * hx;
-    // V перевёрнут: у PNG верх картинки — крона (v=0), у квада v=0 — низ
+    // V is flipped: the top of a PNG is the tree crown (v=0), quad v=0 is the bottom
     vUV = vec2(aUV.x, 1.0 - aUV.y) * uUvTile + uUvOffset + uUvScroll * uTime;
     vWorldPos = wp;
     gl_Position = uViewProj * vec4(wp, 1.0);

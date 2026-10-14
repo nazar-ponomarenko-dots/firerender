@@ -28,7 +28,7 @@ def lattice_noise(rng, cells):
     x1 = (x0 + 1) % cells
     wy = fy - np.floor(fy)
     wx = fx - np.floor(fx)
-    sy = wy * wy * (3.0 - 2.0 * wy)          # smoothstep: мягкие «клубы»
+    sy = wy * wy * (3.0 - 2.0 * wy)          # smoothstep: soft "clumps"
     sx = wx * wx * (3.0 - 2.0 * wx)
     a = g[y0, x0]
     b = g[y0, x1]

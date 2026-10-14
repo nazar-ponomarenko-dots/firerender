@@ -1,14 +1,14 @@
 // ============================================================================
-//  Blob — фрагментный шейдер пятна-тени (режим 3)
+//  Blob — fragment shader of the blob shadow (mode 3)
 // ----------------------------------------------------------------------------
-//  Мягкий тёмный эллипс: альфа текстуры (fauna_glow — центр яркий) даёт
-//  плотное пятно в центре и прозрачное к краям.
+//  A soft dark ellipse: the texture alpha (fauna_glow — bright center) gives a
+//  dense spot in the middle, transparent toward the edges.
 // ============================================================================
 
 in vec2 vUV;
 
 uniform sampler2D uTex;
-uniform vec4 uColor;        // цвет пятна (обычно чёрный, альфа ~0.5)
+uniform vec4 uColor;        // spot color (usually black, alpha ~0.5)
 
 out vec4 FragColor;
 

@@ -1,28 +1,28 @@
 // ============================================================================
-//  lua_engine.h — встраиваемый Lua: скрипты движка (см. lua_engine.c)
+//  lua_engine.h — embedded Lua: engine scripts (see lua_engine.c)
 // ----------------------------------------------------------------------------
-//  Движок может кастомизироваться скриптами Lua (lua/main.lua): скрипт
-//  получает таблицу `engine` с привязками к консоли, cvar'ам и событиям.
-//  Это «фаза 4» изначального плана: события/сущности спроектированы так,
-//  чтобы Lua могла их слушать и регистрировать без правок ядра.
+//  The engine can be customized with Lua scripts (lua/main.lua): the script
+//  gets an `engine` table bound to the console, cvars and events.
+//  This is "phase 4" of the original plan: events/entities were designed so
+//  that Lua can listen to and register them without touching the core.
 // ============================================================================
 #ifndef LUA_ENGINE_H
 #define LUA_ENGINE_H
 
-// Создаёт состояние Lua, открывает стандартные библиотеки, подключает
-// таблицу `engine` и грузит lua/main.lua (ошибки — в консоль). Вызывать
-// в фазе APP_BOOT, ПОСЛЕ console_init (нужен console_print).
+// Creates the Lua state, opens the standard libraries, attaches the
+// `engine` table and loads lua/main.lua (errors go to the console). Call
+// in the APP_BOOT phase, AFTER console_init (console_print is required).
 void lua_engine_init(void);
 
-// Каждый кадр: таймеры (engine.after) и функция update(dt) скрипта.
+// Every frame: timers (engine.after) and the script's update(dt) function.
 void lua_engine_update(float dt);
 
-// Скрипт карты: загружает lua/maps/<карта>.lua ПОСЛЕ загрузки мира.
-// Отсутствие файла — не ошибка. Вызывать в конце game_load_world.
+// Map script: loads lua/maps/<map>.lua AFTER the world is loaded.
+// A missing file is not an error. Call at the end of game_load_world.
 void lua_engine_map(const char *map_name);
 
-// Выгрузка карты: убирает update-колбэки и таймеры скрипта карты
-// (движковые скрипты main.lua остаются). Вызывать при game_unload_world.
+// Map unload: removes the map script's update callbacks and timers
+// (engine-level main.lua scripts stay). Call on game_unload_world.
 void lua_engine_clear(void);
 
 #endif

@@ -1,10 +1,10 @@
 // ============================================================================
-//  phys_body.c — реализация твёрдых тел (см. phys_body.h)
+//  phys_body.c — rigid body implementation (see phys_body.h)
 // ----------------------------------------------------------------------------
-//  Тела — надстройка над тем же Verlet-миром: частицы и связи обычные, слой
-//  добавляет ТОЛЬКО то, чего в ядре нет: коллизии «частица-частица» и
-//  «частица-статика» (иначе ящик проходит сквозь ящик) и группировку
-//  частиц в тела. Никаких аллокаций: все пулы статические.
+//  Bodies are a layer on top of the same Verlet world: particles and links are
+//  ordinary; this layer adds ONLY what the core lacks: «particle-particle» and
+//  «particle-static» collisions (otherwise a crate passes through a crate) and
+//  grouping particles into bodies. No allocations at all: every pool is static.
 // ============================================================================
 #include "phys_body.h"
 
@@ -23,13 +23,13 @@ static PhysBody     s_bodies[PHYS_BODY_MAX];
 static int          s_nbody = 0;
 static PhysStatic   s_static[PHYS_STATIC_MAX];
 static int          s_nstatic = 0;
-static int          s_tag[PHYS_MAX_PARTS];    // part -> тело (или NONE)
-static float        s_vel0[PHYS_MAX_PARTS][3]; // скорость до коллизионного прогона
+static int          s_tag[PHYS_MAX_PARTS];    // part -> body (or NONE)
+static float        s_vel0[PHYS_MAX_PARTS][3]; // velocity before the collision pass
 static int          s_enabled = 0;
 static int          s_inited = 0;
 
-// restitution: доля нормальной скорости, сохраняемая при ударе. 0 = липко
-// (ящик не скачет), 0.35 = живая резина. Подбирается cvar'ом phys_bounce.
+// restitution: the share of normal velocity preserved on impact. 0 = sticky
+// (the crate does not bounce), 0.35 = lively rubber. Tuned by the phys_bounce cvar.
 static float bounce_get(void)
 {
     float v = cvar_get("phys_bounce");
@@ -38,7 +38,7 @@ static float bounce_get(void)
     return v;
 }
 
-// --- Теги ------------------------------------------------------------------------
+// --- Tags ------------------------------------------------------------------------
 static void rebuild_tags(PhysWorld *w)
 {
     for (int i = 0; i < w->np; i++) s_tag[i] = PART_TAG_NONE;
@@ -53,7 +53,7 @@ static void rebuild_tags(PhysWorld *w)
 
 static void body_sort(PhysWorld *w)
 {
-    // Тела храним в порядке first_part: «дырки» между ними — только верёвки.
+    // Bodies are kept in first_part order; the «gaps» between them hold ropes only.
     for (int i = 1; i < s_nbody; i++) {
         PhysBody t = s_bodies[i];
         int j = i - 1;
@@ -66,7 +66,7 @@ static void body_sort(PhysWorld *w)
     rebuild_tags(w);
 }
 
-// --- Добавление частей/связей в мир ------------------------------------------------
+// --- Adding parts/links to the world ------------------------------------------------
 static int add_link_clamped(PhysWorld *w, int a, int b)
 {
     if (w->nl >= PHYS_MAX_LINKS) return -1;
@@ -99,8 +99,8 @@ int phys_body_spawn_sphere(PhysWorld *w, const float pos[3], float radius,
     return s_nbody - 1;
 }
 
-// Жёсткий кадр: 8 углов, 12 рёбер, 4 диагонали граней + 4 «крестовины» —
-// связи удерживают форму (по образцу рэгдолла: parent+grandparent).
+// Rigid frame: 8 corners, 12 edges, 4 face diagonals + 4 «crosses» —
+// the links hold the shape (following the ragdoll pattern: parent+grandparent).
 int phys_body_spawn_box(PhysWorld *w, const float pos[3], const float ext[3],
                        float mass)
 {
@@ -128,10 +128,10 @@ int phys_body_spawn_box(PhysWorld *w, const float pos[3], const float ext[3],
                        pos[2] + sz[i & 1] };
         corner[i] = physics_add_part(w, p, 1.0f / (mass / 8.0f),
                                      diag * 0.25f);
-        // radius = четверть диагонали: углы не «врезаются» друг в друга
-        // (свои частицы не коллидируют — см. s_tag), но тело не протыкает
-        // плоскости чужих тел.
-        if (corner[i] < 0) {          // частично созданное тело — откат
+        // radius = quarter of the diagonal: corners do not «dig into» each other
+        // (a body's own particles don't collide — see s_tag), but the body does
+        // not poke through other bodies' planes.
+        if (corner[i] < 0) {          // partially created body — roll back
             w->np = first;
             return -1;
         }
@@ -154,7 +154,7 @@ int phys_body_spawn_box(PhysWorld *w, const float pos[3], const float ext[3],
     return s_nbody - 1;
 }
 
-// Убрать тела, оставив верёвки: compact — сдвигаем хвосты массивов мира.
+// Remove bodies while keeping ropes: compact — shift the world array tails.
 static void remove_range(PhysWorld *w, int from, int count)
 {
     if (count <= 0 || from < 0 || from + count > w->np) return;
@@ -180,10 +180,10 @@ static void remove_range(PhysWorld *w, int from, int count)
 void phys_body_kill_all(PhysWorld *w)
 {
     if (!w) return;
-    // Тела упорядочены по first_part. Удаляем от начала к концу, каждый раз
-    // сдвигая индексы ОСТАЛЬНЫХ тел на размер удалённого диапазона: дырки
-    // между телами (верёвки) сохраняются на своих местах относительно
-    // оставшихся частиц.
+    // Bodies are ordered by first_part. Remove from start to end, each time
+    // shifting the indices of the REMAINING bodies by the size of the removed
+    // range: the gaps between bodies (ropes) stay in place relative to the
+    // surviving particles.
     int removed = 0;
     for (int b = 0; b < s_nbody; b++) {
         remove_range(w, s_bodies[b].first_part - removed, s_bodies[b].nparts);
@@ -228,7 +228,7 @@ void phys_body_impulse(int idx, const float vel[3])
     }
 }
 
-// --- Статика --------------------------------------------------------------------
+// --- Statics --------------------------------------------------------------------
 static int static_add(PhysStatic s)
 {
     if (!s_inited) return -1;
@@ -282,14 +282,14 @@ const PhysStatic *phys_static_get(int i)
     return &s_static[i];
 }
 
-// --- Коллизии ----------------------------------------------------------------------
-// Выталкивание частицы из статического примитива. Возвращает 1 если сдвинули.
+// --- Collisions ----------------------------------------------------------------------
+// Push a particle out of a static primitive. Returns 1 if it was moved.
 static int collide_static(PhysPart *p, const PhysStatic *s)
 {
     float r = p->radius;
     if (r <= 0.0f) return 0;
     int moved = 0;
-    if (s->kind == 0) {                    // сфера
+    if (s->kind == 0) {                    // sphere
         float dx = p->pos[0] - s->c[0];
         float dy = p->pos[1] - s->c[1];
         float dz = p->pos[2] - s->c[2];
@@ -301,19 +301,19 @@ static int collide_static(PhysPart *p, const PhysStatic *s)
         float k = (rr - d) / d;
         p->pos[0] += dx * k; p->pos[1] += dy * k; p->pos[2] += dz * k;
         moved = 1;
-    } else if (s->kind == 1) {             // вертикальный цилиндр
+    } else if (s->kind == 1) {             // vertical cylinder
         if (p->pos[1] + r < s->base || p->pos[1] - r > s->top) return 0;
         float dx = p->pos[0] - s->c[0];
         float dz = p->pos[2] - s->c[2];
         float rr = s->r + r;
         float d2 = dx * dx + dz * dz;
         if (d2 >= rr * rr) return 0;
-        // Пересечение по Y есть — выталкиваем горизонтально ИЛИ по вертикали
-        // (что ближе): иначе частица «залипает» в крышке цилиндра.
+        // There is a Y overlap — push out horizontally OR vertically
+        // (whichever is closer): otherwise the particle «sticks» in the cylinder lid.
         float dxy = d2 < 1e-6f ? 0.0f : sqrtf(d2);
         float pen_xy = rr - dxy;
-        float pen_up = (p->pos[1] + r) - s->base;     // сверху вниз
-        float pen_dn = s->top - (p->pos[1] - r);      // снизу вверх
+        float pen_up = (p->pos[1] + r) - s->base;     // downward from above
+        float pen_dn = s->top - (p->pos[1] - r);      // upward from below
         float vpen = pen_up < pen_dn ? pen_up : pen_dn;
         if (pen_xy <= vpen) {
             float k = dxy > 1e-5f ? pen_xy / dxy : 1.0f;
@@ -337,8 +337,8 @@ static int collide_static(PhysPart *p, const PhysStatic *s)
     return moved;
 }
 
-// Скорость в Верле = pos - prev (смещение за шаг). Позиционное разведение
-// съедает её полностью (упругость 0); возвращаем долю bounce по нормали.
+// Verlet velocity = pos - prev (the step displacement). Positional separation
+// consumes it entirely (elasticity 0); we restore the bounce share along the normal.
 static void save_vel(PhysWorld *w)
 {
     for (int i = 0; i < w->np; i++) {
@@ -366,7 +366,7 @@ static void collide_parts(PhysWorld *w, float bounce)
             float wsum = a->inv_mass + b->inv_mass;
             if (wsum <= 0.0f) continue;
             float d = sqrtf(d2);
-            if (d < 1e-5f) {          // совпали центрами — разводим по Y
+            if (d < 1e-5f) {          // centers coincide — separate along Y
                 if (a->inv_mass > 0.0f) a->pos[1] -= rr * (a->inv_mass / wsum);
                 if (b->inv_mass > 0.0f) b->pos[1] += rr * (b->inv_mass / wsum);
                 continue;
@@ -377,18 +377,18 @@ static void collide_parts(PhysWorld *w, float bounce)
             a->pos[2] -= dz * k * ka;
             b->pos[0] += dx * k * kb; b->pos[1] += dy * k * kb;
             b->pos[2] += dz * k * kb;
-            // Отскок: возвращаем долю нормальной скорости, съеденную
-            // позиционным разведением. Относительная скорость вдоль нормали
-            // (a->b) отрицательна = тела сближаются; покоящаяся стопка
-            // коррекцию не получает.
+            // Bounce: restore the share of normal velocity eaten by the
+            // positional separation. Relative velocity along the normal
+            // (a->b) being negative = bodies approaching; a resting stack
+            // gets no correction.
             if (bounce > 0.0f) {
                 float nx = dx / d, ny = dy / d, nz = dz / d;
                 float vax = s_vel0[i][0], vay = s_vel0[i][1], vaz = s_vel0[i][2];
                 float vbx = s_vel0[j][0], vby = s_vel0[j][1], vbz = s_vel0[j][2];
                 float vrel = (vbx - vax) * nx + (vby - vay) * ny + (vbz - vaz) * nz;
                 if (vrel < -1e-5f) {
-                    // prev -= n*corr*a: скорость (pos-prev) РАСТЁТ вдоль +n,
-                    // т.е. тела разлетаются быстрее после разведения.
+                    // prev -= n*corr*a: velocity (pos-prev) INCREASES along +n,
+                    // i.e. the bodies fly apart faster after the separation.
                     float corr = -bounce * vrel;
                     w->part[i].prev[0] -= nx * corr * ka;
                     w->part[i].prev[1] -= ny * corr * ka;
@@ -412,7 +412,7 @@ static void collide_statics(PhysWorld *w)
     }
 }
 
-// Детект покоя: все частицы тела сместились меньше, чем на 1 мм за шаг.
+// Sleep detection: every particle of the body moved less than 1 mm during the step.
 static void update_sleep(PhysWorld *w, float dt)
 {
     (void)dt;
@@ -434,10 +434,10 @@ static void update_sleep(PhysWorld *w, float dt)
 void phys_body_step(PhysWorld *w, float dt)
 {
     if (!s_inited || !w) { physics_step(w, dt); return; }
-    // Рубильник выключает тела ПОЛНОСТЬЮ (они стоят где встали), но базовый
-    // Verlet продолжает работать: верёвки и рэгдоллы — не «тела», они
-    // двигаются всегда. Приём: временно прибить частицы тел (inv_mass=0),
-    // шагнуть мир, восстановить.
+    // The kill switch turns bodies OFF completely (they stay where they stopped),
+    // but the base Verlet keeps running: ropes and ragdolls are not «bodies»,
+    // they always move. Trick: temporarily zero out body particles (inv_mass=0),
+    // step the world, then restore.
     if (!s_enabled) {
         static float saved[PHYS_BODY_MAX * 8];
         int n = 0;
@@ -467,8 +467,8 @@ void phys_body_step(PhysWorld *w, float dt)
     float bounce = bounce_get();
     int its = w->iterations > 0 ? (w->iterations < 4 ? w->iterations : 4) : 4;
     rebuild_tags(w);
-    physics_step(w, dt);                 // интеграция + связи + рельеф
-    save_vel(w);                         // скорость ДО коллизионного прогона
+    physics_step(w, dt);                 // integration + links + terrain
+    save_vel(w);                         // velocity BEFORE the collision pass
     for (int it = 0; it < its; it++) {
         collide_statics(w);
         collide_parts(w, bounce);
@@ -476,14 +476,14 @@ void phys_body_step(PhysWorld *w, float dt)
     update_sleep(w, dt);
 }
 
-// --- Толкание игроком ------------------------------------------------------------------
+// --- Pushing by the player ------------------------------------------------------------------
 void phys_body_push(const float pos[3], const float vel[3], float pr,
                     float speed_limit)
 {
     if (!s_inited || !s_enabled) return;
     PhysWorld *w = physics_world();
     float sp = sqrtf(vel[0] * vel[0] + vel[2] * vel[2]);
-    if (sp < 0.5f) return;                      // стоим — не толкаем
+    if (sp < 0.5f) return;                      // standing still — no push
     if (sp > speed_limit) sp = speed_limit;
     float dirx = vel[0], dirz = vel[2];
     float dl = sqrtf(dirx * dirx + dirz * dirz);
@@ -499,22 +499,22 @@ void phys_body_push(const float pos[3], const float vel[3], float pr,
             float dx = p->pos[0] - pos[0];
             float dy = p->pos[1] - pos[1];
             float dz = p->pos[2] - pos[2];
-            if (fabsf(dy) > 1.8f) continue;      // только пояс игрока
+            if (fabsf(dy) > 1.8f) continue;      // player's waist band only
             float rr = pr + p->radius;
             if (dx * dx + dz * dz >= rr * rr) continue;
             float s = w->dt > 1e-6f ? w->dt : (1.0f / 100.0f);
             p->prev[0] -= dirx * sp * s;
             p->prev[2] -= dirz * sp * s;
-            p->prev[1] -= 0.25f * sp * s;        // чуть подымаем: спуск с порога
+            p->prev[1] -= 0.25f * sp * s;        // lift slightly: getting down off a step
         }
     }
 }
 
-// --- Отладка ------------------------------------------------------------------------------
+// --- Debug ------------------------------------------------------------------------------
 int phys_body_index_of_part(int part_idx)
 {
-    // Частицы одного тела лежат подряд (первое создаётся раньше, индексы
-    // растут), поэтому достаточно пройти по диапазонам.
+    // A body's particles lie consecutively (the first one is created earlier,
+    // indices grow), so iterating over the ranges is enough.
     for (int b = 0; b < s_nbody; b++) {
         const PhysBody *bd = &s_bodies[b];
         if (part_idx >= bd->first_part &&
@@ -523,7 +523,7 @@ int phys_body_index_of_part(int part_idx)
     return -1;
 }
 
-// --- Инициализация / рубильник ---------------------------------------------------------
+// --- Initialization / kill switch ---------------------------------------------------------
 void phys_body_init(void)
 {
     if (s_inited) return;
@@ -541,13 +541,14 @@ void phys_body_init(void)
 void phys_body_enable(int on) { s_enabled = on ? 1 : 0; }
 int  phys_body_enabled(void)  { return s_enabled; }
 
-// --- Команды --------------------------------------------------------------------------------
-// Тело ставится ПЕРЕД камерой по направлению её взгляда, а не по мировой +Z:
-// иначе «стопка у камеры» оказывается за спиной, стоит игроку повернуть голову.
-// off = { вправо, вверх, вперёд } в метрах.
+// --- Commands --------------------------------------------------------------------------------
+// A body is placed IN FRONT OF the camera along its view direction, not along world +Z:
+// otherwise the «stack at the camera» ends up behind your back as soon as the player
+// turns their head.
+// off = { right, up, forward } in meters.
 static void cam_place(const Camera *cam, const float off[3], float out[3])
 {
-    float fx = sinf(cam->yaw), fz = cosf(cam->yaw);   // горизонтальный «вперёд»
+    float fx = sinf(cam->yaw), fz = cosf(cam->yaw);   // horizontal «forward»
     out[0] = cam->pos[0] + off[2] * fx - off[0] * fz;
     out[1] = cam->pos[1] + off[1];
     out[2] = cam->pos[2] + off[2] * fz + off[0] * fx;
@@ -615,7 +616,7 @@ void cmd_phys_props(const char *args)
     }
     console_print("phys: %d ящиков (стопка), тел всего %d", made,
                   phys_body_count());
-    // Статика — из объектов карты: без неё ящики падают «сквозь мир».
+    // Statics come from map objects: without them crates fall «through the world».
     SDL_Log("phys: props %d, тел %d, статика %d", made, phys_body_count(),
             phys_static_count());
 }
@@ -635,7 +636,7 @@ void cmd_phys_bodies(const char *args)
     }
 }
 
-// --- Самопроверка ---------------------------------------------------------------------------
+// --- Self-check ---------------------------------------------------------------------------
 static int st_fail;
 static void st_check(int cond, const char *what)
 {
@@ -652,11 +653,11 @@ int phys_body_selftest(void)
     phys_static_clear();
     phys_body_enable(1);
 
-    // Пол — статический бокс 20x1x20 на y=-0.5..0.5, тела ставим над ним.
+    // Floor — a static 20x1x20 box at y=-0.5..0.5, bodies are placed above it.
     float bc[3] = { 0.0f, -0.5f, 0.0f }, be[3] = { 10.0f, 0.5f, 10.0f };
     st_check(phys_static_add_box(bc, be) >= 0, "static box add");
 
-    // 1) Сфера падает на статику и на ней остаётся (не проваливается).
+    // 1) A sphere falls onto statics and stays on it (does not sink through).
     float p0[3] = { 0.0f, 3.0f, 0.0f };
     int a = phys_body_spawn_sphere(w, p0, 0.5f, 2.0f);
     st_check(a >= 0 && w->np == 1, "sphere spawn");
@@ -666,7 +667,7 @@ int phys_body_selftest(void)
     st_check(c[1] > 0.2f && c[1] < 1.6f, "sphere rests on static box");
     st_check(fabsf(c[0]) < 0.5f, "sphere stays over box");
 
-    // 2) Стопка: вторая сфера на первой — обе остаются над полом.
+    // 2) Stack: a second sphere on the first — both stay above the floor.
     float p1[3] = { 0.0f, 5.0f, 0.0f };
     int b = phys_body_spawn_sphere(w, p1, 0.5f, 2.0f);
     st_check(b >= 0, "second sphere spawn");
@@ -676,7 +677,7 @@ int phys_body_selftest(void)
     phys_body_center(b, c2);
     st_check(c[1] > 0.4f && c2[1] > c[1], "stack: both above floor, top higher");
 
-    // 3) Импульс двигает тело (и не сносит в стратосферу).
+    // 3) An impulse moves the body (and does not launch it into the stratosphere).
     float before[3];
     phys_body_center(a, before);
     float imp[3] = { 5.0f, 0.0f, 0.0f };
@@ -686,7 +687,7 @@ int phys_body_selftest(void)
     st_check(c[0] - before[0] > 0.1f, "impulse moves body");
     st_check(c[0] - before[0] < 20.0f, "impulse bounded (no 600 m/s)");
 
-    // 4) Бокс: 8 частиц + связи, покоится на статике.
+    // 4) Box: 8 particles + links, rests on statics.
     float bp[3] = { 4.0f, 3.0f, 0.0f };
     float ext[3] = { 0.4f, 0.4f, 0.4f };
     int np0 = w->np;
@@ -698,7 +699,7 @@ int phys_body_selftest(void)
     st_check(c[1] > 0.3f && c[1] < 2.0f, "box rests on static");
     st_check(c[2] < 1.0f, "box did not tunnel through static");
 
-    // 5) Коллайдер-цилиндр: частица не проходит сквозь него по XZ.
+    // 5) Cylinder collider: a particle does not pass through it along XZ.
     phys_static_clear();
     st_check(phys_static_add_cylinder(0.0f, 0.0f, 1.0f, -1.0f, 5.0f) >= 0,
              "cylinder add");
@@ -713,7 +714,7 @@ int phys_body_selftest(void)
     st_check(c[0] < -0.2f || c[0] > 1.4f, "sphere stopped/bounced at cylinder");
     st_check(c[1] < 3.0f, "sphere not launched into sky");
 
-    // 6) Переполнение: лимит тел = -1 + сообщение, без падения.
+    // 6) Overflow: body limit = -1 + message, no crash.
     physics_reset(w);
     phys_body_kill_all(w);
     int made = 0;
@@ -722,7 +723,7 @@ int phys_body_selftest(void)
         if (phys_body_spawn_sphere(w, pp, 0.3f, 1.0f) >= 0) made++;
     st_check(made == PHYS_BODY_MAX, "body limit respected");
 
-    // 7) Рубильник: выключенный слой не двигает тела.
+    // 7) Kill switch: the disabled layer does not move bodies.
     phys_body_enable(0);
     phys_body_center(0, c);
     for (int i = 0; i < 50; i++) phys_body_step(w, 1.0f / 100.0f);
@@ -730,8 +731,8 @@ int phys_body_selftest(void)
     phys_body_center(0, c_after);
     st_check(c_after[0] == c[0] && c_after[1] == c[1], "disable freezes bodies");
 
-    // 8) Толчок от точки (имитация игрока): тело в пределах пояса и радиуса
-    // уезжает вдоль скорости толкающего, далёкое — стоит на месте.
+    // 8) Push from a point (simulating the player): a body within the waist band and
+    // radius moves along the pusher's velocity; a distant one stays put.
     physics_reset(w);
     phys_body_kill_all(w);
     phys_body_enable(1);
@@ -751,7 +752,7 @@ int phys_body_selftest(void)
     st_check(b1[2] - b0[2] > 0.05f, "push moves nearby body");
     st_check(fabsf(f1[2] - f0[2]) < 0.05f, "push ignores distant body");
 
-    // Уборка: тест не оставляет мусора в мире.
+    // Cleanup: the test leaves no garbage in the world.
     phys_body_enable(1);
     phys_body_kill_all(w);
     phys_static_clear();

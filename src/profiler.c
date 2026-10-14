@@ -1,5 +1,5 @@
 // ============================================================================
-//  profiler.c — тайминги по модулям (см. profiler.h)
+//  profiler.c — per-module timings (see profiler.h)
 // ============================================================================
 #include "profiler.h"
 
@@ -9,25 +9,25 @@
 
 static float s_ms[PROF_N];
 
-// GPU-тайминги: по 2 query на слот (чередуем кадры — результат читаем
-// из того, что начинался 2 кадра назад: GPU точно успел)
+// GPU timings: 2 queries per slot (alternating frames — we read the result
+// of the one that started 2 frames ago: the GPU has definitely finished)
 static GLuint s_gpu_q[PROF_N][2];
 static float s_gpu_ms[PROF_N];
 static int s_gpu_ok = -1;
 static int s_parity = 0;
-// Слот реально рисовался в кадре этой чётности? Иначе query хранит СТАРЫЙ
-// результат (GL не сбрасывает query-объекты) и панель показывала бы время
-// выключенного прохода (напр. туман при r_fog_mode 0).
+// Did the slot actually draw in a frame of this parity? Otherwise the query
+// holds a STALE result (GL does not reset query objects) and the panel would
+// show the time of a disabled pass (e.g. fog with r_fog_mode 0).
 static int s_issued[PROF_N][2];
 static int s_active[PROF_N];
-// Панель видима? Проверяется раз в кадр (prof_reset): при скрытой панели
-// queries НЕ выпускаются вовсе — time-queries на слабом GPU не бесплатны.
+// Is the panel visible? Checked once per frame (prof_reset): with the panel
+// hidden queries are not issued at all — time queries are not free on weak GPUs.
 static int s_panel = 0;
 
 static void gpu_init(void)
 {
     if (s_gpu_ok >= 0) return;
-    // На GLES без timer_query расширения указатели NULL — не крашимся, простоCPU
+    // On GLES without the timer_query extension the pointers are NULL — don't crash, CPU timings only
     if (!p_glGenQueries || !p_glBeginQuery || !p_glEndQuery ||
         !p_glGetQueryObjectiv || !p_glGetQueryObjectui64v) {
         s_gpu_ok = 0;
@@ -46,8 +46,8 @@ void prof_reset(void)
 {
     s_panel = cvar_get("profiler") > 0.5f;
     if (!s_panel) {
-        // Панель скрыта: тайминги не собираем, queries чистим — после
-        // включения панели первый кадр честно покажет нули, без призраков
+        // Panel hidden: don't collect timings, clear the queries — after
+        // re-enabling the panel the first frame honestly shows zeros, no ghosts
         for (int i = 0; i < PROF_N; i++) {
             s_ms[i] = 0.0f;
             s_gpu_ms[i] = 0.0f;
@@ -67,7 +67,7 @@ void prof_reset(void)
     g_prof_tris = 0;
     g_prof_state_skipped = 0;
     if (s_gpu_ok < 0) gpu_init();
-    // читаем результат query, начатой 2 кадра назад
+    // read the result of the query started 2 frames ago
     int prev = s_parity ^ 1;
     if (s_gpu_ok == 1 && p_glGetQueryObjectui64v && p_glGetQueryObjectiv) {
         for (int i = 0; i < PROF_N; i++) {

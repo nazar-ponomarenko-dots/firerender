@@ -1,27 +1,27 @@
 // ============================================================================
-//  events.h — событийная шина: подписка и рассылка событий
+//  events.h — event bus: subscribing to and dispatching events
 // ----------------------------------------------------------------------------
-//  Модули не вызывают друг друга напрямую, а шлют события: консоль —
-//  EV_CONSOLE_OPENED/CLOSED, сущности — EV_ENTITY_SPAWN/KILL. Главный цикл
-//  и другие системы подписываются на интересные им типы. Так Lua (фаза 4)
-//  сможет слушать те же события, не трогая ядро.
+//  Modules do not call each other directly, they post events: the console —
+//  EV_CONSOLE_OPENED/CLOSED, entities — EV_ENTITY_SPAWN/KILL. The main loop
+//  and other systems subscribe to the types they care about. This way Lua
+//  (phase 4) can listen to the same events without touching the core.
 // ============================================================================
 #ifndef EVENTS_H
 #define EVENTS_H
 
-// Типы событий (расширяйте по мере надобности; a/b — данные события).
+// Event types (extend as needed; a/b — event payload).
 enum {
     EV_ENTITY_SPAWN = 1,   // a = Entity*
     EV_ENTITY_KILL,        // a = Entity*
     EV_CONSOLE_OPENED,     // a = NULL
     EV_CONSOLE_CLOSED,     // a = NULL
-    EV_NODE_INIT,          // a = SceneNode*  (узел добавлен в дерево)
-    EV_NODE_EXIT,          // a = SceneNode*  (узел удаляется из дерева)
+    EV_NODE_INIT,          // a = SceneNode*  (node added to the tree)
+    EV_NODE_EXIT,          // a = SceneNode*  (node being removed from the tree)
 };
 
 typedef struct {
-    int type;              // тип события (из перечисления выше)
-    const void *a;         // данные события (тип зависит от type)
+    int type;              // event type (from the enum above)
+    const void *a;         // event payload (type-dependent)
     const void *b;
 } Event;
 
@@ -30,25 +30,25 @@ typedef void (*EventListener)(const Event *e, void *user);
 #define EVENTS_MAX_TYPES 32
 #define EVENTS_MAX_LISTENERS 64
 
-// Подписка на тип события (user передаётся в колбэк). Повторная подписка
-// с той же парой (fn, user) игнорируется.
+// Subscribe to an event type (user is passed to the callback). A repeated
+// subscription with the same (fn, user) pair is ignored.
 void events_listen(int type, EventListener fn, void *user);
 
-// Отписка.
+// Unsubscribe.
 void events_unlisten(int type, EventListener fn, void *user);
 
-// Рассылка: все подписчики типа вызываются в порядке подписки.
+// Dispatch: all subscribers of the type are called in subscription order.
 void events_emit(int type, const void *a, const void *b);
 
-// Отложенная рассылка: событие ставится в очередь и рассылается позже из
-// events_flush_deferred() в безопасной точке главного цикла. Позволяет
-// безопасно эмитить события изнутри колбэков (защита от reentrancy без
-// ручных снимков): слушатель, убравший/добавивший подписки в этом кадре,
-// не ломает итерацию. Хранится ТОЛЬКО (type, a, b) — без вложенного
-// владения (как и events_emit).
+// Deferred dispatch: the event is queued and dispatched later from
+// events_flush_deferred() at a safe point in the main loop. This allows
+// emitting events safely from inside callbacks (reentrancy protection without
+// manual snapshots): a listener that removes/adds subscriptions in this frame
+// does not break the iteration. ONLY (type, a, b) is stored — no nested
+// ownership (same as events_emit).
 void events_emit_deferred(int type, const void *a, const void *b);
 
-// Доставляет отложенные события в порядке добавления. Звать раз за кадр.
+// Delivers deferred events in insertion order. Call once per frame.
 void events_flush_deferred(void);
 
 #endif

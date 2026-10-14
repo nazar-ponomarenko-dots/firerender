@@ -1,83 +1,83 @@
 // ============================================================================
-//  ecs.h — data-oriented ECS поверх движка (сущности-ID + компоненты + системы)
+//  ecs.h — data-oriented ECS on top of the engine (entity IDs + components + systems)
 // ----------------------------------------------------------------------------
-//  Зачем: SceneNode/Entity — объектная модель (указатели, виртуальные методы
-//  через function-поинтеры). ECS добавляет параллельный слой «данные прежде
-//  кода»: сущность = целый ID, компонент = POD-структура в пуле типа, система
-//  = проход по массиву. Это дешёвые массовые объекты (фауна, частицы,
-//  триггеры) и предсказуемый кэш. Никакого рендера здесь нет: связка со
-//  сценой — в ecs_sync.c, рисуют по-прежнему узлы.
+//  Why: SceneNode/Entity is an object model (pointers, virtual methods via
+//  function pointers). ECS adds a parallel "data over code" layer: an entity
+//  = an integer ID, a component = a POD struct in a per-type pool, a system
+//  = a pass over an array. This gives cheap massive objects (fauna, particles,
+//  triggers) and predictable cache. There is no rendering here: the link to
+//  the scene lives in ecs_sync.c, nodes still do the drawing.
 //
-//  Хэндли: наружу ID не отдаётся как указатель — только хэндл
-//  (serial<<16|num, беззнаковая сборка, 0 = «нет»), как в entity.c. Мёртвый
-//  или переиспользованный слот даёт хэндл, по которому ecs_get вернёт NULL.
+//  Handles: an ID is never exposed outward as a pointer — only a handle
+//  (serial<<16|num, unsigned assembly, 0 = "none"), as in entity.c. A dead or
+//  reused slot yields a handle for which ecs_get returns NULL.
 //
-//  Память: ВСЁ статично (статические пулы слотов). Ни одного malloc — ни в
-//  кадре, ни при регистрации. Ёмкость фиксирована; переполнение — сообщение
-//  в лог и NULL, а не рост массива (fail-soft контракт движка).
+//  Memory: EVERYTHING is static (static slot pools). Not a single malloc —
+//  neither in a frame nor at registration. Capacity is fixed; overflow —
+//  a log message and NULL, not array growth (the engine's fail-soft contract).
 // ============================================================================
 #ifndef ECS_H
 #define ECS_H
 
 #include <stdint.h>
 
-typedef int EcsId;                 // <0 — негодный ID
+typedef int EcsId;                 // <0 — invalid ID
 
-#define ECS_MAX_ENTS      2048     // живых сущностей
-#define ECS_MAX_COMPONENTS 64      // типов компонентов (по 1 биту в маске)
+#define ECS_MAX_ENTS      2048     // live entities
+#define ECS_MAX_COMPONENTS 64      // component types (1 bit each in the mask)
 #define ECS_MAX_SYSTEMS   32
 
-// Регистрация компонента: name для ecs_list, size — размер POD-структуры.
-// id — маленький индекс (0..), присваивается порядком регистрации; НЕ годится
-// как указатель и НЕ переживает ecs_shutdown. 0 при реестре полном/ошибке.
+// Component registration: name for ecs_list, size — size of the POD struct.
+// id — a small index (0..), assigned in registration order; NOT usable as a
+// pointer and does NOT survive ecs_shutdown. 0 when the registry is full/on error.
 int ecs_register_component(const char *name, int size);
 
-// Система: вызывает fn(id, ud) для каждой живой сущности, чья маска содержит
-// all. Порядок — по возрастанию order (равные — по регистрации).
+// System: calls fn(id, ud) for every live entity whose mask contains
+// all. Order — ascending by order (equal ones — by registration).
 typedef void (*EcsSystemFn)(EcsId id, void *ud);
 void ecs_register_system(const char *name, uint64_t all, int order,
                          EcsSystemFn fn, void *ud);
 
-// Сущность. ecs_create резервирует ID без компонентов; удалить component
-// можно только явно (ecs_detach) — при ecs_kill компоненты освобождаются.
+// Entity. ecs_create reserves an ID without components; a component can only
+// be removed explicitly (ecs_detach) — on ecs_kill the components are freed.
 EcsId        ecs_create(void);
-void         ecs_kill(EcsId id);          // идемпотентно
+void         ecs_kill(EcsId id);          // idempotent
 int          ecs_is_alive(EcsId id);
 uint64_t     ecs_mask(EcsId id);
 
-// Компоненты. Присоединение инициализирует слот нулями; detach очищает.
-// При смерти сущности все её компоненты detach автоматически.
-// Указатель из ecs_get Валиден, пока компонент не detach и сущность жива:
-// после переиспользования слота он может смотреть в чужой компонент —
-// через границы Lua/консоли держите хэндл и проверяйте ecs_owner().
+// Components. Attaching initializes the slot with zeros; detach clears it.
+// On entity death all its components are detached automatically.
+// The pointer from ecs_get is VALID until the component is detached and the
+// entity stays alive: after slot reuse it may point into someone else's
+// component — across Lua/console boundaries keep the handle and check ecs_owner().
 int   ecs_attach(EcsId id, int comp);
 void  ecs_detach(EcsId id, int comp);
-void *ecs_get(EcsId id, int comp);        // NULL — компонент не присоединён
+void *ecs_get(EcsId id, int comp);        // NULL — component not attached
 int   ecs_has(EcsId id, int comp);
-EcsId ecs_owner(const void *comp_ptr, int comp); // -1 — указатель не из пула
+EcsId ecs_owner(const void *comp_ptr, int comp); // -1 — pointer not from the pool
 
-// Стабильные внешние хэндлы (для Lua/консоли/сохранений).
-int   ecs_handle(EcsId id);               // 0 = негодный
-EcsId ecs_get_by_handle(int handle);      // -1 = сущности нет/переиспользована
+// Stable external handles (for Lua/console/saves).
+int   ecs_handle(EcsId id);               // 0 = invalid
+EcsId ecs_get_by_handle(int handle);      // -1 = entity gone/reused
 
-// Прогнать системы по порядку. Вызывается один раз за тик логики (game.c).
+// Run the systems in order. Called once per logic tick (game.c).
 void  ecs_update(float dt);
 
-// --- Отладка/консоль ---
-int   ecs_count(void);                    // живых сущностей
-int   ecs_system_count(void);             // зарегистрированных систем
-int   ecs_component_types(void);          // занятых слотов реестра компонентов
-int   ecs_component_count(int comp);      // сущностей с данным типом
+// --- Debug/console ---
+int   ecs_count(void);                    // live entities
+int   ecs_system_count(void);             // registered systems
+int   ecs_component_types(void);          // occupied slots of the component registry
+int   ecs_component_count(int comp);      // entities with the given type
 const char *ecs_component_name(int comp);
-void  ecs_list(void);                     // вывод в консоль
-void  ecs_shutdown(void);                 // убить всё (смена карты/выход)
+void  ecs_list(void);                     // console output
+void  ecs_shutdown(void);                 // kill everything (map change/exit)
 
-// Консольные команды (обработчики здесь, регистрация — в cmdreg.c).
+// Console commands (handlers here, registration in cmdreg.c).
 void cmd_ecs_list(const char *args);
 void cmd_ecs_stats(const char *args);
 void cmd_ecs_test(const char *args);
 
-// Самотест без окна (FR_TEST=Sx его зовёт). Возвращает число провалов.
+// Windowless selftest (FR_TEST=Sx calls it). Returns the number of failures.
 int   ecs_selftest(void);
 
 #endif

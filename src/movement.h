@@ -1,10 +1,11 @@
 // ============================================================================
-//  movement.h — физика/движение игрока (отдельно от камеры)
+//  movement.h — player physics/movement (separate from the camera)
 // ----------------------------------------------------------------------------
-//  camera.c отвечает за ВИД (yaw/pitch, мышь, матрицы), а ВСЯ физика и
-//  движение — здесь: ходьба (гравитация, земля, коллизия объектов, вода),
-//  полёт (fly) и проход сквозь (noclip), плюс звуки шагов/прыжка/приземления.
-//  Так движение не зашито в камеру и может переиспользоваться/заменяться.
+//  camera.c is responsible for the VIEW (yaw/pitch, mouse, matrices), while
+//  ALL physics and movement live here: walking (gravity, ground, object
+//  collision, water), flying (fly) and phase-through (noclip), plus
+//  footstep/jump/landing sounds.
+//  This way movement isn't baked into the camera and can be reused/replaced.
 // ============================================================================
 #ifndef MOVEMENT_H
 #define MOVEMENT_H
@@ -12,16 +13,16 @@
 #include "camera.h"   // Camera
 #include "world.h"    // WorldState
 
-// Счётчик сыгранных шагов (для snd_debug в renderer.c)
+// Counter of played footsteps (for snd_debug in renderer.c)
 extern int g_step_calls;
 
-// Физика/движение игрока за такт dt. Читает действия (actions.h: +forward и
-// т.п.), движки cam->pos / vx / vy / vz, реагирует на режимы cam->fly/noclip.
+// Player physics/movement for a dt tick. Reads actions (actions.h: +forward
+// etc.), moves cam->pos / vx / vy / vz, honors cam->fly/noclip modes.
 void movement_update(Camera *cam, const WorldState *w, float dt);
 
-// Скорость падения (м/с, >0) в момент последнего приземления с высоты —
-// один раз: возвращает и обнуляет. Игровой слой (game.c) переводит её в урон
-// от падения. 0 — приземления с ощутимой высоты в этом кадре не было.
+// Fall speed (m/s, >0) at the moment of the last landing from a height —
+// one-shot: returns and resets. The game layer (game.c) converts it into
+// fall damage. 0 — no landing from a noticeable height this frame.
 float movement_take_fall_impact(void);
 
 #endif

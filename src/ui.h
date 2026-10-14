@@ -1,96 +1,96 @@
 // ============================================================================
-//  ui.h — immediate-mode UI (меню в стиле Half-Life 1/2)
+//  ui.h — immediate-mode UI (menu in the Half-Life 1/2 style)
 // ----------------------------------------------------------------------------
-//  Виджеты рисуются СРАЗУ при вызове (иммедиейт-режим), ввод — мышь
-//  (наведение, клик, перетаскивание) + клавиатура (стрелки/WASD, Enter).
-//  Текущий пункт (фокус) подсвечивается, Enter активирует — как в HL1.
+//  Widgets are drawn IMMEDIATELY on call (immediate mode), input — mouse
+//  (hover, click, drag) + keyboard (arrows/WASD, Enter).
+//  The current item (focus) is highlighted, Enter activates it — like in HL1.
 //
-//  Использование:
-//    ui_begin(&u, vw, vh, big);       // big: 1 = шрифт 26px, 0 = 15px
-//    ui_col(&u, x, y, w);             // колонка виджетов
+//  Usage:
+//    ui_begin(&u, vw, vh, big);       // big: 1 = 26px font, 0 = 15px
+//    ui_col(&u, x, y, w);             // a column of widgets
 //    if (ui_button(&u, "НАСТРОЙКИ")) ...
 //    float v = cvar_get("fov");
 //    if (ui_slider(&u, "FOV", &v, 5, 120, "%.0f")) cvar_set("fov", v);
 //    ui_end(&u);
 //
-//  Рисование — через hud_rect_draw/hud_text_draw(_small): один шейдер,
-//  без новых текстур. Блендинг включается в ui_begin, выключается в ui_end.
+//  Drawing goes through hud_rect_draw/hud_text_draw(_small): one shader,
+//  no new textures. Blending is enabled in ui_begin, disabled in ui_end.
 // ============================================================================
 #ifndef UI_H
 #define UI_H
 #include <stdbool.h>
 
 typedef struct {
-    int vw, vh;              // окно в пикселях
-    int big;                 // 1 = шрифт 26px (меню), 0 = 15px (настройки)
-    float font_h;            // высота строки текущего шрифта
+    int vw, vh;              // window in pixels
+    int big;                 // 1 = 26px font (menu), 0 = 15px (settings)
+    float font_h;            // line height of the current font
 
-    // Мышь (читается в ui_begin из SDL)
-    int mx, my;              // позиция в окне
-    bool mouse_down;         // ЛКМ зажата
-    bool mouse_click;        // клик в этом кадре (только что нажали)
-    bool mouse_release;      // отпустили в этом кадре
+    // Mouse (read in ui_begin from SDL)
+    int mx, my;              // position within the window
+    bool mouse_down;         // LMB held
+    bool mouse_click;        // click this frame (just pressed)
+    bool mouse_release;      // released this frame
 
-    // Клавиатура (читается в ui_begin из SDL, фронты нажатия)
+    // Keyboard (read in ui_begin from SDL, press edges)
     bool key_up, key_down, key_left, key_right, key_enter;
     bool key_home, key_end;
 
-    // Состояние виджетов (персистентно между кадрами)
-    int hot;                 // id виджета под курсором (-1 нет)
-    int active;              // id виджета, зажатого мышью (слайдер тянется)
-    int focus;               // id виджета с клавиатурным фокусом (0 — нет)
-    int focus_prev;          // фокус на начало кадра (для звука навигации)
-    bool eat_home_end;       // слайдер съел Home/End (ui_end не листает фокус)
+    // Widget state (persistent between frames)
+    int hot;                 // id of the widget under the cursor (-1 none)
+    int active;              // id of the widget held by the mouse (slider dragging)
+    int focus;               // id of the widget with keyboard focus (0 — none)
+    int focus_prev;          // focus at the start of the frame (for navigation sound)
+    bool eat_home_end;       // a slider consumed Home/End (ui_end doesn't move focus)
 
-    // Лейаут колонки
-    float cx, cy;            // текущая позиция
-    float col_w;             // ширина колонки
+    // Column layout
+    float cx, cy;            // current position
+    float col_w;             // column width
 
-    // Внутреннее: предыдущее состояние ввода
+    // Internal: previous input state
     bool m_down_p;
     bool k_up_p, k_down_p, k_left_p, k_right_p, k_enter_p;
     bool k_home_p, k_end_p;
-    int id;                  // счётчик виджетов кадра (с 1)
+    int id;                  // per-frame widget counter (starts at 1)
 } Ui;
 
-// Начало кадра UI: читает мышь/клавиши, сбрасывает счётчик виджетов.
-// big: 1 = крупный шрифт (пункты меню), 0 = мелкий (настройки).
-// input: 1 = ввод активен (мышь/клавиши); 0 = только рендер (консоль открыта).
-// Включает блендинг и depth test off.
+// Start of the UI frame: reads mouse/keys, resets the widget counter.
+// big: 1 = large font (menu items), 0 = small (settings).
+// input: 1 = input active (mouse/keys); 0 = render only (console open).
+// Enables blending and disables depth test.
 void ui_begin(Ui *u, int vw, int vh, int big, int input);
 
-// Конец кадра: обработка клавиш навигации (стрелки двигают фокус),
-// выключает блендинг.
+// End of the frame: handles navigation keys (arrows move the focus),
+// disables blending.
 void ui_end(Ui *u);
 
-// Сброс клавиатурного фокуса (при смене экрана меню).
+// Resets the keyboard focus (when switching menu screens).
 void ui_focus_reset(Ui *u);
 
-// Фокус на ПЕРВЫЙ пункт (при входе на экран: Enter сразу выбирает его).
+// Focus on the FIRST item (when entering a screen: Enter immediately selects it).
 void ui_focus_first(Ui *u);
 
-// Начинает колонку виджетов в (x, y), ширина w.
+// Starts a widget column at (x, y) with width w.
 void ui_col(Ui *u, float x, float y, float w);
 float ui_layout_scale(Ui *u);
 float ui_layout_item_h(Ui *u);
 
-// --- Виджеты (возвращают true при активации/изменении) ------------------------
+// --- Widgets (return true on activation/change) ------------------------
 bool ui_button(Ui *u, const char *label);
 bool ui_checkbox(Ui *u, const char *label, int *value);
 bool ui_slider(Ui *u, const char *label, float *value,
                float min, float max, const char *fmt);
-void ui_text(Ui *u, const char *label);      // статичный текст в колонке
-void ui_sep(Ui *u);                          // разделитель
-void ui_title(Ui *u, const char *label);     // заголовок по центру верха
-void ui_title_big(Ui *u, const char *label); // крупный заголовок меню (56px)
-void ui_hint(Ui *u, const char *label);      // подсказка внизу экрана
+void ui_text(Ui *u, const char *label);      // static text in the column
+void ui_sep(Ui *u);                          // separator
+void ui_title(Ui *u, const char *label);     // title centered at the top
+void ui_title_big(Ui *u, const char *label); // large menu title (56px)
+void ui_hint(Ui *u, const char *label);      // hint at the bottom of the screen
 
-// Текст/кнопка в произвольной точке (окна, крестики, подписи)
+// Text/button at an arbitrary point (windows, crosshair, captions)
 void ui_text_at(Ui *u, float x, float y, const char *s, const float c[4]);
 bool ui_button_at(Ui *u, float x, float y, float w, float h, const char *label);
 
-// Слот бинда: действие слева, [клавиша] справа. Возвращает true при активации
-// (клик/Enter — начать запись новой клавиши).
+// Key-binding slot: action on the left, [key] on the right. Returns true on
+// activation (click/Enter — start recording a new key).
 bool ui_key_slot(Ui *u, const char *action, const char *key);
 
 #endif

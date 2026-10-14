@@ -1,11 +1,11 @@
 // ============================================================================
-//  ShadowVeg — фрагментный шейдер карты теней (растительность)
+//  ShadowVeg — fragment shader of the shadow map (vegetation)
 // ----------------------------------------------------------------------------
-//  Прозрачные пиксели спрайта выкидываются, остальное пишет глубину.
+//  Transparent sprite pixels are discarded, the rest writes depth.
 // ============================================================================
 
 in vec2 vUV;
-flat in float vLayer;   // из wheat.vs — LOD целый для квада
+flat in float vLayer;   // from wheat.vs — one LOD value for the whole quad
 
 uniform sampler2DArray uVeg;
 

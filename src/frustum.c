@@ -1,12 +1,12 @@
 // ============================================================================
-//  frustum.c — отсечение фрустумом
+//  frustum.c — frustum culling
 // ============================================================================
 #include "frustum.h"
 
 #include <math.h>
 
-// Gribb-Hartmann: плоскости из строк матрицы (OpenGL column-major viewproj).
-// Плоскости нормализованы (деление на длину (A,B,C)).
+// Gribb-Hartmann: planes from matrix rows (OpenGL column-major viewproj).
+// Planes are normalized (divided by the length of (A,B,C)).
 void frustum_build(Frustum *f, const float *m)
 {
     // left   = row4 + row1
@@ -41,7 +41,7 @@ int frustum_test_point(const Frustum *f, float x, float y, float z)
 {
     for (int i = 0; i < 6; i++) {
         float d = f->p[i][0] * x + f->p[i][1] * y + f->p[i][2] * z + f->p[i][3];
-        if (d < 0.0f) return 0;   // снаружи этой плоскости
+        if (d < 0.0f) return 0;   // outside this plane
     }
     return 1;
 }
@@ -50,24 +50,24 @@ int frustum_test_sphere(const Frustum *f, float x, float y, float z, float r)
 {
     for (int i = 0; i < 6; i++) {
         float d = f->p[i][0] * x + f->p[i][1] * y + f->p[i][2] * z + f->p[i][3];
-        if (d < -r) return 0;     // полностью за плоскостью
+        if (d < -r) return 0;     // entirely behind the plane
     }
-    return 1;                     // пересекает или внутри
+    return 1;                     // intersecting or inside
 }
 
 int frustum_test_aabb(const Frustum *f, const float *min, const float *max)
 {
-    // Плоскость хранится так, что точка внутри/на границе фрустума даёт
-    // n*p + d >= 0. Бокс НЕ пересекает фрустум только если он ЦЕЛИКОМ по
-    // внешнюю сторону какой-то плоскости — для этого достаточно проверить
-    // одну его вершину: ту, что МАКСИМИЗИРУЕТ n*p по каждой оси (p-vertex).
-    // Если даже она за плоскостью (n*p+d < 0) — весь бокс снаружи.
+    // The plane is stored so that a point inside/on the frustum boundary gives
+    // n*p + d >= 0. The box does NOT intersect the frustum only if it lies
+    // ENTIRELY on the outer side of some plane — checking a single vertex
+    // suffices: the one that MAXIMIZES n*p along each axis (the p-vertex).
+    // If even that one is behind the plane (n*p+d < 0) — the whole box is outside.
     for (int i = 0; i < 6; i++) {
         float px = f->p[i][0] > 0 ? max[0] : min[0];
         float py = f->p[i][1] > 0 ? max[1] : min[1];
         float pz = f->p[i][2] > 0 ? max[2] : min[2];
         float d = f->p[i][0] * px + f->p[i][1] * py + f->p[i][2] * pz + f->p[i][3];
-        if (d < 0.0f) return 0;   // самая «внутренняя» вершина снаружи
+        if (d < 0.0f) return 0;   // even the "most internal" vertex is outside
     }
     return 1;
 }

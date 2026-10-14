@@ -1,13 +1,13 @@
 // ============================================================================
-//  utf8.h — маленькие inline-помощники для UTF-8 (ввод/вывод текста)
+//  utf8.h — small inline helpers for UTF-8 (text input/output)
 // ----------------------------------------------------------------------------
-//  Используются консолью (ввод строки, Backspace по символам) и HUD
-//  (растеризация глифов, ширина текста). Без аллокаций и зависимостей.
+//  Used by the console (line input, per-character Backspace) and the HUD
+//  (glyph rasterization, text width). No allocations, no dependencies.
 // ============================================================================
 #ifndef UTF8_H
 #define UTF8_H
 
-// Длина UTF-8-последовательности по первому байту (1..4)
+// Length of a UTF-8 sequence from its first byte (1..4)
 static inline int utf8_len(unsigned char c)
 {
     if (c < 0x80) return 1;
@@ -17,9 +17,9 @@ static inline int utf8_len(unsigned char c)
     return 1;
 }
 
-// Декодирует codepoint из s (s должна содержать не менее utf8_len(s[0]) байт
-// до NUL). Возвращает число байт. Обрезанная/битая последовательность —
-// cp = первый байт как есть.
+// Decodes a codepoint from s (s must hold at least utf8_len(s[0]) bytes
+// before the NUL). Returns the byte count. A truncated/broken sequence —
+// cp = the first byte as-is.
 static inline int utf8_decode(const char *s, int *cp)
 {
     unsigned char c = (unsigned char)s[0];
@@ -39,7 +39,7 @@ static inline int utf8_decode(const char *s, int *cp)
     return l;
 }
 
-// Индекс начала символа ПЕРЕД pos (для ← и Backspace)
+// Index of the character start BEFORE pos (for ← and Backspace)
 static inline int utf8_prev(const char *s, int pos)
 {
     int i = pos - 1;

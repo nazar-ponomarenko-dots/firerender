@@ -1,12 +1,12 @@
 // ============================================================================
-//  Minimap — вершинный шейдер мини-карты
+//  Minimap — vertex shader for the minimap
 // ----------------------------------------------------------------------------
-//  Мини-карта рисуется в экранных координатах (NDC) без матриц:
-//  позиции вершин уже готовы в clip space, их считает узел Minimap.
+//  The minimap is drawn in screen coordinates (NDC) without matrices:
+//  vertex positions are already prepared in clip space by the Minimap node.
 // ============================================================================
 
-layout (location = 0) in vec2 aPos;   // позиция в NDC
-layout (location = 1) in vec2 aUV;    // uv в текстуре карты
+layout (location = 0) in vec2 aPos;   // position in NDC
+layout (location = 1) in vec2 aUV;    // uv in the map texture
 
 out vec2 vUV;
 

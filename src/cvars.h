@@ -1,89 +1,88 @@
 // ============================================================================
-//  cvars.h — переменные движка (CVar'ы) и config.cfg
+//  cvars.h — engine variables (CVars) and config.cfg
 // ----------------------------------------------------------------------------
-//  Реестр переменных, которыми управляют консоль и клавиши: fov, cl_sens,
-//  sv_gravity, r_shadows... Модули ЧИТАЮТ cvar'ы каждый кадр, консоль их
-//  меняет — связь односторонняя, без прямых вызовов.
+//  Registry of variables driven by the console and keys: fov, cl_sens,
+//  sv_gravity, r_shadows... Modules READ cvars every frame, the console
+//  changes them — one-way coupling, no direct calls.
 //
-//  Переменная: имя, значение, диапазон [min, max] (set зажимает), флаги.
-//  config.cfg — файл "name value" в рабочей папке: грузится при старте,
-//  сохраняется при выходе (как в GoldSrc). Сохраняются только cvar'ы
-//  с флагом CVAR_ARCHIVE.
+//  A variable: name, value, range [min, max] (set clamps into it), flags.
+//  config.cfg — a "name value" file in the working folder: loaded at startup,
+//  saved on exit (as in GoldSrc). Only cvars with the CVAR_ARCHIVE flag are saved.
 // ============================================================================
 #ifndef CVARS_H
 #define CVARS_H
 
 typedef struct {
-    char name[32];       // имя переменной
-    float value;         // текущее значение
-    float def;           // значение по умолчанию
-    float minv, maxv;    // диапазон (minv > maxv — без ограничений)
-    int flags;           // CVAR_ARCHIVE и др.
-    char str[64];        // строковое значение (для string-переменных)
-    char def_str[64];    // дефолтное строковое значение
-    char help[64];       // описание (для cvarlist)
+    char name[32];       // variable name
+    float value;         // current value
+    float def;           // default value
+    float minv, maxv;    // range (minv > maxv — no limits)
+    int flags;           // CVAR_ARCHIVE etc.
+    char str[64];        // string value (for string variables)
+    char def_str[64];    // default string value
+    char help[64];       // description (for cvarlist)
 } Cvar;
 
-// Начальная вместимость реестра. Реестр РАСТЁТ динамически (realloc),
-// лимита на число переменных нет — CVARS_MAX это лишь стартовый размер.
+// Initial registry capacity. The registry GROWS dynamically (realloc),
+// there is no cap on the number of variables — CVARS_MAX is only the starting size.
 #define CVARS_MAX 64
 
-// Флаги переменных
-#define CVAR_ARCHIVE   1  // сохранять в config.cfg (по умолчанию для register)
-#define CVAR_NOSAVE    2  // НЕ сохранять (временные/служебные)
-#define CVAR_CHEAT     4  // чит: меняется только при sv_cheats 1
-#define CVAR_USERINFO  8  // инфо игрока: шлётся/сохраняется, но не важна для
-                          // игрового мира (как FCVAR_USERINFO в Source)
-#define CVAR_CFGSET   32  // значение задано явно (конфиг/юзер/карта):
-                          // cvar_set_default его НЕ перетирает
-#define CVAR_STRING   16  // строковая переменная (значение в c->str)
+// Variable flags
+#define CVAR_ARCHIVE   1  // saved to config.cfg (default for register)
+#define CVAR_NOSAVE    2  // NOT saved (temporary/internal)
+#define CVAR_CHEAT     4  // cheat: changeable only when sv_cheats 1
+#define CVAR_USERINFO  8  // player info: sent/stored, but irrelevant to
+                          // the game world (like FCVAR_USERINFO in Source)
+#define CVAR_CFGSET   32  // value set explicitly (config/user/map):
+                          // cvar_set_default does NOT overwrite it
+#define CVAR_STRING   16  // string variable (value in c->str)
 
-// Очищает реестр (вызывается console_init).
+// Clears the registry (called by console_init).
 void cvar_init(void);
 
-// Регистрирует переменную: без диапазона, с флагом CVAR_ARCHIVE.
+// Registers a variable: no range, with the CVAR_ARCHIVE flag.
 void cvar_register(const char *name, float def, const char *help);
 
-// Регистрирует с диапазоном [min, max] и флагами (см. CVAR_*).
-// min >= max — без ограничений. Повторная регистрация имени — no-op.
+// Registers with range [min, max] and flags (see CVAR_*).
+// min >= max — no limits. Re-registering an existing name — no-op.
 void cvar_register_ex(const char *name, float def, float min, float max,
                       int flags, const char *help);
 
-// Регистрирует СТРОКОВУЮ переменную (флаг CVAR_STRING ставится сам).
-// Значение по умолчанию — строка; cvar_get(name) вернёт atof(def_str).
-// Повторная регистрация имени — no-op.
+// Registers a STRING variable (the CVAR_STRING flag is set automatically).
+// The default is a string; cvar_get(name) returns atof(def_str).
+// Re-registering an existing name — no-op.
 void cvar_register_string(const char *name, const char *def, const char *help);
 
-// Чтение/запись. cvar_get незнакомого имени = 0; cvar_set незнакомого
-// имени регистрирует его (консоль может заводить свои переменные).
-// cvar_set зажимает значение в диапазон. Для string-переменных cvar_set
-// пишет и строковое значение.
+// Read/write. cvar_get of an unknown name = 0; cvar_set of an unknown
+// name registers it (the console may create its own variables).
+// cvar_set clamps the value into the range. For string variables cvar_set
+// also writes the string value.
 float cvar_get(const char *name);
-void cvar_set_default(const char *name, float v);   // задать, если юзер не задавал
+void cvar_set_default(const char *name, float v);   // set only if the user hasn't set it
 void cvar_set(const char *name, float v);
 
-// Строковые переменные (CVAR_STRING). cvar_get_string возвращает
-// "" для нестроковой/неизвестной переменной.
+// String variables (CVAR_STRING). cvar_get_string returns
+// "" for a non-string/unknown variable.
 const char *cvar_get_string(const char *name);
 void cvar_set_string(const char *name, const char *s);
 
-// Устанавливает значение из СТРОКИ: если переменная CVAR_STRING — пишет
-// строку, иначе — atof() (используется при загрузке config.cfg и set).
+// Sets a value from a STRING: if the variable is CVAR_STRING — writes the
+// string, otherwise — atof() (used when loading config.cfg and by set).
 void cvar_set_from_string(const char *name, const char *s);
 
-// Доступ по индексу (для cvarlist и Tab-дополнения).
-int cvar_index(const char *name);   // -1, если нет
+// Access by index (for cvarlist and Tab completion).
+int cvar_index(const char *name);   // -1 if not found
 int cvar_count(void);
 const Cvar *cvar_at(int i);
 
-// config.cfg: строки "name value". load возвращает 1, если файл открылся.
-// save пишет только cvar'ы с CVAR_ARCHIVE.
+// config.cfg: "name value" lines. load returns 1 if the file opened.
+// save writes only cvars with CVAR_ARCHIVE.
 int cvar_load_config(const char *path);
 void cvar_save_config(const char *path);
 
-// Сброс ВСЕХ графических cvar'ов (имя начинается на "r_") к значениям по
-// умолчанию (def). Возвращает число сброшенных переменных. Чит-переменные
-// (CVAR_CHEAT) не трогаются.
+// Resets ALL graphics cvars (name starts with "r_") to their default
+// values (def). Returns the number of variables reset. Cheat variables
+// (CVAR_CHEAT) are left untouched.
 int cvar_reset_graphics(void);
 
 #endif

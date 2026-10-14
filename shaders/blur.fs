@@ -1,29 +1,29 @@
 // ============================================================================
-//  Blur — раздельный гауссов блюр (11-тапное ядро — мягкое свечение)
+//  Blur — separable Gaussian blur (11-tap kernel — soft glow)
 // ----------------------------------------------------------------------------
-//  Два прохода: горизонтальный и вертикальный (uDir). Оба на половинном
-//  разрешении — мягкое свечение без дорогого полного блюра.
-//  Веса — нормализованный гаусс sigma = 2.4 (0.019..0.170).
+//  Two passes: horizontal and vertical (uDir). Both at half resolution —
+//  soft glow without an expensive full blur.
+//  Weights — a normalized Gaussian with sigma = 2.4 (0.019..0.170).
 //
-//  ЛИНЕЙНАЯ ВЫБОРКА (linear-sampling Gaussian): текстура фильтруется
-//  GL_LINEAR, поэтому две соседние точки ядра берутся ОДНОЙ билинейной
-//  выборкой в взвешенной позиции между текселями. 11 логических тапов
-//  считаются 7 физическими выборками — результат тот же (bilinear даёт
-//  w1·t1+w2·t2 при позиции (1·w1+2·w2)/(w1+w2)). Пары: (±1,±2) и (±3,±4);
-//  тап ±5 берётся отдельно (нечётный, дальний, вес мал).
+//  LINEAR SAMPLING: the texture is filtered with GL_LINEAR, so two adjacent
+//  kernel taps are taken with ONE bilinear sample at a weighted position
+//  between texels. 11 logical taps are computed as 7 physical samples —
+//  the result is the same (bilinear gives w1·t1+w2·t2 at position
+//  (1·w1+2·w2)/(w1+w2)). Pairs: (±1,±2) and (±3,±4);
+//  tap ±5 is taken separately (odd, far, small weight).
 // ============================================================================
 
 in vec2 vUV;
 
 uniform sampler2D uTex;
-uniform vec2 uDir;      // (1,0) или (0,1) — направление размытия
-uniform vec2 uTexel;    // 1/размер текстуры
+uniform vec2 uDir;      // (1,0) or (0,1) — blur direction
+uniform vec2 uTexel;    // 1/texture size
 
 out vec4 FragColor;
 
-// Совмещённые веса/смещения соседних тапов (вывод в шапке):
-// пара (1,2): w=0.15570+0.11995, off=(1·0.15570+2·0.11995)/w
-// пара (3,4): w=0.07773+0.04234, off=(3·0.07773+4·0.04234)/w
+// Merged weights/offsets of adjacent taps (derivation in the header):
+// pair (1,2): w=0.15570+0.11995, off=(1·0.15570+2·0.11995)/w
+// pair (3,4): w=0.07773+0.04234, off=(3·0.07773+4·0.04234)/w
 const float W12 = 0.27565, O12 = 1.4351170;
 const float W34 = 0.12007, O34 = 3.3526276;
 const float W5  = 0.01939, O5  = 5.0;

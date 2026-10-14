@@ -1,5 +1,5 @@
 // ============================================================================
-//  hud.c — дебаг-HUD: панель с позицией игрока, FPS, скоростью и прочим
+//  hud.c — debug HUD: a panel with the player position, FPS, speed and more
 // ============================================================================
 #include "hud.h"
 
@@ -26,9 +26,9 @@
 
 static float hud_mobile_scale(int vw, int vh);
 
-// TTF-шрифт Inter 18pt Black (img/Inter_18pt-Black.ttf): атлас растеризуется
-// один раз при старте через stb_truetype, глифы ставятся по метрикам шрифта
-// (advance/беринг) — строки не "летят", как с фиксированной сеткой 8x8.
+// TTF font Inter 18pt Black (img/Inter_18pt-Black.ttf): the atlas is rasterized
+// once at startup via stb_truetype, glyphs are placed by font metrics
+// (advance/bearing) — lines don't "fly apart", unlike a fixed 8x8 grid.
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
@@ -36,65 +36,65 @@ static float hud_mobile_scale(int vw, int vh);
 #define HUD_LINE_LEN 96
 #define HUD_MAX_GLYPHS 1536
 
-// Атлас: 1024x256 покрывает ASCII (95) + кириллицу (66) Inter Black 26px.
+// Atlas: 1024x256 covers ASCII (95) + Cyrillic (66) Inter Black 26px.
 #define FONT_ATLAS_W 1024
 #define FONT_ATLAS_H 256
-#define FONT_PX 26                  // высота растеризации глифов
-#define FONT_PAD 2                  // зазор между глифами (края билинейного)
+#define FONT_PX 26                  // glyph rasterization height
+#define FONT_PAD 2                  // gap between glyphs (bilinear edges)
 #define FONT_ASCII_FIRST 32
 #define FONT_ASCII_LAST 126
 #define FONT_N_ASCII (FONT_ASCII_LAST - FONT_ASCII_FIRST + 1)   // 95
-#define FONT_N_EXTRA 71              // Ё, ё, А..я (66) + — ← ↑ → ↓ (5)
+#define FONT_N_EXTRA 71              // Yo, yo, A..Ya (66) + em dash, arrows (5)
 #define FONT_N_GLYPHS (FONT_N_ASCII + FONT_N_EXTRA)             // 166
 
-// Атлас HUD: 1024x256 при 26px, консоль: 512x256 при 15px.
+// HUD atlas: 1024x256 at 26px, console: 512x256 at 15px.
 #define FONT_ATLAS_W 1024
 #define FONT_ATLAS_H 256
-#define FONT_PX 26                  // высота растеризации глифов (HUD)
+#define FONT_PX 26                  // glyph rasterization height (HUD)
 #define FONT_SMALL_W 512
 #define FONT_SMALL_H 256
-#define FONT_SMALL_PX 15            // высота растеризации (консоль)
-#define FONT_BIG_W 1024             // заголовки меню: 56px
+#define FONT_SMALL_PX 15            // rasterization height (console)
+#define FONT_BIG_W 1024             // menu headers: 56px
 #define FONT_BIG_H 512
 #define FONT_BIG_PX 56
-#define FONT_PAD 2                  // зазор между глифами (края билинейного)
+#define FONT_PAD 2                  // gap between glyphs (bilinear edges)
 
 typedef struct {
-    float w, h;          // размер битмапа глифа, px
-    float xoff, yoff;    // смещение от базовой линии (y — вниз от неё)
-    float advance;       // шаг до следующего глифа, px
-    float u0, v0, u1, v1; // кусок атласа
+    float w, h;          // glyph bitmap size, px
+    float xoff, yoff;    // offset from the baseline (y — downward from it)
+    float advance;       // step to the next glyph, px
+    float u0, v0, u1, v1; // atlas patch
 } HudGlyph;
 
-// Шрифт: атлас + глифы + метрики. Два экземпляра: HUD (26px) и консоль (15px).
+// Font: atlas + glyphs + metrics. Two instances: HUD (26px) and console (15px).
 typedef struct {
     HudGlyph glyphs[FONT_N_GLYPHS];
     GLuint tex;
-    float scale;         // stbtt-масштаб
-    float ascent_px;     // базовая линия от верха строки (вниз — glyph top)
-    float descent_px;    // сколько под базовой линией
-    float line_h_px;     // высота строки
+    float scale;         // stbtt scale
+    float ascent_px;     // baseline from the top of the line (downward — glyph top)
+    float descent_px;    // how much hangs below the baseline
+    float line_h_px;     // line height
     int ok;
 } HudFont;
 
-static stbtt_fontinfo g_font;        // данные шрифта (общие для обоих атласов)
-static int s_cp_slot[0x2300];        // codepoint -> слот глифа, -1 = нет
-                                     // (до 0x22FF: покрывает типографику ←↑→↓)
+static stbtt_fontinfo g_font;        // font data (shared by both atlases)
+static int s_cp_slot[0x2300];        // codepoint -> glyph slot, -1 = none
+                                     // (up to 0x22FF: covers typography ←↑→↓)
 static HudFont s_font;               // 26px — HUD
-static HudFont s_font_small;         // 15px — консоль
-static HudFont s_font_big;           // 56px — заголовки меню
+static HudFont s_font_small;         // 15px — console
+static HudFont s_font_big;           // 56px — menu headers
 static int g_font_ok = 0;
-static HudParams *g_hud = NULL;      // экземпляр HUD — для общих отрисовок (консоль)
+static HudParams *g_hud = NULL;      // HUD instance — for shared draws (console)
 
-// Слот глифа по codepoint'у (-1 = глифа нет)
+// Glyph slot for a codepoint (-1 = no such glyph)
 static int font_slot(int cp)
 {
     return (cp >= 0 && cp < (int)(sizeof s_cp_slot / sizeof s_cp_slot[0]))
                ? s_cp_slot[cp] : -1;
 }
 
-// Карта codepoint -> слот: ASCII 32..126, затем кириллица (Ё, ё, А..я),
-// затем типографика (—, ← ↑ → ↓). Общая для всех атласов.
+// Codepoint -> slot map: ASCII 32..126, then Cyrillic (U+0401, U+0451, 0x410..0x44F),
+// then typography (em dash, ← ↑ → ↓). Shared by all atlases.
 static void font_build_slots(void)
 {
     for (int i = 0; i < (int)(sizeof s_cp_slot / sizeof s_cp_slot[0]); i++)
@@ -102,25 +102,25 @@ static void font_build_slots(void)
     for (int c = FONT_ASCII_FIRST; c <= FONT_ASCII_LAST; c++)
         s_cp_slot[c] = c - FONT_ASCII_FIRST;
     int slot = FONT_N_ASCII;
-    s_cp_slot[0x401] = slot++;          // Ё
-    s_cp_slot[0x451] = slot++;          // ё
+    s_cp_slot[0x401] = slot++;          // Yo
+    s_cp_slot[0x451] = slot++;          // yo
     for (int c = 0x410; c <= 0x44F; c++)
-        s_cp_slot[c] = slot++;          // А..я
-    s_cp_slot[0x2014] = slot++;         // — длинное тире
+        s_cp_slot[c] = slot++;          // A..Ya
+    s_cp_slot[0x2014] = slot++;         // em dash
     s_cp_slot[0x2190] = slot++;         // ←
     s_cp_slot[0x2191] = slot++;         // ↑
     s_cp_slot[0x2192] = slot++;         // →
     s_cp_slot[0x2193] = slot++;         // ↓
 }
 
-// Читает TTF через менеджер ресурсов (диск -> ../диск -> вшитые данные).
-// Данные остаются жить (stbtt_fontinfo хранит указатель на них).
+// Reads the TTF through the resource manager (disk -> ../disk -> embedded data).
+// The data stays alive (stbtt_fontinfo keeps a pointer into it).
 static unsigned char *hud_read_font(unsigned int *sz)
 {
     return resources_read_file("img/Inter_18pt-Black.ttf", sz);
 }
 
-// Растеризует один codepoint в атлас (при переполнении — копия '?')
+// Rasterizes one codepoint into the atlas (on overflow — a copy of '?')
 static void font_rasterize(HudFont *f, int cp, unsigned char *atlas,
                            int atlas_w, int atlas_h, int pad,
                            int *cx, int *cy, int *row_h)
@@ -135,12 +135,12 @@ static void font_rasterize(HudFont *f, int cp, unsigned char *atlas,
     stbtt_GetGlyphBitmapBox(&g_font, gi, f->scale, f->scale, &x0, &y0, &x1, &y1);
     int w = x1 - x0, h = y1 - y0;
     if (w < 0 || h < 0) w = h = 0;
-    if (*cx + w + pad > atlas_w) {   // строка кончилась
+    if (*cx + w + pad > atlas_w) {   // row exhausted
         *cx = pad;
         *cy += *row_h + pad;
         *row_h = 0;
     }
-    if (*cy + h + pad > atlas_h) {   // атлас кончился — '?'
+    if (*cy + h + pad > atlas_h) {   // atlas full — use '?'
         if (w > 0 && h > 0) f->glyphs[slot] = f->glyphs[font_slot('?')];
         return;
     }
@@ -151,7 +151,7 @@ static void font_rasterize(HudFont *f, int cp, unsigned char *atlas,
     g->w = (float)w;
     g->h = (float)h;
     g->xoff = (float)x0;
-    g->yoff = (float)y0;                  // от базовой линии, y вниз
+    g->yoff = (float)y0;                  // from the baseline, y downward
     g->advance = (float)adv * f->scale;
     g->u0 = (float)*cx / atlas_w;
     g->v0 = (float)*cy / atlas_h;
@@ -161,18 +161,18 @@ static void font_rasterize(HudFont *f, int cp, unsigned char *atlas,
     if (h > *row_h) *row_h = h;
 }
 
-// Растеризует атлас шрифта: ASCII + кириллица + типографика.
+// Rasterizes the font atlas: ASCII + Cyrillic + typography.
 static void font_rasterize_all(HudFont *f, int atlas_w, int atlas_h, int pad)
 {
     unsigned char *atlas = calloc((size_t)atlas_w * atlas_h, 1);
-    if (!atlas) return;            // f->ok останется 0: растеризовать некуда
+    if (!atlas) return;            // f->ok stays 0: nowhere to rasterize into
     int cx = pad, cy = pad, row_h = 0;
     for (int c = FONT_ASCII_FIRST; c <= FONT_ASCII_LAST; c++)
         font_rasterize(f, c, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);
-    font_rasterize(f, 0x401, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);   // Ё
+    font_rasterize(f, 0x401, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);   // Yo
     for (int c = 0x410; c <= 0x44F; c++)
-        font_rasterize(f, c, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);   // А..я
-    font_rasterize(f, 0x451, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);   // ё
+        font_rasterize(f, c, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);   // A..Ya
+    font_rasterize(f, 0x451, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);   // yo
     font_rasterize(f, 0x2014, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);  // —
     font_rasterize(f, 0x2190, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);  // ←
     font_rasterize(f, 0x2191, atlas, atlas_w, atlas_h, pad, &cx, &cy, &row_h);  // ↑
@@ -184,7 +184,7 @@ static void font_rasterize_all(HudFont *f, int atlas_w, int atlas_h, int pad)
     f->ok = 1;
 }
 
-// Инициализирует шрифт заданного размера: метрики + атлас.
+// Initializes a font of the given size: metrics + atlas.
 static void font_init(HudFont *f, float px, int atlas_w, int atlas_h, int pad)
 {
     memset(f, 0, sizeof *f);
@@ -192,14 +192,14 @@ static void font_init(HudFont *f, float px, int atlas_w, int atlas_h, int pad)
     int ascent = 0, descent = 0, line_gap = 0;
     stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &line_gap);
     f->ascent_px = ascent * f->scale;
-    f->descent_px = -descent * f->scale;   // descent в stbtt отрицательный
+    f->descent_px = -descent * f->scale;   // descent is negative in stbtt
     f->line_h_px = (ascent - descent + line_gap) * f->scale;
     font_rasterize_all(f, atlas_w, atlas_h, pad);
     SDL_Log("HUD: font %.0fpx, atlas %dx%d (%d glyphs), line %.0f px",
             px, atlas_w, atlas_h, FONT_N_GLYPHS, f->line_h_px);
 }
 
-// Растеризует оба шрифта (HUD 26px и консоль 15px) в общий атлас-кеш.
+// Rasterizes both fonts (HUD 26px and console 15px) into the shared atlas cache.
 static void hud_font_init(void)
 {
     unsigned int sz = 0;
@@ -214,18 +214,18 @@ static void hud_font_init(void)
         return;
     }
     font_build_slots();
-    // Pad: зазор между глифами в атласе. Для крупного шрифта больше —
-    // при билинейной фильтрации края букв не хватают соседние глифы.
+    // Pad: gap between glyphs in the atlas. Larger for the big font —
+    // with bilinear filtering letter edges would otherwise grab neighboring glyphs.
     font_init(&s_font, FONT_PX, FONT_ATLAS_W, FONT_ATLAS_H, 2);
     font_init(&s_font_small, FONT_SMALL_PX, FONT_SMALL_W, FONT_SMALL_H, 2);
     font_init(&s_font_big, FONT_BIG_PX, FONT_BIG_W, FONT_BIG_H, 5);
     g_font_ok = 1;
 }
 
-// --- Общий рендер текста/прямоугольников (для консоли и меню) -----------------
-// Шрифт, атласы, программа и буфер живут ВСЮ сессию (hud_shared_init/
-// hud_shared_cleanup) и не зависят от загрузки мира: меню и консоль
-// работают даже до загрузки карты.
+// --- Shared text/rectangle rendering (for the console and menus) -------------
+// The font, atlases, program and buffer live for the WHOLE session (hud_shared_init/
+// hud_shared_cleanup) and do not depend on world loading: menus and the console
+// work even before a map is loaded.
 static GLuint s_shared_prog = 0, s_shared_vao = 0, s_shared_vbo = 0;
 static HudParams s_shared;
 
@@ -233,7 +233,7 @@ void hud_shared_init(void)
 {
     GLuint prog = make_program("shaders/text.vs", "shaders/text.fs");
     if (!prog) return;
-    hud_font_init();                        // атласы 26px + 15px
+    hud_font_init();                        // 26px + 15px atlases
     GLuint vao, vbo;
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
@@ -263,7 +263,7 @@ void hud_shared_init(void)
     s_shared_prog = prog;
     s_shared_vao = vao;
     s_shared_vbo = vbo;
-    g_hud = &s_shared;          // общий экземпляр для консоли и прочего UI
+    g_hud = &s_shared;          // shared instance for the console and other UI
 }
 
 void hud_shared_cleanup(void)
@@ -281,7 +281,7 @@ void hud_shared_cleanup(void)
 
 SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
 {
-    // Шрифт/программа/буферы — общие (hud_shared_init); узел — только панель
+    // Font/program/buffers are shared (hud_shared_init); the node is just the panel
     if (!s_shared_prog) return NULL;
     HudParams *p = calloc(1, sizeof *p);
     if (!p) return NULL;
@@ -290,9 +290,9 @@ SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
     p->vbo = s_shared_vbo;
     p->tex_font = s_font.tex;
     p->rc = rc;
-    p->world = w;                              // квантованные высоты (GRND/ALT)
+    p->world = w;                              // quantized heights (GRND/ALT)
     p->fps = 60.0f;
-    p->visible = 0;                // дебаг-панель по умолчанию выключена (G — вкл/выкл)
+    p->visible = 0;                // debug panel off by default (G toggles it)
     p->last_x = rc->cam_pos[0];
     p->last_y = rc->cam_pos[1];
     p->last_z = rc->cam_pos[2];
@@ -306,9 +306,9 @@ SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc)
     return node;
 }
 
-// --- Общий рендер текста/прямоугольников (для консоли и будущего UI) ---------
-// Рисует тем же шейдером и буфером, что и сам HUD, атлас — из шрифта f.
-// Ожидает включённый блендинг и выключенный depth test (у вызывающего).
+// --- Shared text/rectangle rendering (for the console and future UI) ---------
+// Draws with the same shader and buffer as the HUD itself; the atlas comes
+// from font f. Expects blending enabled and depth test disabled (by the caller).
 static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
                            float x_px, float y_base, const char *s);
 
@@ -321,8 +321,8 @@ float hud_text_width(const char *s)
         w += hud_cp_width(cp);
     }
 #ifdef __ANDROID__
-    // Скейл текста уже применяется в hud_build_line, но ширина для layout тоже должна скейлиться
-    // Берём текущий viewport из g_hud если есть
+    // The text scale is already applied in hud_build_line, but the width used for layout must scale too
+    // Take the current viewport from g_hud if present
     if (g_hud && g_hud->vw) w *= hud_mobile_scale(g_hud->vw, g_hud->vh);
 #endif
     return w;
@@ -363,7 +363,7 @@ float hud_cp_width_small(int cp)
 
 float hud_char_width(int ch)
 {
-    return hud_cp_width(ch);   // байт 0..127 — тот же codepoint
+    return hud_cp_width(ch);   // byte 0..127 — the same codepoint
 }
 
 float hud_text_line_height(void)
@@ -376,7 +376,7 @@ float hud_text_line_height_small(void)
     return s_font_small.line_h_px;
 }
 
-// Высота над/под базовой линией (для выравнивания курсора и рамок)
+// Height above/below the baseline (for aligning the cursor and frames)
 float hud_text_ascent_small(void)
 {
     return s_font_small.ascent_px;
@@ -397,13 +397,13 @@ float hud_text_descent(void)
     return s_font.descent_px;
 }
 
-// Рисует текст шрифтом f (атлас из f->tex)
+// Draws text with font f (atlas from f->tex)
 static void hud_text_draw_font(const HudFont *f, int vw, int vh,
                                float x, float y, const char *s,
                                const float color[4])
 {
     if (!g_hud || !g_font_ok) return;
-    g_hud->vw = vw;                     // метрики глифов считаются в пикселях
+    g_hud->vw = vw;                     // glyph metrics are computed in pixels
     g_hud->vh = vh;
     float vb[HUD_MAX_GLYPHS * 4];
     int nv = 0;
@@ -427,14 +427,14 @@ void hud_text_draw(int vw, int vh, float x, float y, const char *s,
     hud_text_draw_font(&s_font, vw, vh, x, y, s, color);
 }
 
-// Маленький шрифт (консоль)
+// Small font (console)
 void hud_text_draw_small(int vw, int vh, float x, float y, const char *s,
                          const float color[4])
 {
     hud_text_draw_font(&s_font_small, vw, vh, x, y, s, color);
 }
 
-// Крупный шрифт (заголовки меню)
+// Large font (menu headers)
 void hud_text_draw_big(int vw, int vh, float x, float y, const char *s,
                        const float color[4])
 {
@@ -485,8 +485,8 @@ void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
                    const float color[4])
 {
     if (!g_hud) return;
-    // Позиции панелей уже скейлятся вызывающими (app.c), глифы — в
-    // hud_build_line; здесь скейл не нужен.
+    // Panel positions are already scaled by the callers (app.c), glyphs are
+    // scaled in hud_build_line; no scaling is needed here.
     float nx0 = -1.0f + 2.0f * x / vw;
     float nx1 = -1.0f + 2.0f * (x + w) / vw;
     float ny0 =  1.0f - 2.0f * (y + h) / vh;
@@ -504,8 +504,8 @@ void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
-// Квад с RGBA-текстурой: игровые кнопки/иконки HUD (shaders/ui_tex.fs).
-// Шейдер общий с текстом (text.vs: NDC-позиции + UV), программа кешируется.
+// Quad with an RGBA texture: HUD game buttons/icons (shaders/ui_tex.fs).
+// The shader is shared with text (text.vs: NDC positions + UV); the program is cached.
 void hud_tex_quad_draw(int vw, int vh, GLuint tex,
                        float x, float y, float w, float h,
                        const float color[4])
@@ -542,21 +542,21 @@ void hud_button_draw(int vw, int vh, const char *img_path,
                      float x, float y, float w, float h,
                      const float tint[4])
 {
-    // Кеш + счётчик ссылок в resources; отсутствующий файл автоматически
-    // подменяется img/notfound.png (лог: "not found -> using notfound").
+    // Cache + refcount live in resources; a missing file is automatically
+    // substituted with img/notfound.png (log: "not found -> using notfound").
     GLuint tex = resources_texture(img_path, 4, GL_CLAMP_TO_EDGE, 1);
     if (!tex) {
-        hud_rect_draw(vw, vh, x, y, w, h, tint);   // даже notfound.png нет
+        hud_rect_draw(vw, vh, x, y, w, h, tint);   // even notfound.png is missing
         return;
     }
     hud_tex_quad_draw(vw, vh, tex, x, y, w, h, tint);
 }
 
-// Добавляет глифы строки в буфер vb (позиции NDC + uv атласа).
-// y_base — БАЗОВАЯ ЛИНИЯ строки (от верха окна, в пикселях). Каждый глиф
-// ставится по своим метрикам (advance/беринг) — буквы не прыгают.
-// Строка — UTF-8: кириллица растеризована в атлас, неподдержанные
-// символы заменяются на '?'.
+// Adds the glyphs of a line to buffer vb (NDC positions + atlas uv).
+// y_base is the line's BASELINE (from the top of the window, in pixels). Each
+// glyph is placed by its own metrics (advance/bearing) — letters don't jump.
+// The string is UTF-8: Cyrillic is rasterized into the atlas, unsupported
+// characters are replaced with '?'.
 static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
                            float x_px, float y_base, const char *s)
 {
@@ -576,8 +576,8 @@ static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
         float nx1 = -1.0f + 2.0f * (gx + gw) / vw;
         float ny0 =  1.0f - 2.0f * gy / vh;
         float ny1 =  1.0f - 2.0f * (gy + gh) / vh;
-        // CCW (как панель): TL-BL-BR, TL-BR-TR — иначе backface-cull
-        // съедает глифы (в сцене GL_CULL_FACE включён).
+        // CCW (like the panel): TL-BL-BR, TL-BR-TR — otherwise backface-cull
+        // eats the glyphs (GL_CULL_FACE is enabled in the scene).
         float quad[6][4] = {
             {nx0, ny0, g->u0, g->v0}, {nx0, ny1, g->u0, g->v1},
             {nx1, ny1, g->u1, g->v1},
@@ -591,7 +591,7 @@ static void hud_build_line(const HudFont *f, HudParams *p, float *vb, int *nv,
     }
 }
 
-// Ширина строки в пикселях по метрикам глифов (для рамки панели).
+// Line width in pixels from glyph metrics (for the panel frame).
 static float hud_line_width(const char *s)
 {
     return hud_text_width(s);
@@ -602,7 +602,7 @@ void hud_node_update(SceneNode *n, float dt)
     HudParams *p = n->params;
     const RendererContext *rc = p->rc;
 
-    // Скорость по перемещению за кадр
+    // Speed from the movement this frame
     float dx = rc->cam_pos[0] - p->last_x;
     float dy = rc->cam_pos[1] - p->last_y;
     float dz = rc->cam_pos[2] - p->last_z;
@@ -646,7 +646,7 @@ void hud_node_update(SceneNode *n, float dt)
     p->count = i;
 }
 
-// --- Демо-режим (клавиша Q): статистика FPS и график -------------------------
+// --- Demo mode (key Q): FPS statistics and a graph ---------------------------
 void hud_demo_start(HudParams *p)
 {
     p->demo = 1;
@@ -681,9 +681,9 @@ void hud_demo_stop(HudParams *p)
     p->demo = 0;
 }
 
-// Правое меню демо: панель, строки статистики и график FPS (столбики).
-// Рисуется тем же шейдером: панель (uUseTex=0), глифы (uUseTex=1),
-// столбики графика (uUseTex=0, цвет другой).
+// Right-side demo menu: panel, stat lines and the FPS graph (bars).
+// Drawn with the same shader: panel (uUseTex=0), glyphs (uUseTex=1),
+// graph bars (uUseTex=0, a different color).
 static void hud_render_demo(HudParams *p, int vw, int vh)
 {
     const float line_h = s_font.line_h_px;
@@ -693,10 +693,10 @@ static void hud_render_demo(HudParams *p, int vw, int vh)
              p->demo_avg, p->demo_min, p->demo_max);
     snprintf(l3, sizeof l3, "TIME %.1f s", p->demo_time);
 
-    // Панель справа вверху: текст + график под ним
+    // Panel at the top right: text + graph below it
     float px = vw - 292.0f, py = 12.0f, pw = 280.0f;
-    float gx0 = px + 10.0f, gx1 = px + pw - 10.0f;      // график
-    float gy0 = py + 74.0f, gy1 = py + 196.0f;          // 122 px высоты
+    float gx0 = px + 10.0f, gx1 = px + pw - 10.0f;      // graph
+    float gy0 = py + 74.0f, gy1 = py + 196.0f;          // 122 px tall
     float ph = 210.0f;
 
     float vb[HUD_MAX_GLYPHS * 4];
@@ -706,7 +706,7 @@ static void hud_render_demo(HudParams *p, int vw, int vh)
     hud_build_line(&s_font, p, vb, &nv, px + 10.0f, base0 + line_h, l2);
     hud_build_line(&s_font, p, vb, &nv, px + 10.0f, base0 + 2.0f * line_h, l3);
 
-    // Столбики графика: последние demo_n кадров, шкала 0..300 FPS
+    // Graph bars: the last demo_n frames, scale 0..300 FPS
     float bars[6 * HUD_DEMO_MAX * 4];
     int nb = 0;
     if (p->demo_n > 1) {
@@ -731,7 +731,7 @@ static void hud_render_demo(HudParams *p, int vw, int vh)
         }
     }
 
-    // Панель (6) + глифы (nv) + столбики (nb) одним буфером
+    // Panel (6) + glyphs (nv) + bars (nb) in one buffer
     float *all = malloc((size_t)((6 + nv + nb) * 4) * sizeof(float));
     if (!all) return;
     float *q = all;
@@ -758,14 +758,14 @@ static void hud_render_demo(HudParams *p, int vw, int vh)
     glUseProgram(p->prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex_font);
-    glUniform4f(p->u_color, 0.0f, 0.0f, 0.0f, 0.55f);   // полупрозрачная панель
+    glUniform4f(p->u_color, 0.0f, 0.0f, 0.0f, 0.55f);   // translucent panel
     glUniform1f(p->u_usetex, 0.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    glUniform4f(p->u_color, 0.85f, 0.95f, 1.0f, 1.0f);  // светлый текст
+    glUniform4f(p->u_color, 0.85f, 0.95f, 1.0f, 1.0f);  // light text
     glUniform1f(p->u_usetex, 1.0f);
     glDrawArrays(GL_TRIANGLES, 6, nv);
     if (nb > 0) {
-        glUniform4f(p->u_color, 0.35f, 1.0f, 0.45f, 0.9f);   // зелёный график
+        glUniform4f(p->u_color, 0.35f, 1.0f, 0.45f, 0.9f);   // green graph
         glUniform1f(p->u_usetex, 0.0f);
         glDrawArrays(GL_TRIANGLES, 6 + nv, nb);
     }
@@ -776,17 +776,17 @@ void hud_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     HudParams *p = n->params;
-    if (!p->visible) return;       // панель скрыта (клавиша G)
-    if (p->rc->pass == RP_SHADOW) return;   // в карты теней HUD не пишет
+    if (!p->visible) return;       // panel hidden (key G)
+    if (p->rc->pass == RP_SHADOW) return;   // the HUD never writes into shadow maps
     int vw = p->vw, vh = p->vh;
     if (vw <= 0 || vh <= 0) return;
-    glDisable(GL_DEPTH_TEST);   // HUD — поверх всего
-    // Текст и панель полупрозрачные: без блендинга глифы рисуются
-    // непрозрачными прямоугольниками и "дырки" в буквах заливаются.
+    glDisable(GL_DEPTH_TEST);   // HUD — on top of everything
+    // Text and panel are translucent: without blending the glyphs draw as
+    // opaque rectangles and the "holes" in letters get filled in.
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Демо-режим: левая панель скрыта, справа — меню с графиком FPS
+    // Demo mode: the left panel is hidden, the right shows the menu with the FPS graph
     if (p->demo) {
         hud_render_demo(p, vw, vh);
         return;
@@ -798,7 +798,7 @@ void hud_node_render(SceneNode *n, float dt)
         float w = hud_line_width(p->lines[i]);
         if (w > maxw) maxw = w;
     }
-    float px = 12.0f, py = 12.0f;                   // панель слева вверху
+    float px = 12.0f, py = 12.0f;                   // panel at the top left
     float pw = maxw + 16.0f, ph = p->count * line_h + 10.0f;
     float nx0 = -1.0f + 2.0f * px / vw;
     float nx1 = -1.0f + 2.0f * (px + pw) / vw;
@@ -807,15 +807,15 @@ void hud_node_render(SceneNode *n, float dt)
 
     float vb[HUD_MAX_GLYPHS * 4];
     int nv = 0;
-    // Базовая линия строки i: отступ панели + межстрочный интервал.
-    // line_h из метрик шрифта уже включает спуски — строки не наезжают.
+    // Baseline of line i: panel padding + leading.
+    // line_h from the font metrics already includes the descents — lines don't overlap.
     float base0 = py + 6.0f + s_font.ascent_px;
     for (int i = 0; i < p->count; i++)
         hud_build_line(&s_font, p, vb, &nv, px + 8.0f, base0 + i * line_h,
                        p->lines[i]);
 
-    // Панель + глифы одним буфером: 6 вершин панели + nv глифов.
-    // Весь массив на стеке — без malloc/free каждый кадр.
+    // Panel + glyphs in one buffer: 6 panel vertices + nv glyphs.
+    // The whole array on the stack — no malloc/free every frame.
     float all[(6 + HUD_MAX_GLYPHS) * 4];
     float *q = all;
     q[0] = nx0; q[1] = ny0; q[2] = 0; q[3] = 0;
@@ -835,17 +835,17 @@ void hud_node_render(SceneNode *n, float dt)
     glUseProgram(p->prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, p->tex_font);
-    glUniform4f(p->u_color, 0.0f, 0.0f, 0.0f, 0.55f);   // полупрозрачная панель
+    glUniform4f(p->u_color, 0.0f, 0.0f, 0.0f, 0.55f);   // translucent panel
     glUniform1f(p->u_usetex, 0.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    glUniform4f(p->u_color, 0.85f, 0.95f, 1.0f, 1.0f);  // светлый текст
+    glUniform4f(p->u_color, 0.85f, 0.95f, 1.0f, 1.0f);  // light text
     glUniform1f(p->u_usetex, 1.0f);
     glDrawArrays(GL_TRIANGLES, 6, nv);
-    glDisable(GL_BLEND);   // чтобы следующий кадр (3D) не блендился
+    glDisable(GL_BLEND);   // so the next (3D) frame doesn't blend
 }
 
 void hud_cleanup(SceneNode *n)
 {
-    // GL-объекты — общие (hud_shared_cleanup): узел удаляется без удаления GL
+    // GL objects are shared (hud_shared_cleanup): the node is deleted without deleting GL
     (void)n;
 }

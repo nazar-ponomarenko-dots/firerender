@@ -1,12 +1,12 @@
 // ============================================================================
-//  fauna.c — живая карта: светлячки, бабочки, птицы (fauna[] из map.json)
+//  fauna.c — living map: fireflies, butterflies, birds (fauna[] from map.json)
 // ----------------------------------------------------------------------------
-//  Каждая группа — квады-биллборды с текстурами:
-//    fireflies   — светящиеся точки (additive), мерцают, медленно дрейфуют;
-//    butterflies — бабочки, машут крыльями (сжатие по X), зигзаг полёта;
-//    birds       — силуэты, кружат в небе над областью.
-//  Обновление частиц — в update-проходе сцены (fauna_node_update),
-//  рендер — по одному draw на особь (их мало, до ~60 на карту).
+//  Each group is a set of billboarded quads with textures:
+//    fireflies   — glowing points (additive), flicker, drift slowly;
+//    butterflies — flap their wings (X-axis squeeze), zigzag flight path;
+//    birds       — silhouettes circling in the sky over the area.
+//  Particle updates happen in the scene update pass (fauna_node_update),
+//  rendering is one draw call per individual (there are few, up to ~60 per map).
 // ============================================================================
 #include "fauna.h"
 
@@ -23,22 +23,22 @@
 
 #include <SDL3/SDL.h>
 
-#define FAUNA_MAX_PARTS 256   // потолок особей на карту
+#define FAUNA_MAX_PARTS 256   // per-map individual cap
 #define FAUNA_GROUPS_MAX 8
 
 typedef struct {
-    float x, y, z;       // позиция
-    float ph;            // фаза (случайная)
-    float sp;            // скорость
-    float sx, sy, sz;    // размер квада (м)
-    float hue;           // тон (светлячки)
+    float x, y, z;       // position
+    float ph;            // phase (random)
+    float sp;            // speed
+    float sx, sy, sz;    // quad size (m)
+    float hue;           // hue (fireflies)
 } FaunaP;
 
 typedef struct {
     int type;            // MapFaunaType
     int count;
     FaunaP p[FAUNA_MAX_PARTS];
-    float cx, cz, hw, hd, h;   // область
+    float cx, cz, hw, hd, h;   // area
     GLuint tex;
     const char *tex_path;
 } FaunaGroup;
@@ -49,12 +49,12 @@ typedef struct {
     GLint u_tint, u_mode, u_time;
     FaunaGroup g[FAUNA_GROUPS_MAX];
     int n;
-    const RendererContext *rc;   // позиция камеры (биллборды)
+    const RendererContext *rc;   // camera position (billboards)
 } FaunaParams;
 
 static float s_time = 0.0f;
 
-// Текстура группы
+// Group texture
 static const char *fauna_tex_path(int type)
 {
     switch (type) {
@@ -69,7 +69,7 @@ static float frand(void)
     return (float)rand() / (float)RAND_MAX;
 }
 
-// Случайная высота: по типу
+// Random altitude: depends on type
 static float group_height(int type, float base)
 {
     if (type == FAUNA_BIRDS) return base + frand() * 25.0f;
@@ -190,18 +190,18 @@ void fauna_node_update(SceneNode *n, float dt)
             FaunaP *q = &g->p[k];
             switch (g->type) {
             case FAUNA_FIREFLIES:
-                // медленный дрейф в области + мерцание (в шейдере)
+                // slow drift within the area + flicker (in the shader)
                 q->x += sinf(q->ph + s_time * q->sp * 0.4f) * dt * 0.8f;
                 q->y += cosf(q->ph * 2.0f + s_time * q->sp * 0.5f) * dt * 0.5f;
                 break;
             case FAUNA_BUTTERFLIES:
-                // зигзаг полёта
+                // zigzag flight path
                 q->x += cosf(q->ph + s_time * q->sp) * dt * 2.5f;
                 q->z += sinf(q->ph * 1.3f + s_time * q->sp * 0.8f) * dt * 2.5f;
                 q->y = g->h + sinf(q->ph * 3.0f + s_time * q->sp * 1.4f) * 0.8f;
                 break;
             case FAUNA_BIRDS:
-                // круги в небе
+                // circles in the sky
                 {
                     float a = q->ph + s_time * q->sp * 0.35f;
                     float r = 12.0f + q->sx * 8.0f;
@@ -210,7 +210,7 @@ void fauna_node_update(SceneNode *n, float dt)
                 }
                 break;
             }
-            // не вылетать за область (кроме птиц — они над ней)
+            // do not fly outside the area (except birds — they stay above it)
             if (g->type != FAUNA_BIRDS) {
                 if (q->x < g->cx - g->hw) q->x = g->cx + g->hw;
                 if (q->x > g->cx + g->hw) q->x = g->cx - g->hw;
@@ -226,7 +226,7 @@ void fauna_node_render(SceneNode *n, float dt)
     (void)dt;
     FaunaParams *p = n->params;
     if (!p->n) return;
-    if (p->rc->pass == RP_SHADOW) return;   // в карты теней фауна не пишет
+    if (p->rc->pass == RP_SHADOW) return;   // fauna does not write into shadow maps
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
@@ -237,13 +237,13 @@ void fauna_node_render(SceneNode *n, float dt)
 
     for (int gi = 0; gi < p->n; gi++) {
         FaunaGroup *g = &p->g[gi];
-        // Отсечение фрустумом на уровне группы: сфера (центр + диагональ)
+        // Group-level frustum culling: sphere (center + diagonal)
         float gd = g->hw > g->hd ? g->hw : g->hd;
         if (!frustum_test_sphere(&p->rc->frustum, g->cx, g->h, g->cz,
                                  gd + 20.0f))
             continue;
         int mode = (g->type == FAUNA_FIREFLIES) ? 0 : 1;
-        // светлячки — аддитивно; бабочки/птицы — альфа-тест
+        // fireflies are additive; butterflies/birds use alpha test
         if (mode == 0) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -255,7 +255,7 @@ void fauna_node_render(SceneNode *n, float dt)
         glUniform1i(p->u_mode, mode);
         for (int k = 0; k < g->count; k++) {
             FaunaP *q = &g->p[k];
-            // биллборд: ось ширины перпендикулярна камере
+            // billboard: the width axis is perpendicular to the camera
             float dx = p->rc->cam_pos[0] - q->x;
             float dz = p->rc->cam_pos[2] - q->z;
             float d = sqrtf(dx * dx + dz * dz);
@@ -264,7 +264,7 @@ void fauna_node_render(SceneNode *n, float dt)
             glUniform2f(p->u_objsize, q->sx, q->sy);
             glUniform3f(p->u_objright, -dz / d, 0.0f, dx / d);
             glUniform3f(p->u_tint, 1.0f, 1.0f, 1.0f);
-            if (mode == 0)   // тёплый тон светлячка
+            if (mode == 0)   // warm firefly tint
                 glUniform3f(p->u_tint, 1.0f, 0.85f + 0.1f * q->hue,
                             0.55f + 0.2f * q->hue);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);

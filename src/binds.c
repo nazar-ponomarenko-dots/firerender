@@ -1,5 +1,5 @@
 // ============================================================================
-//  binds.c — привязки клавиш (см. binds.h)
+//  binds.c — key bindings (see binds.h)
 // ============================================================================
 #include "binds.h"
 
@@ -10,7 +10,7 @@
 static Bind s_binds[BINDS_MAX];
 static int s_n = 0;
 
-// Дефолтные бинды (как в HL): движение, прыжок, бег, присед, тумблеры
+// Default binds (HL-style): movement, jump, run, crouch, toggles
 static const struct { SDL_Scancode sc; const char *cmd; } s_defaults[] = {
     { SDL_SCANCODE_W,           "+forward" },
     { SDL_SCANCODE_S,           "+back" },
@@ -35,7 +35,7 @@ static const struct { SDL_Scancode sc; const char *cmd; } s_defaults[] = {
     { SDL_SCANCODE_F12,         "screenshot" },
 };
 
-// Имя клавиши (в т.ч. виртуальные клавиши колеса)
+// Key name (incl. the virtual mouse-wheel keys)
 const char *binds_key_name(SDL_Scancode sc)
 {
     if (sc == BIND_WHEEL_UP) return "mouse_wheel_up";
@@ -43,7 +43,7 @@ const char *binds_key_name(SDL_Scancode sc)
     return SDL_GetScancodeName(sc);
 }
 
-// Имя -> scancode (в т.ч. виртуальные колеса)
+// Name -> scancode (incl. the virtual wheel keys)
 SDL_Scancode binds_key_from_name(const char *name)
 {
     if (strcmp(name, "mouse_wheel_up") == 0) return BIND_WHEEL_UP;
@@ -119,11 +119,11 @@ void binds_reset(void)
     binds_init();
 }
 
-// Выполняет команду (или комбинацию "cmd1; cmd2"). ';' — НЕ разделитель внутри
-// кавычек (alias q "echo a; echo b" — единое тело, как в console_exec).
-// При отпускании (down=0) исполняются ТОЛЬКО statement'ы с "+", причём как
-// "-" (снимают действие); остальные пропускаются — иначе комбинированный бинд
-// вида "noclip; +forward" при отпускании оставлял действие залипшим.
+// Executes a command (or a "cmd1; cmd2" combination). ';' is NOT a separator
+// inside quotes (alias q "echo a; echo b" is one body, as in console_exec).
+// On release (down=0) ONLY the "+" statements run, and as "-" (they cancel
+// the action); the rest are skipped — otherwise a combined bind like
+// "noclip; +forward" would leave the action stuck after release.
 static void bind_exec(const char *cmd, int down)
 {
     char buf[256];
@@ -154,18 +154,18 @@ void binds_key(SDL_Scancode sc, int down)
     bind_exec(cmd, down);
 }
 
-// Колесо мыши: импульсное действие (up=1 — вверх, 0 — вниз)
+// Mouse wheel: impulse action (up=1 — up, 0 — down)
 void binds_wheel(int up)
 {
     binds_key(up ? BIND_WHEEL_UP : BIND_WHEEL_DOWN, 1);
 }
 
 // --- config.cfg ---------------------------------------------------------------
-// Таблица «имя клавиши -> scancode». Имена SDL МОГУТ содержать пробелы
-// ("Left Shift", "Keypad 1"), а команда — пробелы и ';' (alias-тела), поэтому
-// строка "bind <клавиша> <команда>" разбирается жадным матчем имени из таблицы
-// (отсортирована по длине: "Left Shift" раньше, чем "Left"). Команда = остаток
-// строки после имени.
+// "key name -> scancode" table. SDL names MAY contain spaces
+// ("Left Shift", "Keypad 1"), and a command may contain spaces and ';'
+// (alias bodies), so a "bind <key> <command>" line is parsed by greedily
+// matching a name from the table (sorted by length: "Left Shift" before
+// "Left"). The command is the rest of the line after the name.
 typedef struct { const char *name; SDL_Scancode sc; size_t len; } KeyName;
 static KeyName s_keynames[SDL_SCANCODE_COUNT + 2];
 static int s_keynames_n = 0;
@@ -185,7 +185,7 @@ static void keynames_init(void)
     s_keynames_n++;
     s_keynames[s_keynames_n] = (KeyName){ "mouse_wheel_down", BIND_WHEEL_DOWN, 16 };
     s_keynames_n++;
-    // По длине — по убыванию: жадный матч на самое длинное имя
+    // Descending by length: greedy match against the longest name first
     for (int i = 1; i < s_keynames_n; i++)
         for (int j = i; j > 0 && s_keynames[j].len > s_keynames[j - 1].len; j--) {
             KeyName t = s_keynames[j];
@@ -219,15 +219,15 @@ void binds_load_config(void)
                 break;
             }
         }
-        if (!cmd || sc == SDL_SCANCODE_UNKNOWN) continue;   // битое имя — игнор
+        if (!cmd || sc == SDL_SCANCODE_UNKNOWN) continue;   // broken name — ignore
         while (*cmd == ' ' || *cmd == '\t') cmd++;
         if (!cmd[0]) continue;
         if (!any) {
             any = 1;
-            binds_clearall();      // пользовательские бинды — дефолты долой
+            binds_clearall();      // user binds present — drop the defaults
         }
-        // Дедупликация: последняя строка config.cfg побеждает — снимаем
-        // эту же команду с прежних клавиш (напр. bind Q demo; bind X demo)
+        // Dedup: the last config.cfg line wins — unbind the same command
+        // from the previous keys (e.g. bind Q demo; bind X demo)
         SDL_Scancode olds[BINDS_MAX];
         int nold = 0;
         for (int i = 0; i < s_n; i++)

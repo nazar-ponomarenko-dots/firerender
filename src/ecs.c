@@ -1,9 +1,9 @@
 // ============================================================================
-//  ecs.c — реализация ядра ECS (см. ecs.h)
+//  ecs.c — ECS core implementation (see ecs.h)
 // ----------------------------------------------------------------------------
-//  Всё статично: слоты сущностей и пулы компонентов — массивы фиксированной
-//  ёмкости. Никаких аллокаций, значит ECS не может «упасть на нехватке
-//  памяти» в кадре — переполнение видно в логе и лечится константой.
+//  Everything is static: entity slots and component pools are fixed-capacity
+//  arrays. No allocations, so ECS cannot "fall over on out-of-memory" in a
+//  frame — overflow is visible in the log and fixed by a constant.
 // ============================================================================
 #include "ecs.h"
 
@@ -14,31 +14,31 @@
 #include <stdlib.h>
 #include <string.h>
 
-// --- Слоты сущностей ----------------------------------------------------------
+// --- Entity slots -----------------------------------------------------------
 typedef struct {
-    uint64_t mask;               // какие компоненты присоединены
+    uint64_t mask;               // which components are attached
     int      alive;
 } EcsSlot;
 static EcsSlot s_ent[ECS_MAX_ENTS];
-static int     s_serial[ECS_MAX_ENTS];   // растёт при kill: хэндлы стареют
-static int     s_count = 0;              // живых
+static int     s_serial[ECS_MAX_ENTS];   // grows on kill: handles age out
+static int     s_count = 0;              // number of living ones
 
-static int s_next;                       // курсор поиска свободного слота
+static int s_next;                       // cursor searching for a free slot
 
-// Компонентные хэндлы (owner serial) — для ecs_owner по указателю.
+// Component handles (owner serial) — for ecs_owner by pointer.
 static int s_owner_serial[ECS_MAX_ENTS];
 
-// --- Реестр компонентов -------------------------------------------------------
+// --- Component registry -----------------------------------------------------
 typedef struct {
     const char *name;
     int size;
-    int used;                        // слот реестра занят
-    int count;                       // сущностей с этим компонентом
-    void *data;                      // ECS_MAX_ENTS слотов по size байт
+    int used;                        // registry slot taken
+    int count;                       // entities having this component
+    void *data;                      // ECS_MAX_ENTS slots of size bytes
 } EcsCompType;
 static EcsCompType s_comp[ECS_MAX_COMPONENTS];
 
-// --- Реестр систем --------------------------------------------------------------
+// --- System registry ----------------------------------------------------------
 typedef struct {
     const char *name;
     uint64_t all;
@@ -50,13 +50,13 @@ typedef struct {
 static EcsSystem s_sys[ECS_MAX_SYSTEMS];
 static int s_sys_n = 0;
 
-// Отложенное удаление: ecs_kill внутри прогона систем не освобождает слот
-// мгновенно — иначе идущий цикл читает мёртвые данные и убийца «съедает»
-// собственный ID.
+// Deferred removal: ecs_kill inside a system run does not free the slot
+// immediately — otherwise a running loop would read dead data and the killer
+// would "eat" its own ID.
 #define ECS_PENDING_MAX ECS_MAX_ENTS
 static EcsId s_pending[ECS_PENDING_MAX];
 static int   s_pending_n = 0;
-static int   s_iterating = 0;          // 1 = идем по сущностям, kill в очередь
+static int   s_iterating = 0;          // 1 = walking entities, kill goes to the queue
 
 static int slot_find_free(void)
 {
@@ -68,7 +68,7 @@ static int slot_find_free(void)
     return -1;
 }
 
-// --- Компоненты -----------------------------------------------------------------
+// --- Components -----------------------------------------------------------------
 int ecs_register_component(const char *name, int size)
 {
     if (!name || !name[0] || size <= 0) {
@@ -89,7 +89,7 @@ int ecs_register_component(const char *name, int size)
             s_comp[i].count = 0;
             memset(s_comp[i].data, 0, (size_t)ECS_MAX_ENTS * (size_t)size);
             s_comp[i].used = 1;
-            return i + 1;                // id 0 зарезервирован под ошибку
+            return i + 1;                // id 0 reserved for the error case
         }
     }
     console_print("ecs: реестр компонентов полон (%d)", ECS_MAX_COMPONENTS);
@@ -115,7 +115,7 @@ int ecs_component_count(int comp)
     return t ? t->count : 0;
 }
 
-// --- Сущности -------------------------------------------------------------------
+// --- Entities -------------------------------------------------------------------
 EcsId ecs_create(void)
 {
     int idx = slot_find_free();
@@ -152,7 +152,7 @@ int ecs_attach(EcsId id, int comp)
     if (!t) return 0;
     if (!ecs_is_alive(id)) return 0;
     uint64_t bit = (uint64_t)1 << (comp - 1);
-    if (s_ent[id].mask & bit) return 1;          // уже есть — не дублируем
+    if (s_ent[id].mask & bit) return 1;          // already there — no duplicate
     memset((char *)t->data + (size_t)id * (size_t)t->size, 0, (size_t)t->size);
     s_ent[id].mask |= bit;
     t->count++;
@@ -187,7 +187,7 @@ EcsId ecs_owner(const void *comp_ptr, int comp)
     size_t off = (size_t)(p - base);
     int id = (int)(off / (size_t)t->size);
     if (!ecs_has(id, comp)) return -1;
-    // Слот переиспользован после смерти — прежний указатель больше не «наш».
+    // Slot reused after death — the old pointer is no longer "ours".
     if (s_owner_serial[id] != s_serial[id]) return -1;
     return id;
 }
@@ -203,7 +203,7 @@ static void ent_free(int id)
     }
     s_ent[id].mask = 0;
     s_ent[id].alive = 0;
-    s_serial[id] = (s_serial[id] + 1) & 0xFFFF;   // беззнаковое кольцо серий
+    s_serial[id] = (s_serial[id] + 1) & 0xFFFF;   // unsigned ring of serials
     s_count--;
 }
 
@@ -217,12 +217,12 @@ void ecs_kill(EcsId id)
     ent_free(id);
 }
 
-// --- Хэндли -----------------------------------------------------------------------
+// --- Handles ----------------------------------------------------------------------
 int ecs_handle(EcsId id)
 {
     if (!ecs_is_alive(id)) return 0;
     unsigned serial = (unsigned)(s_serial[id] & 0xFFFF);
-    if (serial == 0) serial = 1;         // 0 верхних бит = «нет хэндла»
+    if (serial == 0) serial = 1;         // top bits 0 = "no handle"
     s_serial[id] = (int)serial;
     return (int)((serial << 16) | (unsigned)(id + 1));
 }
@@ -239,7 +239,7 @@ EcsId ecs_get_by_handle(int handle)
     return idx;
 }
 
-// --- Системы -------------------------------------------------------------------------
+// --- Systems -------------------------------------------------------------------------
 void ecs_register_system(const char *name, uint64_t all, int order,
                          EcsSystemFn fn, void *ud)
 {
@@ -252,7 +252,7 @@ void ecs_register_system(const char *name, uint64_t all, int order,
         return;
     }
     int at = s_sys_n;
-    while (at > 0 && s_sys[at - 1].order > order) at--;   // вставка по порядку
+    while (at > 0 && s_sys[at - 1].order > order) at--;   // insert by order
     for (int i = s_sys_n; i > at; i--) s_sys[i] = s_sys[i - 1];
     s_sys[at] = (EcsSystem){ name, all, order, fn, ud, 1 };
     s_sys_n++;
@@ -261,11 +261,11 @@ void ecs_register_system(const char *name, uint64_t all, int order,
 void ecs_update(float dt)
 {
     (void)dt;
-    if (s_iterating) return;             // реентранный вызов — не копия цикла
+    if (s_iterating) return;             // reentrant call — not a copy of the loop
     s_iterating = 1;
     for (int id = 0; id < ECS_MAX_ENTS; id++) {
-        // Каждую систему запускаем с ПОВТОРНОЙ проверкой живости и маски:
-        // предыдущая система могла detach'нуть компонент или убить сущность.
+        // Run each system with a FRESH liveness and mask check: the previous
+        // system could detach a component or kill the entity.
         for (int s = 0; s < s_sys_n; s++) {
             if (!s_ent[id].alive) break;
             if ((s_ent[id].mask & s_sys[s].all) != s_sys[s].all) continue;
@@ -277,7 +277,7 @@ void ecs_update(float dt)
     s_pending_n = 0;
 }
 
-// --- Отладка ---------------------------------------------------------------------------
+// --- Debug ---------------------------------------------------------------------------
 int ecs_count(void) { return s_count; }
 int ecs_system_count(void) { return s_sys_n; }
 int ecs_component_types(void)
@@ -325,7 +325,7 @@ void ecs_shutdown(void)
     s_next = 0;
 }
 
-// --- Команды -----------------------------------------------------------------------------
+// --- Commands -----------------------------------------------------------------------------
 void cmd_ecs_list(const char *args)
 {
     (void)args;
@@ -354,9 +354,9 @@ void cmd_ecs_test(const char *args)
     console_print("ecs: selftest %s (провалов %d)", fails ? "FAIL" : "OK", fails);
 }
 
-// --- Самотест ----------------------------------------------------------------------------
-// Детерминированный и повторяемый: компоненты регистрируются один раз (статик
-// guard), сущности и системы в конце убираются полностью.
+// --- Self-test ----------------------------------------------------------------------------
+// Deterministic and repeatable: components are registered once (static guard),
+// entities and systems are fully removed at the end.
 static int ecs_st_comp_cpos = 0, ecs_st_comp_cnct = 0;
 
 typedef struct { float x, y, z; } StPos;
@@ -378,7 +378,7 @@ static void st_system(EcsId id, void *ud)
 static void st_system_killself(EcsId id, void *ud)
 {
     StCount *c = (StCount *)ud;
-    ecs_kill(id);                        // самоубийство в прогоне — в очередь
+    ecs_kill(id);                        // suicide during the run — goes to the queue
     c->hits++;
 }
 
@@ -426,7 +426,7 @@ int ecs_selftest(void)
     ecs_update(0.016f);
     st_check(ud.hits == 2, "system ran for both");
 
-    // Самоубийство в прогоне: отложенный kill, обход не ломается.
+    // Suicide during the run: deferred kill, the traversal is not broken.
     st_check(ecs_attach(a, cnct), "attach counter");
     ud.hits = 0;
     ecs_register_system("st_kill", m | ((uint64_t)1 << (cnct - 1)), 20,
@@ -441,7 +441,7 @@ int ecs_selftest(void)
     st_check(ecs_handle(a) == 0, "dead entity handle 0");
     st_check(ecs_get_by_handle(ha) == -1, "stale handle dead");
 
-    // Переиспользование слота: старый хэндл протух, новый годный.
+    // Slot reuse: the old handle is stale, the new one is valid.
     ecs_kill(b);
     st_check(ecs_get_by_handle(hb) == -1, "slot reuse invalidates old handle");
     EcsId r = ecs_create();
@@ -449,7 +449,7 @@ int ecs_selftest(void)
     st_check(ecs_get_by_handle(ecs_handle(r)) == r, "new handle valid");
     int overflow_ok = 0;
     for (int i = 0; i < ECS_MAX_ENTS + 8; i++)
-        if (ecs_create() >= 0) overflow_ok++;  // переполнение: -1, без падения
+        if (ecs_create() >= 0) overflow_ok++;  // overflow: -1, no crash
     st_check(overflow_ok > 0, "pool overflow returns -1, no crash");
 
     ecs_shutdown();

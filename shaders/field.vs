@@ -1,12 +1,12 @@
 // ============================================================================
-//  Field — вершинный шейдер рамки поля пшеницы
+//  Field — vertex shader for the wheat field frame
 // ----------------------------------------------------------------------------
-//  Прямоугольник рисуется линией из 5 вершин на поверхности рельефа.
+//  The rectangle is drawn as a line of 5 vertices on the terrain surface.
 // ============================================================================
 
-layout (location = 0) in vec3 aPos;   // точка рамки в мире
+layout (location = 0) in vec3 aPos;   // frame point in world space
 
-uniform mat4 uViewProj;               // вид * проекция (из узла Camera)
+uniform mat4 uViewProj;               // view * projection (from the Camera node)
 
 void main() {
     gl_Position = uViewProj * vec4(aPos, 1.0);

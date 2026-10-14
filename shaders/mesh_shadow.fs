@@ -1,10 +1,10 @@
 // ============================================================================
-//  MeshShadow — фрагментный шейдер мешей в карту теней
+//  MeshShadow — fragment shader of meshes into the shadow map
 // ----------------------------------------------------------------------------
-//  Пишет только глубину (glDrawBuffer(GL_NONE)), но с alpha-test: прозрачные
-//  пиксели текстуры (листья деревьев, трава в glTF) НЕ должны отбрасывать
-//  тень всем квадом. uAlphaTest = 0 — тест выключен (полностью непрозрачные
-//  модели, текстуру можно не биндить).
+//  Writes depth only (glDrawBuffer(GL_NONE)) but with an alpha-test: transparent
+//  texture pixels (tree leaves, grass in glTF) must NOT cast a shadow with the
+//  whole quad. uAlphaTest = 0 disables the test (fully opaque models, no need
+//  to bind the texture).
 // ============================================================================
 
 in vec2 vUV;

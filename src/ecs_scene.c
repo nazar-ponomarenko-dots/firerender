@@ -1,9 +1,9 @@
 // ============================================================================
-//  ecs_scene.c — реализация моста сцена<->ECS (см. ecs_scene.h)
+//  ecs_scene.c — scene<->ECS bridge implementation (see ecs_scene.h)
 // ----------------------------------------------------------------------------
-//  Индекс узел->сущность — самовалидируемый (хранит gen): после смены карты
-//  записи старого поколения считаются miss и пересобираются пулом, поэтому
-//  висячих указателей в кеше нет по построению.
+//  The node->entity index is self-validating (stores gen): after a map change
+//  entries of the old generation count as a miss and get overwritten by the
+//  pool, so the cache holds no dangling pointers by construction.
 // ============================================================================
 #include "ecs_scene.h"
 
@@ -14,14 +14,14 @@
 #include <stdio.h>
 #include <string.h>
 
-#define CACHE_CAP 512                    // степень двойки; дерево карты < 100 узлов
+#define CACHE_CAP 512                    // power of two; a map tree has < 100 nodes
 
 static int s_c_node = 0, s_c_tf = 0;
-static int s_gen = 1;                    // 0 зарезервирован под «не задано»
+static int s_gen = 1;                    // 0 is reserved for "not set"
 static int s_enabled = 0;
 static int s_synced = 0;
-static uint32_t s_live[ECS_MAX_ENTS / 32 + 1]; // битсет «узел жив в этом прогоне»
-static int s_verify_once = 0;               // FR_TEST 'V': прогнать verify на следующем тике
+static uint32_t s_live[ECS_MAX_ENTS / 32 + 1]; // bitset "node alive in this run"
+static int s_verify_once = 0;               // FR_TEST 'V': run verify on the next tick
 
 typedef struct { const SceneNode *node; EcsId id; int gen; } IdxEntry;
 static IdxEntry s_idx[CACHE_CAP];
@@ -41,7 +41,7 @@ static int live_get(EcsId id)
 static uint32_t ptr_hash(const SceneNode *n)
 {
     uintptr_t v = (uintptr_t)n;
-    v >>= 3;                                   // узлы выделяются подряд по 8 байт
+    v >>= 3;                                   // nodes are allocated back-to-back, 8 bytes each
     v *= 0x9E3779B1u;
     return (uint32_t)v & (CACHE_CAP - 1);
 }
@@ -67,11 +67,11 @@ static void idx_put(const SceneNode *n, EcsId id)
             return;
         }
     }
-    // Кеш забился (дерево > 512 узлов с коллизиями) — не критично: следующий
-    // lookup уйдёт в линейный скан пула и вставит запись заменом старого gen.
+    // Cache full (a tree of > 512 nodes with collisions) — not critical: the
+    // next lookup falls back to a linear pool scan and overwrites an old-gen entry.
 }
 
-// Медленный путь: линейный скан пула (только при miss индекса).
+// Slow path: linear pool scan (only on an index miss).
 static EcsId pool_find_node(const SceneNode *n)
 {
     for (int id = 0; id < ECS_MAX_ENTS; id++) {
@@ -88,7 +88,7 @@ static EcsId entity_for_node(SceneNode *n, EcsId parent_id)
     if (id < 0) id = pool_find_node(n);
     if (id < 0) {
         id = ecs_create();
-        if (id < 0) return -1;                 // пул полон — узел без ECS-пары
+        if (id < 0) return -1;                 // pool full — the node stays without an ECS pair
         if (!ecs_attach(id, s_c_node) || !ecs_attach(id, s_c_tf)) {
             ecs_kill(id);
             return -1;
@@ -106,7 +106,7 @@ static EcsId entity_for_node(SceneNode *n, EcsId parent_id)
     memcpy(t->pos, n->pos, sizeof t->pos);
     memcpy(t->rot, n->rot, sizeof t->rot);
     memcpy(t->scl, n->scl, sizeof t->scl);
-    t->modified = 0;                            // pull — источник истины
+    t->modified = 0;                            // pull is the source of truth
     return id;
 }
 
@@ -118,10 +118,10 @@ static void pull_tree(SceneNode *n, EcsId parent_id)
 
 static void sweep_orphans(void)
 {
-    // Узельная сущность — сирота, если её узла нет в дереве этого прогона:
-    // либо gen прошлый (дерево пересобрали со сменой карты), либо узел
-    // удалили из дерева в текущем поколении (node_remove без ecs-чистки).
-    // Чистые ECS-сущности (без NodeRef) проходом не трогаются.
+    // A node entity is an orphan if its node is absent from this run's tree:
+    // either the gen is old (the tree was rebuilt on a map change), or the node
+    // was removed from the tree in the current generation (node_remove without
+    // ecs cleanup). Pure ECS entities (without NodeRef) are left untouched.
     for (int id = 0; id < ECS_MAX_ENTS; id++) {
         if (!ecs_is_alive(id) || live_get(id)) continue;
         EcsNodeRef *r = (EcsNodeRef *)ecs_get(id, s_c_node);
@@ -183,8 +183,8 @@ void ecs_scene_mark(EcsId id, uint32_t flags)
 
 void ecs_scene_new_generation(void)
 {
-    // Старьё прошлого поколения убиваем сразу: иначе включение «на лету»
-    // или перезапуск теста оставили бы мёртвые пары в пуле до первого свипа.
+    // Kill last generation's junk right away: otherwise toggling "on the fly"
+    // or restarting the test would leave dead pairs in the pool until the first sweep.
     if (s_c_node) {
         for (int id = ECS_MAX_ENTS - 1; id >= 0; id--) {
             if (!ecs_is_alive(id)) continue;
@@ -195,14 +195,14 @@ void ecs_scene_new_generation(void)
     s_gen++;
     s_synced = 0;
     memset(s_live, 0, sizeof s_live);
-    // Индекс чистить не нужно: записи старого gen — автоматический miss.
+    // No need to clear the index: old-gen entries are an automatic miss.
 }
 
 void ecs_scene_frame(SceneNode *root, float dt)
 {
-    // verify независим от рубильника: команда/FR_TEST 'V' при выключенном
-    // мосте должна честно докладывать о расхождениях, а не молчать.
-    // Прогоняется в КОНЦЕ тика — после pull, иначе мерить несинхронное дерево.
+    // verify is independent of the master switch: with the bridge disabled,
+    // the command/FR_TEST 'V' must honestly report mismatches, not stay silent.
+    // It runs at the END of the tick — after pull, otherwise it would measure an unsynced tree.
     int do_verify = s_verify_once;
     s_verify_once = 0;
     if (!s_enabled || !s_c_node || !root) {
@@ -229,7 +229,7 @@ void ecs_scene_frame(SceneNode *root, float dt)
     if (do_verify) cmd_ecs_verify(NULL);
 }
 
-// --- Самодиагностика -------------------------------------------------------------
+// --- Self-diagnostics ------------------------------------------------------------
 void ecs_scene_verify_once(void) { s_verify_once = 1; }
 
 static void verify_tree(const SceneNode *n, int *nodes, int *synced, int *mismatch)
@@ -264,7 +264,7 @@ void cmd_ecs_verify(const char *args)
     if (!g || !g->root) { console_print("ecs_verify: мир не загружен"); return; }
     int nodes = 0, synced = 0, mismatch = 0;
     ecs_scene_verify(g->root, &nodes, &synced, &mismatch);
-    // И в консоль, и в лог: headless-прогоны (FR_TEST 'V') читают stdout.
+    // To both the console and the log: headless runs (FR_TEST 'V') read stdout.
     const char *line = "";
     static char buf[128];
     snprintf(buf, sizeof buf, "ecs_verify: %s — узлов %d, пар %d, расхождений %d",

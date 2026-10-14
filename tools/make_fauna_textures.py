@@ -52,7 +52,7 @@ def butterfly(w, h):
         for x in range(w):
             u = x / w - 0.5
             v = y / h - 0.5
-            # крылья: левое и правое (эллипсы, разнесённые от оси)
+            # wings: left and right (ellipses offset from the axis)
             wing = 0.0
             for sx in (-1, 1):
                 wx = u * 2.0 - sx * 0.28
@@ -60,12 +60,12 @@ def butterfly(w, h):
                 d = (wx * wx) / (0.34 * 0.34) + (wy * wy) / (0.42 * 0.42)
                 if d <= 1.0:
                     wing = max(wing, 1.0 - d)
-            # тело
+            # body
             body = 0.0
             db = (u * 2.0) ** 2 / (0.045 ** 2) + (v * 2.0) ** 2 / (0.35 ** 2)
             if db <= 1.0:
                 body = 1.0 - db
-            # пятнышки на крыльях (для текстуры)
+            # specks on the wings (for texture)
             speck = 0.0
             for sx in (-1, 1):
                 wx = u * 2.0 - sx * 0.30
@@ -92,7 +92,7 @@ def bird(w, h):
         for x in range(w):
             u = x / w - 0.5
             v = y / h - 0.5
-            # крылья: две дуги вверх-в стороны
+            # wings: two arcs going up and outward
             wl = 0.0
             for sx in (-1, 1):
                 wx = u * 2.0 - sx * 0.18
@@ -100,7 +100,7 @@ def bird(w, h):
                 d = (wx * wx) / (0.38 * 0.38) + (wy * wy) / (0.22 * 0.22)
                 if d <= 1.0 and wy < 0.25:
                     wl = max(wl, 1.0 - d)
-            # корпус — вытянутый эллипс по X
+            # body — an ellipse stretched along X
             body = 0.0
             db = (u * 2.0) ** 2 / (0.40 ** 2) + (v * 2.0 - 0.10) ** 2 / (0.12 ** 2)
             if db <= 1.0:

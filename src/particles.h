@@ -1,21 +1,20 @@
 // ============================================================================
-//  particles.h — система частиц (instanced-спрайты, CPU-обновление)
+//  particles.h — particle system (instanced sprites, CPU update)
 // ----------------------------------------------------------------------------
-//  Пул частиц фиксированного размера. Каждая частица — биллборд-квад с
-//  текстурой, аддитивный или альфа-бленд. Обновление — в тике сцены
-//  (particles_update с dt из фиксированного шага), рендер — ОДИН instanced
-//  draw call на весь пул.
+//  Fixed-size particle pool. Each particle is a billboard quad with a
+//  texture, additive or alpha blend. Update runs in the scene tick
+//  (particles_update with dt from the fixed step), render is ONE instanced
+//  draw call for the whole pool.
 //
-//  Параметры частицы задаются структурой ParticleParams (размер/альфа по
-//  жизни, гравитация, сопротивление воздуха, ветер, покачивание, стрик для
-//  дождя, отскок от земли для крови). Именованные пресеты эффектов и
-//  непрерывные эмиттеры — в fx.h.
+//  Particle behaviour is defined by ParticleParams (size/alpha over lifetime,
+//  gravity, air drag, wind, sway, streak for rain, ground bounce for blood).
+//  Named effect presets and continuous emitters live in fx.h.
 //
-//  Использование:
-//    particles_make_node(w, rc)     — узел сцены (создаётся при загрузке мира)
-//    particles_burst(&pp, count)    — взрыв частиц по параметрам
-//    particles_clear()              — сбросить пул (смена карты)
-//    particles_cleanup(node)        — освободить GL
+//  Usage:
+//    particles_make_node(w, rc)     — scene node (created on world load)
+//    particles_burst(&pp, count)    — particle burst from the given params
+//    particles_clear()              — reset the pool (map change)
+//    particles_cleanup(node)        — free the GL resources
 // ============================================================================
 #ifndef PARTICLES_H
 #define PARTICLES_H
@@ -24,61 +23,61 @@
 #include "scene.h"
 #include "world.h"
 
-#define PARTICLES_MAX 4096         // размер пула (instancing: 2 draw call)
+#define PARTICLES_MAX 4096         // pool size (instancing: 2 draw calls)
 
-// --- Параметры частицы --------------------------------------------------------
+// --- Particle parameters -------------------------------------------------------
 typedef struct {
-    float pos[3];              // базовая позиция (центр области спавна)
-    float dir[3];              // базовое направление (0,1,0 = вверх)
-    float spread;              // разброс, рад (0 = строго по dir)
-    float speed0, speed1;      // диапазон стартовой скорости, м/с
-    float life0, life1;        // диапазон жизни, с
-    float size0, size1;        // размер в начале и в конце жизни, м
-    float alpha0, alpha1;      // альфа в начале и в конце жизни
-    float r, g, b;             // цвет
-    float gravity;             // м/с2 (>0 вниз; <0 вверх, напр. дым)
-    float drag;                // сопротивление воздуха: доля потери скорости/с
-    float sway;                // амплитуда покачивания (снег/пыль), м/с
-    float turb;                // турбулентность: закручивание траектории, м/с
-    float wind[3];             // постоянный ветер, м/с
-    int   blend;               // 0 = альфа-бленд, 1 = аддитив (свет)
-    int   streak;              // 1 = вытянуть вдоль скорости (дождь/капли)
-    int   plain;               // 1 = БЕЗ текстуры: яркий круг (снежинка)
-    int   bounce;              // 1 = отскок от земли (кровь/искры) — нужен world
-    int   collide;             // столкновение с террейном И поверхностью воды:
-                               // 1 = гибнет при контакте (дождь),
-                               // 2 = ложится на поверхность и гаснет (снег)
-    // Распределение скоростей (снег: крупные/мелкие хлопья падают с разной
-    // скоростью). nbucket > 0 — при эмиссии по весам bucket_w выбирается
-    // множитель bucket_mul: им масштабируются И скорость, И гравитация
-    // (терминальная скорость = gravity/drag, поэтому умножать нужно обе).
+    float pos[3];              // base position (center of the spawn area)
+    float dir[3];              // base direction (0,1,0 = up)
+    float spread;              // spread, rad (0 = exactly along dir)
+    float speed0, speed1;      // initial speed range, m/s
+    float life0, life1;        // lifetime range, s
+    float size0, size1;        // size at the start and end of life, m
+    float alpha0, alpha1;      // alpha at the start and end of life
+    float r, g, b;             // color
+    float gravity;             // m/s2 (>0 down; <0 up, e.g. smoke)
+    float drag;                // air drag: fraction of speed lost per s
+    float sway;                // sway amplitude (snow/dust), m/s
+    float turb;                // turbulence: trajectory swirl, m/s
+    float wind[3];             // constant wind, m/s
+    int   blend;               // 0 = alpha blend, 1 = additive (light)
+    int   streak;              // 1 = stretch along velocity (rain/drops)
+    int   plain;               // 1 = NO texture: bright circle (snowflake)
+    int   bounce;              // 1 = bounce off the ground (blood/sparks) — needs world
+    int   collide;             // collide with terrain AND the water surface:
+                               // 1 = dies on contact (rain),
+                               // 2 = settles on the surface and fades (snow)
+    // Speed distribution (snow: large/small flakes fall at different speeds).
+    // With nbucket > 0, on emission a bucket_mul factor is picked by weights
+    // bucket_w: it scales BOTH the speed AND the gravity
+    // (terminal velocity = gravity/drag, so both must be multiplied).
     int   nbucket;
     float bucket_mul[4];
     float bucket_w[4];
 } ParticleParams;
 
-// Эмитит ОДНУ частицу по параметрам (случайная скорость/жизнь/размер в
-// диапазонах). Направление dir + конус разброса spread.
+// Emits ONE particle from the params (random speed/life/size within the
+// ranges). Direction dir + spread cone.
 void particles_emit(const ParticleParams *pp);
 
-// count частиц из одной точки/области.
+// count particles from one point/area.
 void particles_burst(const ParticleParams *pp, int count);
 
-// Обновляет все живые частицы (dt — фиксированный шаг). Вызывать из
-// game_update или update узла.
+// Updates all live particles (dt — fixed step). Call from
+// game_update or the node's update.
 void particles_update(float dt);
 
-// Рендер всех живых частиц (два instanced draw: альфа-бленд + аддитив).
+// Renders all live particles (two instanced draws: alpha blend + additive).
 void particles_draw(const RendererContext *rc);
 
-// Создаёт узел Particles. w — карта высот (для отскока частиц bounce).
-// NULL при ошибке.
+// Creates the Particles node. w — heightmap (for bounce particle ground hits).
+// NULL on error.
 SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc);
 
-// Сбрасывает пул (при смене карты / выгрузке мира).
+// Resets the pool (on map change / world unload).
 void particles_clear(void);
 
-// Освобождает GL-ресурсы узла.
+// Frees the node's GL resources.
 void particles_cleanup(SceneNode *n);
 
 #endif

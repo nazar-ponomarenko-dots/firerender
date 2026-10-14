@@ -1,18 +1,18 @@
 // ============================================================================
-//  glb_anim.c — скелетная анимация (skinning) из бинарного glTF 2.0 (.glb)
+//  glb_anim.c — skeletal animation (skinning) from binary glTF 2.0 (.glb)
 // ----------------------------------------------------------------------------
-//  Два слоя:
-//    glb_anim_parse()  — CPU: типы (accessors/буферы), иерархия узлов, кожи
-//                        (joints + inverse bind matrices), примитивы с весами
-//                        (JOINTS_0/WEIGHTS_0), клипы анимации (channels+samplers).
-//                        Геометрия остаётся в ПОЗЕ ПРИВЯЗКИ.
-//    glb_anim_make_node() — строит GPU-буферы/текстуры, программу skinned.vs +
-//                        mesh.fs, узел с update (тикает время) и render (скиннит).
+//  Two layers:
+//    glb_anim_parse()  — CPU: types (accessors/buffers), node hierarchy, skins
+//                        (joints + inverse bind matrices), primitives with weights
+//                        (JOINTS_0/WEIGHTS_0), animation clips (channels+samplers).
+//                        Geometry stays in THE BIND POSE.
+//    glb_anim_make_node() — builds GPU buffers/textures, the skinned.vs +
+//                        mesh.fs program, a node with update (ticks time) and render (skins).
 //
-//  Математика костей (glTF 2.0 §4.8 / Appendix C):
+//  Bone math (glTF 2.0 §4.8 / Appendix C):
 //    jointMatrix(j) = globalTransformOfJointNode(j) * inverseBindMatrix(j)
-//    skinnedVertex  = w0*J0*v + w1*J1*v + ...  (до 4 костей на вершину)
-//  Сумма весов нормируется делением в шейдере (или коррекцией здесь).
+//    skinnedVertex  = w0*J0*v + w1*J1*v + ...  (up to 4 bones per vertex)
+//  The weight sum is normalized by dividing in the shader (or corrected here).
 // ============================================================================
 #include "glb_anim.h"
 
@@ -40,7 +40,7 @@
 #define C_UINT 5125
 #define C_FLOAT 5126
 
-// fourcc чанков GLB: little-endian "JSON" и "BIN\0".
+// fourcc of the GLB chunks: little-endian "JSON" and "BIN\0".
 #define GLB_CHUNK_JSON 0x4E4F534A
 #define GLB_CHUNK_BIN  0x004E4942
 
@@ -59,9 +59,9 @@ typedef struct { long byteOffset, byteLength; int byteStride; } GB;
 
 static void m4id(float m[16]){ memset(m,0,16*sizeof(float)); m[0]=m[5]=m[10]=m[15]=1; }
 
-// Какой набор TEXCOORD использует baseColorTexture материала (0 по умолчанию).
-// glTF разрешает до двух развёрток на примитив: лица/глаза персонажей часто
-// живут в TEXCOORD_1 — читать всегда только нулевой набор = сломанные текстуры.
+// Which TEXCOORD set the material's baseColorTexture uses (0 by default).
+// glTF allows up to two UV sets per primitive: characters' faces/eyes often
+// live in TEXCOORD_1 — always reading only set zero = broken textures.
 static int base_uv_set(const JsonNode*mt_a,const JsonNode*tx_a,int mat){
     if(mat<0||!mt_a||mt_a->type!=JSON_ARRAY)return 0;
     const JsonNode*m=json_array_get(mt_a,mat);
@@ -73,10 +73,10 @@ static int base_uv_set(const JsonNode*mt_a,const JsonNode*tx_a,int mat){
     return (int)json_num(t?json_find(t,"texCoord"):NULL,0);
 }
 
-// --- Тени скиннед-моделей -----------------------------------------------------
-// Глубинный проход (skinned_shadow.vs + mesh_shadow.fs): та же кожа, что в
-// цветном проходе — модель отбрасывает тень В ПОЗЕ ТЕКУЩЕГО КАДРА. Программа
-// одна на все anim-узлы (модульный статик, hot-reload через reshade-хук).
+// --- Shadows of skinned models ------------------------------------------------
+// Depth pass (skinned_shadow.vs + mesh_shadow.fs): the same skinning as in the
+// color pass — the model casts a shadow IN THE CURRENT FRAME'S POSE. One
+// program shared by all anim nodes (module static, hot-reload via reshade hook).
 static GLuint s_anim_shadow_prog=0;
 static GLint s_as_model=-1,s_as_vp=-1,s_as_bones=-1,s_as_hasskin=-1,s_as_tex=-1,s_as_at=-1;
 static void anim_shadow_init(void){
@@ -103,7 +103,7 @@ static void m4mul(float o[16],const float a[16],const float b[16]){
     }
     memcpy(o,r,sizeof r);
 }
-// quat (x,y,z,w) -> матрица
+// quat (x,y,z,w) -> matrix
 static void quat_mat(float m[16],const float q[4],const float s[3],const float t[3]){
     float x=q[0],y=q[1],z=q[2],w=q[3];
     m4id(m);
@@ -120,7 +120,7 @@ static float rfv(const unsigned char*bin,long base,const GA*a,int elem,int comp)
         case C_USHORT:{unsigned short v;memcpy(&v,p,2);return (float)v;}
         case C_SHORT:{short v;memcpy(&v,p,2);return (float)v;}
         case C_UBYTE:return (float)p[0]; case C_BYTE:return (float)((signed char)p[0]);} return 0;}
-// Безопасное чтение индекса: только беззнаковые SCALAR-типы, диапазон [0,maxIdx].
+// Safe index read: unsigned SCALAR types only, range [0,maxIdx].
 static long rfi(const unsigned char*bin,long base,const GA*a,int elem,long maxIdx){
     if(a->vec!=1) return -1;
     long idx=-1; const unsigned char*p=bin+base+(long)elem*a->stride;
@@ -143,29 +143,29 @@ static float clamp01(float x){ return x<0?0:(x>1?1:x); }
 static float spec_from_rough(float rough,float metallic){
     float g=1-clamp01(rough); return 0.05f+g*(0.55f+0.45f*clamp01(metallic)); }
 
-// Акцессор укладывается в свой bufferView и в bin-чанк (защита от битого/
-// вредоносного GLB: смещения/длины берутся из JSON и ДО чтения обязаны быть
-// проверены против реального размера файла). Шаг чтения rvv/rfv = a->stride.
+// An accessor must fit into its bufferView and the BIN chunk (protection
+// against corrupt/malicious GLB: offsets/lengths come from JSON and MUST be
+// validated against the real file size BEFORE reading). Read stride of rvv/rfv = a->stride.
 static int acc_fits(const GA*a,const GB*bvs,int bv_n,long bin_len){
     if(!a||a->count<=0)return 0;
     if(a->bufferView<0||a->bufferView>=bv_n)return 0;
     const GB*bv=&bvs[a->bufferView];
     int sz=cs(a->comp)*a->vec; if(sz<=0)return 0;
     if(a->count>bin_len)return 0;
-    // Для интерлевинга: реальный размер = (count-1)*stride + sz
+    // For interleaving: real size = (count-1)*stride + sz
     long stride = a->stride > 0 ? a->stride : sz;
     long need = (a->count - 1) * stride + sz;
     long base = bv->byteOffset + a->byteOffset;
     return base>=0&&bv->byteLength>=0&&need<=bv->byteLength&&base+need<=bin_len;
 }
-// bufferView (картинка/сырые данные) целиком внутри bin-чанка
+// bufferView (image/raw data) fully inside the BIN chunk
 static int bv_fits(const GB*bvs,int bv_n,int i,long bin_len){
     if(i<0||i>=bv_n)return 0;
     return bvs[i].byteOffset>=0&&bvs[i].byteLength>=0&&
            bvs[i].byteOffset+bvs[i].byteLength<=bin_len;
 }
 
-// --- Сам парсер ----------------------------------------------------------------
+// --- The parser itself ------------------------------------------------------------
 AnimGlb *glb_anim_parse(const char *path)
 {
     unsigned int filesz=0;
@@ -175,9 +175,9 @@ AnimGlb *glb_anim_parse(const char *path)
     const unsigned char*json_data=NULL,*bin=NULL; unsigned int json_len=0,bin_len=0;
     unsigned int off=12;
     while(off+8<=filesz){ unsigned int clen,ctype; memcpy(&clen,file+off,4); memcpy(&ctype,file+off+4,4); off+=8;
-        // clen из файла: off+clen способно завернуться по 32 биту и закрыть
-        // проверку; тогда bin_len станет ложно огромным и acc_fits валидировал
-        // бы по нему, а не по реальному буферу -> чтение за его пределами.
+        // clen from the file: off+clen can wrap around 32 bits and defeat the
+        // check; bin_len would then become falsely huge and acc_fits would
+        // validate against it, not the real buffer -> reads past the end.
         if(clen>filesz-off)break;
         if(ctype==GLB_CHUNK_JSON){json_data=file+off;json_len=clen;}
         else if(ctype==GLB_CHUNK_BIN){bin=file+off;bin_len=clen;}
@@ -211,7 +211,7 @@ AnimGlb *glb_anim_parse(const char *path)
         accs[i].vec=tv(json_str(json_find(a,"type"),"SCALAR"));
         accs[i].norm=json_bool(json_find(a,"normalized"),0);
         accs[i].count=(long)json_num(json_find(a,"count"),0);
-        // Шаг между элементами: byteStride bufferView если задан, иначе плотная упаковка.
+        // Stride between elements: bufferView byteStride if given, else tight packing.
         int bv_i=accs[i].bufferView, elem_sz=cs(accs[i].comp)*accs[i].vec;
         accs[i].stride=(bv_i>=0&&bv_i<bv_n&&bvs[bv_i].byteStride>0)?bvs[bv_i].byteStride:elem_sz;}
 
@@ -222,7 +222,7 @@ AnimGlb *glb_anim_parse(const char *path)
         json_free(); free(bvs); free(accs); free(out); free(file); return NULL; }
     out->nnode=node_n;
     for(int i=0;i<node_n;i++) out->nodes[i].parent=-1;
-    // родители и дети
+    // parents and children
     for(int i=0;i<node_n;i++){const JsonNode*nd=json_array_get(nd_a,i); AnimNode*N=&out->nodes[i];
         const JsonNode*ch=json_find(nd,"children");
         snprintf(N->name,sizeof N->name,"%s",json_str(json_find(nd,"name"),""));
@@ -231,7 +231,7 @@ AnimGlb *glb_anim_parse(const char *path)
         N->mesh=(int)json_num(json_find(nd,"mesh"),-1);
         const JsonNode*mn=json_find(nd,"matrix");
         const JsonNode*tr=json_find(nd,"translation"),*qt=json_find(nd,"rotation"),*sc=json_find(nd,"scale");
-        // базовые TRS-компоненты
+        // base TRS components
         memcpy(N->btrans,(float[]){0,0,0},sizeof N->btrans);
         memcpy(N->bquat,(float[]){0,0,0,1},sizeof N->bquat);
         memcpy(N->bscl,(float[]){1,1,1},sizeof N->bscl);
@@ -244,7 +244,7 @@ AnimGlb *glb_anim_parse(const char *path)
         if(!mn)N->has_matrix=0;
     }
 
-    // кожи
+    // skins
     int nskin=sk_a&&sk_a->type==JSON_ARRAY?json_array_len(sk_a):0;
     if(nskin>0){
         out->skins=calloc((size_t)nskin,sizeof* out->skins);
@@ -256,7 +256,7 @@ AnimGlb *glb_anim_parse(const char *path)
         for(int i=0;i<node_n;i++)out->skin_of_node[i]=-1;
         for(int s=0;s<nskin;s++){const JsonNode*sk=json_array_get(sk_a,s);
             const JsonNode*jn=json_find(sk,"joints"); int jc=jn&&jn->type==JSON_ARRAY?json_array_len(jn):0;
-            if(jc<0||jc>32*1024*1024) jc=0;      // потолок на число суставов
+            if(jc<0||jc>32*1024*1024) jc=0;      // cap on the number of joints
             AnimSkin*S=&out->skins[s]; S->joint_count=jc;
             S->joints=calloc((size_t)(jc?jc:1),sizeof* S->joints);
             S->inv_bind=calloc((size_t)(jc?jc:1)*16,sizeof* S->inv_bind);
@@ -272,7 +272,7 @@ AnimGlb *glb_anim_parse(const char *path)
         }
     }
 
-    // примитивы мешей (в bind pose, локальные коорд.)
+    // mesh primitives (in bind pose, local coords)
     out->skin_nodes=calloc((size_t)(node_n?node_n:1),sizeof* out->skin_nodes);
     int mesh_n=ms_a&&ms_a->type==JSON_ARRAY?json_array_len(ms_a):0;
     int*mesh_pstart=calloc((size_t)(mesh_n?mesh_n:1),sizeof(int));
@@ -289,9 +289,9 @@ AnimGlb *glb_anim_parse(const char *path)
             const JsonNode*attrs=json_find(pr,"attributes");
             int ipos=(int)json_num(attrs?json_find(attrs,"POSITION"):NULL,-1);
             int inrm=(int)json_num(attrs?json_find(attrs,"NORMAL"):NULL,-1);
-            // UV-набор — тот, на который ссылается baseColorTexture материала
-            // (глTF позволяет до 2 развёрток: у модели лица лица/глаза могут
-            // жить в TEXCOORD_1). Фолбэк — TEXCOORD_0.
+            // The UV set is the one referenced by the material's baseColorTexture
+            // (glTF allows up to 2 UV sets: a character model's face may
+            // live in TEXCOORD_1). Fallback — TEXCOORD_0.
             int mat_idx=(int)json_num(json_find(pr,"material"),-1);
             int uvset=base_uv_set(mt_a,tx_a,mat_idx);
             char uvkey[24]; snprintf(uvkey,sizeof uvkey,"TEXCOORD_%d",uvset);
@@ -302,21 +302,21 @@ AnimGlb *glb_anim_parse(const char *path)
             int iidx=(int)json_num(json_find(pr,"indices"),-1);
             if(ipos<0||ipos>=acc_n)continue;
             GA*ap=&accs[ipos];
-            // Защита от OOB: акцессор обязан укладываться в bin-чанк файла.
-            // vec проверяем сразу здесь: rvv копирует vec float'ов в vp[3].
+            // OOB protection: the accessor must fit inside the file's BIN chunk.
+            // Check vec right here: rvv copies vec floats into vp[3].
             if(!acc_fits(ap,bvs,bv_n,(long)bin_len)||ap->vec!=3){
                 SDL_Log("glb_anim: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен",path);
                 continue;
             }
-            // Остальные атрибуты читаются в стековые приёмники фиксированного
-            // размера (n[3]/u[2]/ji[4]/we[4]) — не подходит по vec = не читаем.
+            // The other attributes are read into stack receivers of fixed
+            // size (n[3]/u[2]/ji[4]/we[4]) — if vec does not fit, do not read.
             GA*an=(inrm>=0&&inrm<acc_n&&accs[inrm].vec==3&&acc_fits(&accs[inrm],bvs,bv_n,(long)bin_len))?&accs[inrm]:NULL;
             GA*au=(iuv>=0&&iuv<acc_n&&accs[iuv].vec<=2&&acc_fits(&accs[iuv],bvs,bv_n,(long)bin_len))?&accs[iuv]:NULL;
             GA*aj=(ijo>=0&&ijo<acc_n&&accs[ijo].vec==4&&acc_fits(&accs[ijo],bvs,bv_n,(long)bin_len))?&accs[ijo]:NULL;
             GA*aw=(iwe>=0&&iwe<acc_n&&accs[iwe].vec==4&&acc_fits(&accs[iwe],bvs,bv_n,(long)bin_len))?&accs[iwe]:NULL;
             GA*ai=(iidx>=0&&iidx<acc_n&&acc_fits(&accs[iidx],bvs,bv_n,(long)bin_len))?&accs[iidx]:NULL;
             long nv=ap->count;
-            // Разумный потолок на вершины примитива (защита от count~1e9 из JSON)
+            // Reasonable cap on primitive vertex count (protection against count~1e9 from JSON)
             if(nv>16*1024*1024){
                 SDL_Log("glb_anim: %s — POSITION count %ld слишком велик",path,nv);
                 continue;
@@ -344,17 +344,17 @@ AnimGlb *glb_anim_parse(const char *path)
             for(long v=0;v<nv;v++){
                 float vp[3],n[3]={0,1,0},u[2]={0,0};
                 rvv(bin,pb,ap,(int)v,vp);
-                // NORMAL/UV/JOINTS/WEIGHTS индексируются тем же v, но acc_fits
-                // проверял каждый по СВОЕМУ count. Битый GLB с count < nv иначе
-                // читал бы за пределами bin-чанка (OOB) — читаем атрибут только
-                // в пределах его собственного count, иначе дефолт.
+                // NORMAL/UV/JOINTS/WEIGHTS are indexed by the same v, but acc_fits
+                // checked each one against ITS OWN count. A corrupt GLB with count
+                // < nv would otherwise read past the BIN chunk (OOB) — read an
+                // attribute only within its own count, else use the default.
                 if(an&&v<an->count) rvv(bin,nb,an,(int)v,n);
                 if(au&&v<au->count) rvv(bin,ub,au,(int)v,u);
                 P->verts[3*v]=vp[0]; P->verts[3*v+1]=vp[1]; P->verts[3*v+2]=vp[2];
                 P->normals[3*v]=n[0]; P->normals[3*v+1]=n[1]; P->normals[3*v+2]=n[2];
-                // БЕЗ флипа V: stb_image кладёт верхнюю строку картинки в
-                // t=0, а glTF v=0 — тоже верх изображения (top-left origin).
-                // Флип зеркалил текстуру вертикально: губы оказывались на лбу.
+                // NO V FLIP: stb_image puts the image's top row at t=0, and glTF
+                // v=0 is also the top of the image (top-left origin).
+                // Flipping mirrored the texture vertically: lips ended up on the forehead.
                 P->uvs[2*v]=u[0]; P->uvs[2*v+1]=u[1];
                 if(P->bone_idx){
                     float ji[4]={0,0,0,0},we[4]={0,0,0,0};
@@ -378,7 +378,7 @@ AnimGlb *glb_anim_parse(const char *path)
             P->vcount=(int)nv;
             goto prim_ok;
         prim_fail:
-            // Сбой аллокации: освободить недостроенный примитив и пропустить.
+            // Allocation failure: free the half-built primitive and skip it.
             SDL_Log("glb_anim: %s — нехватка памяти на примитив",path);
             if (P) {
                 free(P->verts); free(P->normals); free(P->uvs);
@@ -387,7 +387,7 @@ AnimGlb *glb_anim_parse(const char *path)
             }
             continue;
         prim_ok:;
-            // материал (псевдо-PBR 2004)
+            // material (2004-style pseudo-PBR)
             memcpy(P->tint,(float[]){1,1,1},sizeof P->tint); P->alpha=1; P->blend=MAT_BLEND_OPAQUE;
             P->cull=MAT_CULL_NONE; P->tile[0]=P->tile[1]=1; P->specular=0.2f;
             if(mat_idx>=0&&mt_a&&mt_a->type==JSON_ARRAY&&mat_idx<json_array_len(mt_a)){
@@ -406,16 +406,16 @@ AnimGlb *glb_anim_parse(const char *path)
                 const char*am=json_str(json_find(mt,"alphaMode"),"OPAQUE");
                 if(!strcmp(am,"BLEND"))P->blend=MAT_BLEND_ALPHA;
                 else if(!strcmp(am,"MASK"))P->blend=MAT_BLEND_ALPHATEST;
-                // gltf-пропсы рендерим двусторонними: иначе односторонний салон/
-                // тонкие детали пропадают (видно «сквозь», и внутрянка не видна
-                // извне через стекло). Игнорируем doubleSided файла — всегда NONE.
+                // Render gltf props two-sided: otherwise single-sided interiors/
+                // thin details disappear (you see "through" the glass and the inside
+                // is not visible from outside). Ignore the file's doubleSided — always NONE.
                 P->cull=MAT_CULL_NONE;
                 const JsonNode*em=json_find(mt,"emissiveFactor");
                 if(em&&em->type==JSON_ARRAY&&json_array_len(em)>=3){
                     P->tint[0]+=(float)json_num(json_array_get(em,0),0);
                     P->tint[1]+=(float)json_num(json_array_get(em,1),0);
                     P->tint[2]+=(float)json_num(json_array_get(em,2),0);}
-                // альбедо-текстура
+                // albedo texture
                 const JsonNode*bct=json_find(json_find(pbr,"baseColorTexture"),"index");
                 int tidx=(int)json_num(bct,-1);
                 const JsonNode*tex=(tidx>=0&&tx_a&&tx_a->type==JSON_ARRAY&&tidx<json_array_len(tx_a))?json_array_get(tx_a,tidx):NULL;
@@ -430,17 +430,17 @@ AnimGlb *glb_anim_parse(const char *path)
                                 const JsonNode*sa=json_array_get(sm_a,smp);
                                 int wS=(int)json_num(json_find(sa,"wrapS"),33071);
                                 int wT=(int)json_num(json_find(sa,"wrapT"),33071);
-                                // REPEAT из семплера тянет 2-й тайл при UV>1 -> рваный
-                                // рисунок. Для gltf-пропсов используем CLAMP (по краю).
+                                // REPEAT from the sampler pulls a 2nd tile when UV>1 -> torn
+                                // artwork. For gltf props we use CLAMP (at the edge).
                                 P->wrap=(wS==33648||wT==33648)?MAT_WRAP_MIRROR:MAT_WRAP_CLAMP;
                                 int mag=(int)json_num(json_find(sa,"magFilter"),9729);
                                 P->filter=(mag==9728)?MAT_FILTER_NEAREST:MAT_FILTER_MIPMAP;}
                         }}
                 }
                 if(P->blend==MAT_BLEND_ALPHA&&P->img&&P->alpha>=0.95f){
-                    // стекло, нарисованное непрозрачной текстурой (alpha=255):
-                    // без полупрозрачных пикселей BLEND не смешивается и закрывает
-                    // внутреники. Если альфа в текстуре полностью 255 — стекло.
+                    // Glass drawn with an opaque texture (alpha=255): without
+                    // semi-transparent pixels BLEND does not blend and hides the
+                    // interiors. If the texture alpha is fully 255 — it is glass.
                     int has_trans=0;
                     int npix=P->iw*P->ih;
                     const unsigned char*pa=P->img+3;
@@ -452,7 +452,7 @@ AnimGlb *glb_anim_parse(const char *path)
         mesh_pcount[mi]=out->nprim-mesh_pstart[mi];
     }
 
-    // анимации
+    // animations
     int nclip=an_a&&an_a->type==JSON_ARRAY?json_array_len(an_a):0;
     if(nclip>0){
         out->clips=calloc((size_t)nclip,sizeof* out->clips);
@@ -477,15 +477,15 @@ AnimGlb *glb_anim_parse(const char *path)
                    acc_fits(&accs[inp],bvs,bv_n,(long)bin_len)&&
                    acc_fits(&accs[outp],bvs,bv_n,(long)bin_len)){
                     GA*ti=&accs[inp],*vo=&accs[outp];
-                    long nk=ti->count>16*1024*1024?0:ti->count;   // потолок против OOM/OOB
-                    // output-count должен покрывать все ключи, иначе rfv читает
-                    // мимо акцессора (OOB на битом GLB): LINEAR/STEP — comp на
-                    // ключ (нужно >= nk), CUBICSPLINE — 3*comp (нужно >= nk*3).
+                    long nk=ti->count>16*1024*1024?0:ti->count;   // cap against OOM/OOB
+                    // output-count must cover all keys, otherwise rfv reads
+                    // past the accessor (OOB on a corrupt GLB): LINEAR/STEP — comp per
+                    // key (need >= nk), CUBICSPLINE — 3*comp (need >= nk*3).
                     if(Samp->interp==ANIM_CUBIC){ if(vo->count<nk*3) nk=0; }
                     else if(vo->count<nk){ nk=0; }
                     Samp->comp=vo->vec; Samp->nkeys=nk;
-                    // CUBICSPLINE хранит per key 3*comp (in-tangent, value,
-                    // out-tangent); LINEAR/STEP — comp на ключ.
+                    // CUBICSPLINE stores 3*comp per key (in-tangent, value,
+                    // out-tangent); LINEAR/STEP — comp per key.
                     int per=(Samp->interp==ANIM_CUBIC)?3*Samp->comp:Samp->comp;
                     Samp->times=malloc((size_t)(nk?nk:1)*sizeof(float));
                     Samp->values=malloc((size_t)(nk?(size_t)nk*per:1)*sizeof(float));
@@ -519,12 +519,12 @@ AnimGlb *glb_anim_parse(const char *path)
         }
     }
 
-    // skin-узлы (node со skin)
+    // skin nodes (node with a skin)
     out->nskin_nodes=0;
     for(int i=0;i<node_n;i++){int sk=(int)json_num(json_find(json_array_get(nd_a,i),"skin"),-1);
         if(sk>=0&&sk<out->nskin){out->skin_of_node[i]=sk; out->skin_nodes[out->nskin_nodes++]=i;}}
 
-    // экземпляры: каждый узел с мешем → свои draw-примитивы (instancing допустим)
+    // instances: each node with a mesh → its own draw primitives (instancing allowed)
     int ninst=0;
     for(int i=0;i<node_n;i++){int m=out->nodes[i].mesh;
         if(m>=0&&m<mesh_n)ninst+=mesh_pcount[m];}
@@ -540,7 +540,7 @@ AnimGlb *glb_anim_parse(const char *path)
 
     free(bvs); free(accs);
     json_free(); free(file);
-    if(out->nprim==0&&out->nnode>0){ out->err[0]=0; /* нет примитивов — ок, пусто */ }
+    if(out->nprim==0&&out->nnode>0){ out->err[0]=0; /* no primitives — fine, empty */ }
     return out;
 }
 
@@ -556,7 +556,7 @@ void glb_anim_free(AnimGlb*a){ if(!a)return;
         free(a->clips[c].samplers);} free(a->clips);
     free(a->skin_nodes); free(a->instances); free(a); }
 
-// --- Быстрый peek: есть ли скин/анимация ---------------------------------------
+// --- Fast peek: is there skin/animation ---------------------------------------
 int glb_anim_has_anim(const char*path){
     unsigned int sz=0; unsigned char*f=resources_read_file(path,&sz);
     if(!f||sz<20)return 0;
@@ -579,46 +579,46 @@ int glb_anim_has_anim(const char*path){
     free(f); return skin&&anim;
 }
 
-// --- Узел (GPU) ----------------------------------------------------------------
+// --- Node (GPU) ----------------------------------------------------------------
 #define MAX_BONES 64
-static void anim_node_exit(const Event*,void*);   // forward (см. ниже)
+static void anim_node_exit(const Event*,void*);   // forward (see below)
 typedef struct{
     GLuint vao,vbo,ebo; int index_count; GLenum index_type;
-    GLuint snow_vbo;     // per-vertex "открыто небу сверху" (снег), 0 если нет
+    GLuint snow_vbo;     // per-vertex "open to the sky above" (snow), 0 if none
     GLuint tex; Material mat; MaterialLocs ml; float specular;
-    int skin;            // индекс кожи (-1 — без скиннинга)
-    int has_skin;        // рендерить с костями
-    int node;            // узел, несущий этот меш (для не-скинненых: его node_world)
-    int tex_owned;       // 1 — glGenTextures (из img), 0 — кеш ресурсов (notfound)
+    int skin;            // skin index (-1 — no skinning)
+    int has_skin;        // render with bones
+    int node;            // node carrying this mesh (for non-skinned: its node_world)
+    int tex_owned;       // 1 — glGenTextures (from img), 0 — resource cache (notfound)
     GLuint joints_bo, weights_bo;
-    int *joint_map;      // какие кости этой КОЖИ реально используются (distinct,
-    int joint_n;         // позиции в её joints[]), локальные индексы вершин — 0..joint_n-1
-    float *bone;         // jointMatrix этих костей для uBones (joint_n*16)
-    char mtl_name[64];   // имя материала (фильтр GROUND-плана в рэгдолле)
-    int rag_skip;        // 1 — не рисовать при включённом рэгдолле
+    int *joint_map;      // which bones of THIS SKIN are actually used (distinct,
+    int joint_n;         // positions in its joints[]); vertex local indices — 0..joint_n-1
+    float *bone;         // jointMatrix of these bones for uBones (joint_n*16)
+    char mtl_name[64];   // material name (GROUND-plane filter in the ragdoll)
+    int rag_skip;        // 1 — do not draw when ragdoll is enabled
 } AnimDrawItem;
 typedef struct{
     const RendererContext*rc; AnimDrawItem*items; int count;
     GLuint prog; SceneUniforms su;
     GLint u_model,u_tex,u_specular,u_bones,u_hasskin,u_uvtile;
     float scale; float anim_time; float anim_speed;
-    int paused; int loop;       // управление воспроизведением
-    AnimGlb*data;           // растёт — данные модели (негрузятся в GPU кажд. кадр)
-    float*node_world;       // глобальные матрицы узлов (вычисляются каждый кадр)
-    float*skin;             // jointMatrix всех костей обрабатываемой кожи
-    int skin_cap;           // вместимость skin[] (макс. joint_count по кожам)
-    float*wtrs;             // рабочие TRS узлов: [i*10] = trans3+quat4+scl3 (анимир.)
-    int cur_clip;           // номер активного клипа
-    float radius;           // огранич. сфера геометрии в мировом масштабе
-    char path[256];         // путь GLB (для инструмента anim/list)
-    int enabled;            // 0 — скрыт и время не идёт, 1 — виден/играет
-    float dest[3]; float move_speed; int moving;   // плавное движение к dest
-    void *rag;              // рэгдолл (AnimRag*) — включается phys_ragdoll
+    int paused; int loop;       // playback control
+    AnimGlb*data;           // grows — model data (not uploaded to the GPU each frame)
+    float*node_world;       // global node matrices (recomputed every frame)
+    float*skin;             // jointMatrix of all bones of the skin being processed
+    int skin_cap;           // capacity of skin[] (max joint_count across skins)
+    float*wtrs;             // working node TRS: [i*10] = trans3+quat4+scl3 (animated)
+    int cur_clip;           // number of the active clip
+    float radius;           // bounding sphere of geometry in world scale
+    char path[256];         // GLB path (for the anim/list tool)
+    int enabled;            // 0 — hidden and time does not run, 1 — visible/playing
+    float dest[3]; float move_speed; int moving;   // smooth move toward dest
+    void *rag;              // ragdoll (AnimRag*) — toggled by phys_ragdoll
 } AnimParams;
 
-// Глобальный реестр анимик-узлов (нумерация = порядок загрузки). Индекс узла
-// фиксируется при регистрации и не меняется — инструмент `anim <индекс>` по нему
-// обращается (узлы, удалённые через anim remove, больше не выдаются).
+// Global registry of anim nodes (numbering = load order). A node's index is
+// fixed at registration and never changes — the `anim <index>` tool addresses
+// nodes by it (nodes removed via anim remove are no longer handed out).
 typedef struct AnimRegEntry { SceneNode *node; struct AnimRegEntry *next; } AnimRegEntry;
 static AnimRegEntry *s_anim_reg = NULL;
 static void anim_reg_add(SceneNode *n){
@@ -637,31 +637,32 @@ static SceneNode *anim_reg_find(int idx){
     return NULL;
 }
 
-// --- Рэгдолл (Verlet): частицы = кости скелета ---------------------------------
-// Включается phys_ragdoll: каждая кость получает частицу в своей мировой
-// точке, связи — по иерархии (+связи через узел для жёсткости суставов).
-// Анимация ПОЛНОСТЬЮ вытесняется физикой: ragdoll_apply каждый кадр строит
-// node_world из частиц (направление кости = частица первого ребёнка минус
-// частица кости; кадр строится по ДВУМ векторам — «вперёд» и «вбок» (side-
-// частица), со swing+twist: кручение передаётся по цепи плавно, кожа не
-// скручивается конфетой), затем шаг 3 — jointMatrix = node_world*inv_bind.
-// Суставные лимиты: угол в суставе не уходит дальше rest ± предела.
+// --- Ragdoll (Verlet): particles = skeleton bones ---------------------------------
+// Toggled by phys_ragdoll: each bone gets a particle at its world point,
+// links follow the hierarchy (+ links through the node for joint stiffness).
+// Animation is FULLY replaced by physics: every frame ragdoll_apply builds
+// node_world from the particles (bone direction = first child's particle minus
+// the bone's particle; the frame is built from TWO vectors — "forward" and
+// "side" (side particle), with swing+twist: torsion propagates along the
+// chain smoothly, the skin does not twist into a candy wrapper), then step 3
+// — jointMatrix = node_world*inv_bind.
+// Joint limits: the angle at a joint never goes beyond rest ± limit.
 typedef struct {
-    PhysWorld *w;              // частицы в МИРОВОМ пространстве
-    SceneNode *owner;          // узел-владелец (instance-матрица)
-    int nn;                    // число узлов модели
-    int *order;                // topological порядок (родители раньше детей)
-    int *part;                 // node -> частица
-    int *cpart;                // node -> частица первого ребёнка (-1 лист)
-    int *spart;                // node -> БОКОВАЯ частица (-1 нет; фиксирует крен)
-    int origin_part;           // частица «_origin» (точка крепления модели)
-    float (*F0)[3];            // rest-«вперёд» кости (мир, на ребёнка)
-    float (*U0)[3];            // rest-«вбок» кости (мир, локальная ось X)
-    float *rw0;                // rest-мировой поворот узла (16/узел)
-    float *Mw;                 // рабочие мировые матрицы костей (16/узел, кадр)
-    float *rsw;                // rest-мировой МАСШТАБ узла (у каждого свой!)
-    float *tha0;               // rest-угол в суставе (родитель->узел->ребёнок)
-    int hang;                  // 1 — origin прибит (висит), 0 — падает целиком
+    PhysWorld *w;              // particles in WORLD space
+    SceneNode *owner;          // owning node (instance matrix)
+    int nn;                    // number of model nodes
+    int *order;                // topological order (parents before children)
+    int *part;                 // node -> particle
+    int *cpart;                // node -> first child's particle (-1 leaf)
+    int *spart;                // node -> SIDE particle (-1 none; pins the roll)
+    int origin_part;           // "_origin" particle (model anchor point)
+    float (*F0)[3];            // rest "forward" of the bone (world, toward the child)
+    float (*U0)[3];            // rest "side" of the bone (world, local X axis)
+    float *rw0;                // rest world rotation of the node (16/node)
+    float *Mw;                 // working world bone matrices (16/node, frame)
+    float *rsw;                // rest world SCALE of the node (each has its own!)
+    float *tha0;               // rest angle at the joint (parent->node->child)
+    int hang;                  // 1 — origin pinned (hangs), 0 — falls as a whole
     int dbg_done;
     int dbg_calls;
 } AnimRag;
@@ -675,7 +676,7 @@ static void rag_free(AnimRag *r)
     free(r);
 }
 
-// Кратчайший поворот 3x3, переводящий единичный вектор a в b (Rodrigues)
+// Shortest 3x3 rotation mapping unit vector a onto b (Rodrigues)
 static void m3_a_to_b(const float *a, const float *b, float *r)
 {
     float ax = a[1]*b[2] - a[2]*b[1];   // cross(a, b)
@@ -685,7 +686,7 @@ static void m3_a_to_b(const float *a, const float *b, float *r)
     float s = sqrtf(ax*ax + ay*ay + az*az);
     float K[9] = { 0, -az, ay,  az, 0, -ax,  -ay, ax, 0 };
     if (s < 1e-6f) {
-        if (c < 0.0f) {   // противоположны — разворот на 180° вокруг перпендикуляра
+        if (c < 0.0f) {   // opposite — 180° flip around a perpendicular
             float px = 0.0f, py = 1.0f, pz = 0.0f;
             if (fabsf(a[1]) > 0.9f) { py = 0.0f; pz = 1.0f; }
             float vx = a[1]*pz - a[2]*py;
@@ -711,7 +712,7 @@ static void m3_a_to_b(const float *a, const float *b, float *r)
         r[i] = I[i] + K[i] + k2[i] * k;
 }
 
-// Поворотная часть матрицы с нормировкой колонок (снимает масштаб)
+// Rotation part of the matrix with normalized columns (removes scale)
 static void m4_rot_norm(const float *m, float *o)
 {
     float cx[3] = { m[0], m[1], m[2] };
@@ -730,7 +731,7 @@ static void m4_rot_norm(const float *m, float *o)
     o[15] = 1.0f;
 }
 
-// Включить рэгдолл на анимированной модели. hang=1 — origin прибит (висит).
+// Enable ragdoll on an animated model. hang=1 — origin pinned (hangs).
 int glb_anim_ragdoll_enable(SceneNode *n, int hang)
 {
     AnimParams *p = n ? (AnimParams *)n->params : NULL;
@@ -757,8 +758,8 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
     r->w = malloc(sizeof(PhysWorld));
     if (!r->w) { rag_free(r); return -1; }
     physics_reset(r->w);
-    // Длинная цепь костей требует много итераций релаксации: при 6 тело
-    // «тает» — листья уезжают от корня на метры (связи не успевают дожать)
+    // A long bone chain needs many relaxation iterations: at 6 the body
+    // "melts" — leaves drift meters away from the root (links cannot converge in time)
     r->w->iterations = 32;
     r->owner = n;
     r->nn = nn;
@@ -779,12 +780,12 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
         return -1;
     }
 
-    // Rest-мировые матрицы узлов (поза последнего кадра + instance)
+    // Rest world node matrices (last frame's pose + instance)
     static float wi[PHYS_MAX_PARTS][16];
     for (int i = 0; i < nn; i++)
         m4mul(wi[i], n->world, &p->node_world[i * 16]);
 
-    // Топологический порядок: корни сначала (дети после родителей)
+    // Topological order: roots first (children after parents)
     int on = 0;
     for (int i = 0; i < nn; i++)
         if (a->nodes[i].parent < 0) r->order[on++] = i;
@@ -800,14 +801,14 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
             if (placed && !me) r->order[on++] = i;
         }
     }
-    if (on < nn) {   // циклы в иерархии — рэгдолл на такой модели невозможен
+    if (on < nn) {   // cycles in the hierarchy — ragdoll impossible on such a model
         rag_free(r);
         return -1;
     }
 
-    // Частицы в текущих мировых точках костей (проход 1), затем частицы
-    // первых детей (проход 2 — part[] уже заполнен целиком, иначе читали бы
-    // мусор malloc для детей с индексом больше текущего)
+    // Particles at the current world bone points (pass 1), then particles of
+    // the first children (pass 2 — part[] is fully filled by then, otherwise we
+    // would read malloc garbage for children with an index above the current one)
     for (int i = 0; i < nn; i++) {
         r->part[i] = physics_add_part(r->w, wi[i] + 12, 1.0f, 0.09f);
         if (r->part[i] < 0) { rag_free(r); return -1; }
@@ -823,19 +824,19 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
     if (r->origin_part < 0) { rag_free(r); return -1; }
     if (r->hang) physics_pin(r->w, r->origin_part, 1);
 
-    // --- Rest-каркас каждой кости: масштаб, поворот, «вперёд», «вбок» ------
-    // «Вбок» (side-частица) фиксирует КРЕН кости: без неё swing-реконструкция
-    // скручивает кожу конфетой (каждая кость крутится независимо).
+    // --- Rest frame of each bone: scale, rotation, "forward", "side" ------
+    // "Side" (side particle) pins the bone's ROLL: without it the swing
+    // reconstruction twists the skin into a candy (each bone spins on its own).
     for (int k = 0; k < nn; k++) {
         int i = r->order[k];
         int par = a->nodes[i].parent;
-        // Rest-мировой МАСШТАБ узла: у скелетов узлы часто несут свой
-        // масштаб (0.01 и т.п.) — без него реконструкция раздаувает куски
+        // Rest world node SCALE: skeleton nodes often carry their own
+        // scale (0.01 etc.) — without it the reconstruction crushes the pieces
         r->rsw[i] = sqrtf(wi[i][0]*wi[i][0] + wi[i][1]*wi[i][1]
                         + wi[i][2]*wi[i][2]);
         if (r->rsw[i] < 1e-8f) r->rsw[i] = 1.0f;
         m4_rot_norm(wi[i], &r->rw0[i * 16]);
-        // связь с родителем (+ через узел к деду — жёсткость сустава)
+        // link to the parent (+ through the node to the grandparent — joint stiffness)
         if (physics_add_link(r->w, r->part[i],
                              par >= 0 ? r->part[par] : r->origin_part) < 0) {
             rag_free(r); return -1;
@@ -845,7 +846,7 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
                              gp >= 0 ? r->part[gp] : r->origin_part) < 0) {
             rag_free(r); return -1;
         }
-        // rest-угол сустава: (родитель->узел) против (узел->ребёнок)
+        // rest joint angle: (parent->node) versus (node->child)
         const AnimNode *N = &a->nodes[i];
         if (r->cpart[i] >= 0) {
             int ch = N->children[0];
@@ -867,17 +868,17 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
                 float c = (d1[0]*d2[0] + d1[1]*d2[1] + d1[2]*d2[2]) / (l1*l2);
                 r->tha0[i] = acosf(c < -1.0f ? -1.0f : (c > 1.0f ? 1.0f : c));
             }
-            // «вперёд» — на ребёнка
+            // "forward" — toward the child
             float l = l2;
             r->F0[i][0] = d2[0] / l; r->F0[i][1] = d2[1] / l;
             r->F0[i][2] = d2[2] / l;
-            // «вбок» — локальная ось X кости (стабильна по rest-каркасу)
+            // "side" — the bone's local X axis (stable per the rest frame)
             r->U0[i][0] = (&r->rw0[i * 16])[0];
             r->U0[i][1] = (&r->rw0[i * 16])[1];
             r->U0[i][2] = (&r->rw0[i * 16])[2];
-            // Side-частица: треугольник (узел, ребёнок, вбок) жёстко фиксирует
-            // крен сегмента, а связь с родительской side-частицей тянет кручение
-            // по всей цепи — кожа не скручивается.
+            // Side particle: the (node, child, side) triangle rigidly pins the
+            // segment's roll, and the link to the parent's side particle drags torsion
+            // along the whole chain — the skin does not twist.
             float fl = l2;
             float sl = 0.3f * fl; if (sl < 0.04f) sl = 0.04f;
             float sp[3] = { wi[i][12] + r->U0[i][0] * sl,
@@ -899,12 +900,12 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
                 rag_free(r); return -1;
             }
         } else {
-            r->spart[i] = -1;   // лист — кадр унаследует от родителя
+            r->spart[i] = -1;   // leaf — frame inherited from the parent
         }
     }
     p->rag = r;
-    // Скрыть вспомогательные плоскости модели (материал GROUND и т.п.) —
-    // в рэгдолле они тащатся костями и разворачиваются в гигантские паруса
+    // Hide the model's helper planes (GROUND material etc.) —
+    // in ragdoll they get dragged by bones and unfurl into giant sails
     for (int i = 0; i < p->count; i++) {
         char low[64];
         snprintf(low, sizeof low, "%s", p->items[i].mtl_name);
@@ -919,8 +920,8 @@ int glb_anim_ragdoll_enable(SceneNode *n, int hang)
     return 0;
 }
 
-// Перекрыть node_world матрицами из частиц (вызывается из build_bones
-// после шага 2, ДО шага 3 jointMatrix — скиннинг берёт рэгдолл-позу).
+// Override node_world with matrices from the particles (called from build_bones
+// after step 2, BEFORE step 3 jointMatrix — skinning takes the ragdoll pose).
 static void ragdoll_apply(AnimParams *p)
 {
     AnimRag *r = p->rag;
@@ -932,12 +933,12 @@ static void ragdoll_apply(AnimParams *p)
     for (int k = 0; k < r->nn; k++) {
         int i = r->order[k];
         int par = a->nodes[i].parent;
-        // Кадр кости: SWING + TWIST.
-        // 1) Swing: rest-«вперёд» (F0) разворачивается кратчайшей дугой на
-        //    текущее направление на ребёнка — основная ориентация кости.
-        // 2) Twist: боковая частица задаёт крен вокруг оси кости; довернутая
-        //    rest-«вбок» (U1) доворачивается до неё — кручение передаётся по
-        //    цепи через связи side-частиц плавно, кожа не сворачивается.
+        // Bone frame: SWING + TWIST.
+        // 1) Swing: rest "forward" (F0) is rotated by the shortest arc onto the
+        //    current direction to the child — the bone's main orientation.
+        // 2) Twist: the side particle sets the roll around the bone axis; the
+        //    rotated rest "side" (U1) is turned onto it — torsion travels along
+        //    the chain through side-particle links smoothly, the skin does not curl up.
         float Mrot[16];
         if (r->cpart[i] >= 0 && r->spart[i] >= 0) {
             const float *pi = w->part[r->part[i]].pos;
@@ -952,7 +953,7 @@ static void ragdoll_apply(AnimParams *p)
             R1[0] = r9[0]; R1[1] = r9[1]; R1[2]  = r9[2];
             R1[4] = r9[3]; R1[5] = r9[4]; R1[6]  = r9[5];
             R1[8] = r9[6]; R1[9] = r9[7]; R1[10] = r9[8];
-            // Twist: угол между U1 (=R1*U0) и текущим «вбока» вокруг F
+            // Twist: angle between U1 (=R1*U0) and the current "side" around F
             float U1[3], Uc[3];
             const float *ps = w->part[r->spart[i]].pos;
             for (int q = 0; q < 3; q++) {
@@ -977,7 +978,7 @@ static void ragdoll_apply(AnimParams *p)
                 float cs = U1[0]*Uc[0] + U1[1]*Uc[1] + U1[2]*Uc[2];
                 if (cs < -1.0f) cs = -1.0f; else if (cs > 1.0f) cs = 1.0f;
                 float phi = atan2f(sn, cs);
-                // R2 = поворот вокруг F на phi (Rodrigues, column-major)
+                // R2 = rotation around F by phi (Rodrigues, column-major)
                 float fx = F[0], fy = F[1], fz = F[2];
                 float c = cosf(phi), s = sinf(phi), t = 1.0f - c;
                 float R2[16];
@@ -998,31 +999,31 @@ static void ragdoll_apply(AnimParams *p)
                 memcpy(Mrot, A, sizeof A);
             }
         } else {
-            // Лист (кисть/ступня): кадр родителя — ориентация сегмента
+            // Leaf (hand/foot): the parent's frame — the segment's orientation
             if (par >= 0) memcpy(Mrot, &r->Mw[par * 16], sizeof Mrot);
             else m4_rot_norm(r->owner->world, Mrot);
         }
-        // Кадр кости нужно ЗАПИСАТЬ: листовые дети читают его на этом же
-        // кадре. Раньше Mw никогда не писался (нули из calloc) — все листья
-        // получали нулевую матрицу, и кожа на кистях/ступнях схлопывалась
-        // в точку, растягивая модель лентами.
+        // The bone frame must be WRITTEN: leaf children read it in this same
+        // frame. Mw was never written before (calloc zeros) — every leaf got
+        // a zero matrix, and skin on hands/feet collapsed to a point,
+        // stretching the model into ribbons.
         memcpy(&r->Mw[i * 16], Mrot, sizeof(float) * 16);
-        // W = T(pw) * Mrot; масштаб rest вернём колонками
+        // W = T(pw) * Mrot; rest scale is brought back via the columns
         float W[16];
         memcpy(W, Mrot, sizeof W);
         W[12] = w->part[r->part[i]].pos[0];
         W[13] = w->part[r->part[i]].pos[1];
         W[14] = w->part[r->part[i]].pos[2];
-        // Вернуть rest-масштаб узла (реконструкция его срезала — куски
-        // модели становились дико огромными: inv_bind делит на масштаб)
+        // Restore the node's rest scale (the reconstruction cut it off — pieces
+        // of the model became wildly huge: inv_bind divides by the scale)
         float s = r->rsw[i];
         W[0] *= s; W[1] *= s; W[2]  *= s;
         W[4] *= s; W[5] *= s; W[6]  *= s;
         W[8] *= s; W[9] *= s; W[10] *= s;
-        // И в пространство модели (instance выносится наружу)
+        // And into model space (the instance matrix is factored out)
         m4mul(&p->node_world[i * 16], inv_inst, W);
     }
-    // Одноразовая диагностика: кости с вылетевшим переводом (на 200-м кадре)
+    // One-shot diagnostics: bones with a blown-off translation (at frame 200)
     if (!r->dbg_done) {
         r->dbg_calls++;
         if (r->dbg_calls < 200) return;
@@ -1042,13 +1043,12 @@ static void ragdoll_apply(AnimParams *p)
     }
 }
 
-// Шаг физики всех включённых рэгдоллов (вызывает main.c в фикс-тике).
-// После интеграции — СУСТАВНЫЕ ЛИМИТЫ: угол в суставе не дальше rest±70°,
-// иначе локти/колени гнутся сквозь тело и конечности выворачиваются.
-// Лимиты сдвигают частицы ВНЕ связей, поэтому после них обязана идти
-// physics_relax (чередуем 2 прохода): связи дожимают то, что подвинули
-// лимиты, иначе на следующем кадре step дерёт частицы обратно — дрожь
-// и разлёт рэгдолла.
+// Physics step for all enabled ragdolls (called by main.c in the fixed tick).
+// After integration — JOINT LIMITS: the angle at a joint stays within rest±70°,
+// otherwise elbows/knees bend through the body and limbs turn inside out.
+// Limits move particles OUTSIDE the links, so physics_relax must follow
+// them (we alternate 2 passes): links re-converge what the limits moved,
+// otherwise the next frame's step drags particles back — ragdoll jitter and blow-up.
 static void rag_joint_limits(AnimRag *r, const AnimGlb *a, PhysWorld *w)
 {
     for (int k = 0; k < r->nn; k++) {
@@ -1072,15 +1072,15 @@ static void rag_joint_limits(AnimRag *r, const AnimGlb *a, PhysWorld *w)
         float hi = th0 + 1.2f; if (hi > 2.6f) hi = 2.6f;
         if (th <= hi && th >= lo) continue;
         float tc = th > hi ? hi : lo;
-        float dth = tc - th;                     // с минусом — к пределу
-        // ось = cross(d1, d2): поворот вокруг неё МЕНЯЕТ угол в суставе
+        float dth = tc - th;                     // negative — toward the limit
+        // axis = cross(d1, d2): rotation around it CHANGES the joint angle
         float n[3] = { d1[1]*d2[2] - d1[2]*d2[1],
                        d1[2]*d2[0] - d1[0]*d2[1],
                        d1[0]*d2[1] - d1[1]*d2[0] };
         float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
-        if (nl < 1e-6f) continue;                // сустав вытянут
+        if (nl < 1e-6f) continue;                // joint fully extended
         n[0] /= nl; n[1] /= nl; n[2] /= nl;
-        // Rodrigues: поворот вектора v вокруг n на dth
+        // Rodrigues: rotate vector v around n by dth
         float c = cosf(dth), s = sinf(dth), t = 1.0f - c;
         float v[3] = { pc[0] - pi[0], pc[1] - pi[1], pc[2] - pi[2] };
         float rv[3] = {
@@ -1111,9 +1111,9 @@ void glb_anim_ragdoll_step_all(float dt)
             rag_joint_limits(r, a, w);
             physics_relax(w, 2);
         }
-        // Одноразовая диагностика взрыва (200-й шаг): частица, улетевшая
-        // от точки крепления дальше 30 м, — рэгдолл разорван. Работает
-        // даже если модель вне кадра (apply не вызывается).
+        // One-shot explosion diagnostics (step 200): a particle farther than
+        // 30 m from the anchor point means the ragdoll is torn apart. Works
+        // even if the model is off-camera (apply is not called).
         if (!r->dbg_done) {
             r->dbg_calls++;
             if (r->dbg_calls >= 200) {
@@ -1125,8 +1125,8 @@ void glb_anim_ragdoll_step_all(float dt)
                     float dz = w->part[i].pos[2] - w->part[r->origin_part].pos[2];
                     if (dx * dx + dy * dy + dz * dz > 30.0f * 30.0f) bad++;
                 }
-                // Дрейф масштаба кожи: длина колонки матрицы кости должна
-                // быть равна rest-масштабу; отклонение = растянутая модель.
+                // Skin scale drift: the length of a bone matrix column must
+                // equal the rest scale; deviation = stretched model.
                 float worst = 0.0f;
                 for (int i = 0; i < r->nn; i++) {
                     const float *W = &p->node_world[i * 16];
@@ -1176,8 +1176,8 @@ void glb_anim_ragdoll_disable(SceneNode *n)
     p->rag = NULL;
 }
 
-// Отладка: мировые позиции частиц ВСЕХ рэгдоллов (renderer рисует точками).
-// out_xyz — max*3 float; возвращает число записанных частиц.
+// Debug: world positions of particles of ALL ragdolls (the renderer draws points).
+// out_xyz — max*3 floats; returns the number of particles written.
 int glb_anim_ragdoll_debug_particles(float *out_xyz, int max_parts)
 {
     int n = 0;
@@ -1195,11 +1195,11 @@ int glb_anim_ragdoll_debug_particles(float *out_xyz, int max_parts)
     return n;
 }
 
-// Глобальная матрица узла из рабочих TRS (анимир. компоненты в wtrs)
+// Global node matrix from the working TRS (animated components live in wtrs)
 static void node_global_mat(const AnimGlb*a,const float*wtrs,float*out,int idx){
     int chain[256],n=0,cur=idx;
-    // Петля с защитой от циклов родителя (p==cur) — глубина выше 256 обрезается,
-    // но такие иерархии патологические; остаётся консервативно.
+    // Loop guarded against parent cycles (p==cur) — depth above 256 is truncated,
+    // but such hierarchies are pathological; we stay conservative.
     while(cur>=0&&n<256){chain[n++]=cur; int p=a->nodes[cur].parent; if(p==cur)break; cur=p;}
     m4id(out);
     for(int i=n-1;i>=0;i--){int ni=chain[i]; AnimNode*N=&a->nodes[ni];
@@ -1211,7 +1211,7 @@ static void node_global_mat(const AnimGlb*a,const float*wtrs,float*out,int idx){
         float w[16]; m4mul(w,out,loc); memcpy(out,w,sizeof w); }
 }
 
-// Работа с рабочим буфером: wtrs[i*10] = trans[3] quat[4] scl[3]
+// Working buffer layout: wtrs[i*10] = trans[3] quat[4] scl[3]
 #define WT_TR 0
 #define WT_Q  3
 #define WT_S  7
@@ -1229,13 +1229,13 @@ static void slerp(float*o,const float*a,const float*b,float f){
     for(int q=0;q<4;q++)o[q]=a[q]*(1-fa)+qb[q]*fa;
 }
 
-// --- Сэмплирование клавишей самплера -------------------------------------------------
-// Значение comp компонент в ключе k (для CUBICSPLINE — «value» часть тройки).
+// --- Sampler keyframe sampling -------------------------------------------------
+// Value of the comp components at key k (for CUBICSPLINE — the "value" part of the triple).
 static void keyval(const AnimSampler*S,int k,float*out){
     int i=(S->interp==ANIM_CUBIC)?(k*3+1)*S->comp:k*S->comp;
     memcpy(out,&S->values[i],(size_t)S->comp*sizeof(float));
 }
-// Индексы соседних ключей и параметр сегмента по времени t.
+// Indices of the neighboring keys and the segment parameter for time t.
 static void seek(const AnimSampler*S,float t,int*k0,int*k1,float*u){
     int a=0,b=0; while(b<S->nkeys-1&&S->times[b]<t)b++; a=b>0?b-1:0;
     float seg=S->times[b]-S->times[a];
@@ -1249,7 +1249,7 @@ static void anim_vec(const AnimSampler*S,float t,float*out){
     if(S->interp==ANIM_CUBIC){
         float p0[4],p1[4],m0[4],m1[4];
         keyval(S,k0,p0); keyval(S,k1,p1);
-        // out-tangent узла k0, in-tangent узла k1
+        // out-tangent of node k0, in-tangent of node k1
         memcpy(m0,&S->values[(k0*3+2)*S->comp],(size_t)S->comp*sizeof(float));
         memcpy(m1,&S->values[(k1*3+0)*S->comp],(size_t)S->comp*sizeof(float));
         float seg=S->times[k1]-S->times[k0];
@@ -1262,7 +1262,7 @@ static void anim_vec(const AnimSampler*S,float t,float*out){
     float p0[4],p1[4]; keyval(S,k0,p0); keyval(S,k1,p1);
     for(int q=0;q<S->comp;q++)out[q]=p0[q]+u*(p1[q]-p0[q]);
 }
-// rotation (comp=4): LINEAR = slerp, STEP, CUBICSPLINE = Hermite + норм-ка.
+// rotation (comp=4): LINEAR = slerp, STEP, CUBICSPLINE = Hermite + renormalize.
 static void anim_rot(const AnimSampler*S,float t,float*out){
     int k0,k1; float u; seek(S,t,&k0,&k1,&u);
     if(S->interp==ANIM_STEP){keyval(S,k1,out);return;}
@@ -1276,11 +1276,11 @@ static void anim_rot(const AnimSampler*S,float t,float*out){
     float p0[4],p1[4]; keyval(S,k0,p0); keyval(S,k1,p1); slerp(out,p0,p1,u);
 }
 
-// Построить глобальные матрицы узлов с учётом анимации и jointMatrix
+// Build global node matrices with animation applied, plus jointMatrix
 static void build_bones(AnimParams*p){
     AnimGlb*a=p->data; if(!a->nodes)return;
-    wtrs_base(a,p->wtrs);   // рабочие TRS = базовые
-    // 1) применить активный клип к рабочим TRS узлов
+    wtrs_base(a,p->wtrs);   // working TRS = base
+    // 1) apply the active clip to the nodes' working TRS
     if(a->nclip>0){
         int cl=p->cur_clip<a->nclip?p->cur_clip:0;
         AnimClip*C=&a->clips[cl]; float t=p->anim_time;
@@ -1297,17 +1297,17 @@ static void build_bones(AnimParams*p){
             else                 anim_vec(S,t,w+(Ch->path==0?WT_TR:WT_S)); // trans/scale
         }
     }
-    // 2) глобальные матрицы узлов из рабочих TRS
+    // 2) global node matrices from working TRS
     for(int i=0;i<a->nnode;i++){float m[16]; node_global_mat(a,p->wtrs,m,i);
         memcpy(&p->node_world[i*16],m,sizeof m); }
-    // 2.5) РЭГДОЛЛ: частицы физики перекрывают анимированную позу —
-    //      node_world строится из частиц (кости следуют за физикой),
-    //      шаг 3 ниже берёт уже рэгдолл-позу.
+    // 2.5) RAGDOLL: physics particles override the animated pose —
+    //      node_world is built from the particles (bones follow physics),
+    //      step 3 below already takes the ragdoll pose.
     if(p->rag) ragdoll_apply(p);
-    // 3) jointMatrix по каждой коже, разложить по примитивам (per-primitive remap).
-    //    Вершины скинятся в общем пространстве скелета, поэтому скиненным
-    //    примитивам node_world НЕ нужен (он уже внутри jointMatrix); не-скиненные
-    //    дети иерархии берут его из узла (см. anim_render).
+    // 3) jointMatrix per skin, spread over primitives (per-primitive remap).
+    //    Vertices are skinned in the shared skeleton space, so skinned
+    //    primitives do NOT need node_world (it is already inside jointMatrix);
+    //    non-skinned children of the hierarchy take it from the node (see anim_render).
     for(int s=0;s<a->nskin;s++){
         AnimSkin*S=&a->skins[s]; int n=S->joint_count; if(n>p->skin_cap)n=p->skin_cap;
         for(int j=0;j<n;j++){int nodeidx=S->joints[j];
@@ -1343,7 +1343,7 @@ static void anim_render(SceneNode*n,float dt){
     (void)dt;
     AnimParams*p=n?n->params:NULL; if(!p||!p->enabled)return;
     if(p->rc->pass==RP_SHADOW){
-        // Тень анимированной модели в позе текущего кадра (skinning в VS)
+        // Shadow of the animated model in the current frame's pose (skinning in VS)
         if(!s_anim_shadow_prog){
             s_anim_shadow_prog=resources_program_replace(
                 0,"shaders/skinned_shadow.vs","shaders/mesh_shadow.fs");
@@ -1357,7 +1357,7 @@ static void anim_render(SceneNode*n,float dt){
         glActiveTexture(GL_TEXTURE0);
         for(int i=0;i<p->count;i++){
             AnimDrawItem*d=&p->items[i];
-            if(p->rag&&d->rag_skip)continue;   // GROUND-план и прочий сор
+            if(p->rag&&d->rag_skip)continue;   // GROUND plane and other junk
             float model[16];
             if(!d->has_skin&&p->data&&d->node>=0&&d->node<p->data->nnode)
                 m4mul(model,&p->node_world[d->node*16],n->world);
@@ -1375,14 +1375,14 @@ static void anim_render(SceneNode*n,float dt){
     }
     if(!frustum_test_sphere(&p->rc->frustum, n->world[12], n->world[13], n->world[14], p->radius))
         return;
-    // build_bones уже выполнен в anim_update для этого кадра — не дублируем.
-    // Базовая матрица экземпляра = МИРОВАЯ матрица узла (scene.c): в ней
-    // позиция, поворот, масштаб и — если узел прицеплен — матрица кости
-    // родителя. Модель можно вращать и вешать на другие модели.
-    // СКИНЕННЫЕ примитивы рисуются в ней: jointMatrix = world[joint]*inverseBind
-    // уже в пространстве скелета. НЕ-СКИНЕННЫЕ меши (пропсы в иерархии)
-    // дополнительно умножаются на node_world своего узла — иначе они лежат в
-    // «сыром» масштабе файла.
+    // build_bones already ran in anim_update for this frame — do not duplicate it.
+    // Base instance matrix = the node's WORLD matrix (scene.c): it carries
+    // position, rotation, scale and — if the node is attached — the parent
+    // bone's matrix. The model can be rotated and hung on other models.
+    // SKINNED primitives are drawn in it: jointMatrix = world[joint]*inverseBind
+    // is already in skeleton space. NON-SKINNED meshes (props in the hierarchy)
+    // are additionally multiplied by their own node's node_world — otherwise
+    // they sit in the file's "raw" scale.
     const float *inst = n->world;
     glEnable(GL_DEPTH_TEST); glUseProgram(p->prog);
     scene_uniforms_bind(&p->su,p->rc);
@@ -1390,9 +1390,9 @@ static void anim_render(SceneNode*n,float dt){
     if(p->u_tex>=0)glUniform1i(p->u_tex,0);
     for(int i=0;i<p->count;i++){
         AnimDrawItem*d=&p->items[i];
-        // В рэгдолле не-скелетные примитивы (встроенный GROUND-план модели и
-        // прочие «не части тела») не рисуются: их узлы тащатся физикой
-        // и разворачиваются в гигантские паруса.
+        // In ragdoll, non-skeletal primitives (the model's built-in GROUND plane
+        // and other "non body parts") are not drawn: their nodes get dragged by
+        // physics and unfurl into giant sails.
         if(p->rag&&d->rag_skip)continue;
         float model[16];
         if(!d->has_skin&&p->data&&d->node>=0&&d->node<p->data->nnode)
@@ -1412,12 +1412,12 @@ static void anim_render(SceneNode*n,float dt){
     glBindVertexArray(0);
 }
 
-// --- Точки крепления: матрица кости (хук scene.h) --------------------------------
-// Слот = индекс УЗЛА glTF. Отдаём node_world[slot] — матрицу кости в
-// пространстве МОДЕЛИ (без её мировой матрицы: её scene.c умножит сам).
-// Масштаб модели (p->scale) уже входит в мировую матрицу узла, а node_world
-// несёт только внутреннюю иерархию файла — поэтому цепочка получается
-// world(модель) * bone(модель) * local(ребёнок), как и ожидается.
+// --- Attachment points: bone matrix (scene.h hook) --------------------------------
+// Slot = glTF NODE index. We hand out node_world[slot] — the bone matrix in
+// MODEL space (without its world matrix: scene.c multiplies that itself).
+// The model scale (p->scale) is already in the node's world matrix, while
+// node_world carries only the file's internal hierarchy — so the chain comes
+// out world(model) * bone(model) * local(child), as expected.
 static void anim_attach_matrix(SceneNode *parent, int slot, float out[16])
 {
     AnimParams *p = parent ? parent->params : NULL;
@@ -1446,10 +1446,10 @@ int glb_anim_bone_find(SceneNode *n, const char *name)
     AnimParams *p = n && n->type && strcmp(n->type, "AnimInstance3D") == 0
                   ? n->params : NULL;
     if (!p || !p->data || !name || !name[0]) return -1;
-    // Точное совпадение имени
+    // Exact name match
     for (int i = 0; i < p->data->nnode; i++)
         if (strcmp(p->data->nodes[i].name, name) == 0) return i;
-    // Иначе — по подстроке (в GLB кости часто зовутся "mixamorig:Hand_R")
+    // Otherwise — substring match (in GLB bones are often named "mixamorig:Hand_R")
     for (int i = 0; i < p->data->nnode; i++)
         if (p->data->nodes[i].name[0] && strstr(p->data->nodes[i].name, name))
             return i;
@@ -1461,10 +1461,10 @@ static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int ski
     if(!d) return NULL;
     d->skin=skin; d->has_skin=has_skin; d->node=node;
     snprintf(d->mtl_name,sizeof d->mtl_name,"%s",P->matname);
-    // per-primitive remap: какие кости кожи реально используются (≤ MAX_BONES).
-    // Индексы костей (JOINTS_0) храним как int — компонент может быть ubyte
-    // (0..255) или ushort (0..65535, Blender/Sketchfab-FBX). Приводить к байту
-    // НЕЛЬЗЯ: индекс >255 затрётся, и вершины привяжутся к чужим костям.
+    // per-primitive remap: which skin bones are actually used (≤ MAX_BONES).
+    // Bone indices (JOINTS_0) are stored as int — the component may be ubyte
+    // (0..255) or ushort (0..65535, Blender/Sketchfab-FBX). Truncating to byte
+    // is FORBIDDEN: an index >255 gets clipped, and vertices bind to foreign bones.
     int used[MAX_BONES]; int n=0, overflow=0;
     if(has_skin){for(int i=0;i<P->vcount;i++)for(int k=0;k<4;k++){
         int b=P->bone_idx[4*i+k];
@@ -1531,13 +1531,13 @@ static AnimDrawItem*build_item(const AnimPrim*P,GLuint prog,int has_skin,int ski
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,fm); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,fmag);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,P->iw,P->ih,0,GL_RGBA,GL_UNSIGNED_BYTE,P->img); glGenerateMipmap(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D,0); }
-    else d->tex=resources_texture("img/notfound.png",4,GL_REPEAT,0);   // tex_owned=0 (кеш)
+    else d->tex=resources_texture("img/notfound.png",4,GL_REPEAT,0);   // tex_owned=0 (cache)
     return d;
 }
 
 SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,const RendererContext*rc){
-    // Один раз: узел AnimInstance3D при выходе из дерева (node_free_tree
-    // шлёт EV_NODE_EXIT ДО free(params)) освобождает все GL-объекты и данные.
+    // Once: for an AnimInstance3D node leaving the tree (node_free_tree sends
+    // EV_NODE_EXIT BEFORE free(params)) all GL objects and data are freed.
     static int s_registered=0;
     if(!s_registered){ events_listen(EV_NODE_EXIT,anim_node_exit,NULL); s_registered=1; }
     AnimGlb*a=glb_anim_parse(path);
@@ -1555,8 +1555,8 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     p->items=calloc((size_t)(a->ninst?a->ninst:1),sizeof* p->items);
     p->count=p->items?a->ninst:0;
     p->radius=0.0f;
-    // Per-vertex "открыто небу сверху" по всей модели (все примитивы файла):
-    // крыша/капот получат снег, пол/сиденья под крышей — нет.
+    // Per-vertex "open to the sky above" over the whole model (all primitives of the file):
+    // roof/hood get snow, floor/seats under the roof — do not.
     const float**vp=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vp);
     int*vc=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*vc);
     const unsigned**ip=malloc((size_t)(a->nprim?a->nprim:1)*sizeof*ip);
@@ -1579,7 +1579,7 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
         AnimDrawItem*bi=build_item(P,prog,hs,it->skin,it->node,
                                    (snow_mask&&prim_off)? snow_mask+prim_off[it->prim] : NULL);
         if(!bi) continue;
-        p->items[i]=*bi; free(bi);   // структура скопирована — обёртку освободить
+        p->items[i]=*bi; free(bi);   // struct copied — free the wrapper
         for(int v=0;v<P->vcount;v++){
             float dx=P->verts[3*v+0], dy=P->verts[3*v+1], dz=P->verts[3*v+2];
             float r2=dx*dx+dy*dy+dz*dz; if(r2>p->radius)p->radius=r2;
@@ -1598,18 +1598,18 @@ SceneNode *glb_anim_make_node(const char*path,const float pos[3],float scale,con
     glUseProgram(0);
     float size[3]={scale,scale,scale};
     SceneNode*n=node_new(path,"AnimInstance3D",pos,size,p,anim_update,anim_render);
-    // Масштаб — в трансформ узла (scene.c соберёт мировую матрицу).
+    // Scale — in the node transform (scene.c will build the world matrix from it).
     n->scl[0]=n->scl[1]=n->scl[2]=p->scale;
-    n->attach_fn=anim_attach_matrix;      // к костям можно цеплять узлы
+    n->attach_fn=anim_attach_matrix;      // nodes can be attached to bones
     build_bones(p);
-    node_update_transforms(n);            // мировая матрица до первого рендера
+    node_update_transforms(n);            // world matrix before the first render
     anim_reg_add(n);
     return n;
 }
 
-// --- Освобождение ресурсов узла (вызывается по EV_NODE_EXIT) ---------------------
-// node_free_tree сам освободит только структуру AnimParams; всё, что внутри
-// (GPU-буферы, текстуры, программа из кеша, данные модели), — здесь.
+// --- Release of node resources (called on EV_NODE_EXIT) ---------------------
+// node_free_tree itself frees only the AnimParams struct; everything inside it
+// (GPU buffers, textures, program from the cache, model data) is handled here.
 static void anim_free_resources(SceneNode*n){
     AnimParams*p=n?n->params:NULL; if(!p)return;
     anim_reg_remove(n);
@@ -1644,10 +1644,10 @@ static void anim_node_exit(const Event*e,void*user){
 
 void glb_anim_node_render(SceneNode*n,float dt){ anim_render(n,dt); }
 
-// --- Клипы анимации ------------------------------------------------------------
-// Все функции этого раздела работают ТОЛЬКО с узлом AnimInstance3D (AnimParams).
-// Для статичного GlbInstance3D params — GlbParams без поля data: чтение p->data
-// было бы мусором/SEGV. Проверяем тип узла и параметры заранее.
+// --- Animation clips ------------------------------------------------------------
+// All functions in this section work ONLY with an AnimInstance3D node (AnimParams).
+// For a static GlbInstance3D, params is a GlbParams without a data field: reading
+// p->data would be garbage/SEGV. Check the node type and parameters up front.
 static AnimParams*anim_params_of(SceneNode*n){
     if(!n||!n->type||strcmp(n->type,"AnimInstance3D")!=0)return NULL;
     return n->params;
@@ -1672,7 +1672,7 @@ void glb_anim_set_clip(SceneNode*n,int idx){
     AnimParams*p=anim_params_of(n);
     if(!p||!p->data||p->data->nclip<=0)return;
     p->cur_clip=idx<0?0:(idx>=p->data->nclip?p->data->nclip-1:idx);
-    p->anim_time=0;   // старт клипа с начала
+    p->anim_time=0;   // restart the clip from the beginning
     build_bones(p);
 }
 const char*glb_anim_current_clip(SceneNode*n){
@@ -1699,7 +1699,7 @@ void glb_anim_set_time(SceneNode*n,float t){
     if(t<0)t=0;
     if(d>0) t = p->loop ? fmodf(t,d) : (t>d?d:t);
     p->anim_time=t;
-    build_bones(p);   // обновить позу немедленно (не дожидаясь кадра)
+    build_bones(p);   // update the pose immediately (not waiting for a frame)
 }
 float glb_anim_time(SceneNode*n){
     AnimParams*p=anim_params_of(n);
@@ -1747,8 +1747,8 @@ void glb_anim_set_scale(SceneNode*n,float s){
     AnimParams*p=anim_params_of(n); if(!p)return;
     if(s<=0)s=1;
     p->scale=s;
-    // Масштаб теперь живёт в ТРАНСФОРМЕ узла (scene.c строит из него мировую
-    // матрицу) — p->scale остаётся для радиуса отсечения и запросов API.
+    // Scale now lives in the node TRANSFORM (scene.c builds the world matrix
+    // from it) — p->scale stays for the cull radius and API queries.
     n->scl[0]=n->scl[1]=n->scl[2]=s;
     n->size[0]=n->size[1]=n->size[2]=s;
     if(p->data){float r=0;
@@ -1762,5 +1762,5 @@ void glb_anim_set_scale(SceneNode*n,float s){
 void glb_anim_remove_node(SceneNode*n){
     if(!n||!anim_params_of(n))return;
     node_remove(n);
-    node_free_tree(n);   // посылает EV_NODE_EXIT -> anim_free_resources (unreg+GL)
+    node_free_tree(n);   // sends EV_NODE_EXIT -> anim_free_resources (unreg+GL)
 }

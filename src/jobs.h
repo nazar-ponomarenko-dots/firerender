@@ -1,14 +1,14 @@
 // ============================================================================
-//  jobs.h — мини-пул рабочих потоков (SDL3)
+//  jobs.h — mini worker-thread pool (SDL3)
 // ----------------------------------------------------------------------------
-//  Зачем: тяжёлые CPU-фазы (запекание масок, генерация чанков, декод
-//  картинок) делятся на диапазоны и крутятся на всех ядрах. GPU и
-//  рендер-контекст НЕ трогаем — работник только считает данные.
-//  Использование:
-//    jobs_init();                       // один раз при старте (лениво можно)
-//    jobs_parallel_for(first, count, fn, ud);   // fn(i0, i1, ud) по кусочкам
-//  fn получает ЗАКРЫТЫЙ диапазон [i0, i1) и свой ud. Вызов блокирует
-//  вызывающий поток до завершения всей работы. Потокобезопасно.
+//  Why: heavy CPU phases (baking masks, chunk generation, image decoding)
+//  are split into ranges and run across all cores. We do NOT touch the GPU
+//  or the render context — a worker only computes data.
+//  Usage:
+//    jobs_init();                       // once at startup (lazy is fine too)
+//    jobs_parallel_for(first, count, fn, ud);   // fn(i0, i1, ud) per slice
+//  fn receives a bounded half-open range [i0, i1) and its own ud.
+//  The call blocks the calling thread until all work is done. Thread-safe.
 // ============================================================================
 #ifndef FR_JOBS_H
 #define FR_JOBS_H
@@ -17,14 +17,14 @@
 
 typedef void (*JobsFn)(int i0, int i1, void *ud);
 
-// Поднять пул (число работников = ядра - 1, минимум 1). Повторный вызов — no-op.
+// Bring up the pool (worker count = cores - 1, minimum 1). Repeat calls are no-ops.
 void jobs_init(void);
 
-// Выполнить count итераций параллельно: пул режет [first, first+count) на
-// куски и зовёт fn из работников. При пуле из 1 потока — просто цикл.
+// Run count iterations in parallel: the pool cuts [first, first+count) into
+// slices and calls fn from the workers. With a 1-thread pool it's just a loop.
 void jobs_parallel_for(int first, int count, JobsFn fn, void *ud);
 
-// Число работников (включая вызывающего? нет — только фоновые).
+// Number of workers (including the caller? no — background threads only).
 int jobs_workers(void);
 
 #endif

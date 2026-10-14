@@ -1,10 +1,10 @@
 // ============================================================================
-//  gpu_gl.c — тонкие обёртки старого RHI-интерфейса (gpu.h) над SIMPLE RENDER
+//  gpu_gl.c — thin wrappers of the old RHI interface (gpu.h) over SIMPLE RENDER
 // ----------------------------------------------------------------------------
-//  Исторически gpu.h был первым сеамом оркестратора кадра (renderer.c,
-//  selection.c). Теперь вся реализация живёт в srender_gl.c (sr_*), а этот
-//  файл только транслирует gpu_* в sr_* — чтобы существующие вызывающие не
-//  трогать. Новый код должен звать sr_* напрямую.
+//  Historically gpu.h was the first seam of the frame orchestrator
+//  (renderer.c, selection.c). Now the whole implementation lives in
+//  srender_gl.c (sr_*), and this file only translates gpu_* into sr_* — so
+//  that existing callers stay untouched. New code should call sr_* directly.
 // ============================================================================
 #include "gpu.h"
 
@@ -14,7 +14,7 @@
 
 static SrDevice *s_sr = NULL;
 
-// Непрозрачный в gpu.h тип завершаем здесь: маркер «GL-бэкенд через sr».
+// The type kept opaque in gpu.h is completed here: a "GL backend via sr" marker.
 struct GpuDevice { int backend; };
 
 const GpuDevice *gpu_create(void)
@@ -24,7 +24,7 @@ const GpuDevice *gpu_create(void)
     return &s_dev;
 }
 
-// --- Пресет кадра ---
+// --- Frame setup ---
 void gpu_bind_framebuffer(const GpuDevice *d, GpuFbo fbo)
 { (void)d; sr_bind_fbo(s_sr, fbo); }
 
@@ -34,7 +34,7 @@ void gpu_viewport(const GpuDevice *d, int x, int y, int w, int h)
 void gpu_clear(const GpuDevice *d, float r, float g, float b, float a)
 { (void)d; sr_clear(s_sr, r, g, b, a, 1, 1); }
 
-// --- Состояние ---
+// --- State ---
 void gpu_depth_mask(const GpuDevice *d, int write_enabled)
 { (void)d; sr_depth_mask(s_sr, write_enabled); }
 
@@ -64,7 +64,7 @@ void gpu_blend_func(const GpuDevice *d, GpuBlendFac src, GpuBlendFac dst)
 void gpu_wireframe(const GpuDevice *d, int on)
 { (void)d; sr_wireframe(s_sr, on); }
 
-// --- Текстуры ---
+// --- Textures ---
 GpuTex gpu_tex_gen(const GpuDevice *d)
 { (void)d; return sr_tex_gen(s_sr); }
 
@@ -111,7 +111,7 @@ void gpu_tex_params_cubemap(const GpuDevice *d, GpuTex t, int linear_min)
 void gpu_active_texture(const GpuDevice *d, int unit)
 { (void)d; sr_tex_active(s_sr, unit); }
 
-// --- Фреймбуферы ---
+// --- Framebuffers ---
 GpuFbo gpu_fbo_gen(const GpuDevice *d)
 { (void)d; return sr_fbo_gen(s_sr); }
 
@@ -138,11 +138,11 @@ int gpu_fbo_complete(const GpuDevice *d)
 int gpu_fbo_current(const GpuDevice *d)
 { (void)d; return sr_fbo_current(s_sr); }
 
-// --- Чтение обратно ---
+// --- Readback ---
 void gpu_read_rgb(const GpuDevice *d, int x, int y, int w, int h, void *out)
 { (void)d; sr_read_pixels(s_sr, x, y, w, h, SR_PIX_RGB, out); }
 
-// --- Программы/шейдеры ---
+// --- Programs/shaders ---
 GpuProg gpu_program_new(const GpuDevice *d, const char *vs_path, const char *fs_path)
 { (void)d; return sr_prog_new(s_sr, vs_path, fs_path); }
 
@@ -155,7 +155,7 @@ void gpu_use_program(const GpuDevice *d, GpuProg prog)
 GpuLoc gpu_program_loc(const GpuDevice *d, GpuProg prog, const char *name)
 { (void)d; return (GpuLoc)sr_prog_loc(s_sr, prog, name); }
 
-// --- Вершинные массивы и буферы ---
+// --- Vertex arrays and buffers ---
 GpuVao gpu_vao_gen(const GpuDevice *d)
 { (void)d; return sr_vao_gen(s_sr); }
 
@@ -186,14 +186,14 @@ void gpu_vertex_attr_3f(const GpuDevice *d, GpuLoc loc,
                     (unsigned int)(size_t)offset, 0);
 }
 
-// --- Юниформы ---
+// --- Uniforms ---
 void gpu_uniform_mat4(const GpuDevice *d, GpuLoc loc, const float *m)
 { (void)d; sr_uniform_mat4(s_sr, loc, m); }
 
 void gpu_uniform_float3(const GpuDevice *d, GpuLoc loc, float x, float y, float z)
 { (void)d; sr_uniform_float3(s_sr, loc, x, y, z); }
 
-// --- Рисование ---
+// --- Drawing ---
 void gpu_draw_arrays(const GpuDevice *d, GpuPrim prim, int vertex_count)
 {
     (void)d;

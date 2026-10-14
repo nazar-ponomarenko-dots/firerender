@@ -1,14 +1,14 @@
 // ============================================================================
-//  touch.c — сенсорное управление (см. touch.h)
+//  touch.c — touch controls (see touch.h)
 // ----------------------------------------------------------------------------
-//  Схема: SDL конвертирует тапы в мышь, пока мы в меню (SDL_TOUCH_MOUSE_EVENTS
-//  = 1 — кнопки UI кликаются пальцем как раньше). В игре хинт выключается, и
-//  тач ведёт этот модуль:
-//    • левая треть экрана — виртуальный джойстик: направление = флаги g_act
-//      (те же, что у "+forward"/"+left" и т.д.), у края — бег;
-//    • остальной экран — свайп = обзор (дельту забирает camera.c);
-//    • короткий тап справа — прыжок (пульс +jump на 3 кадра).
-//  На десктопе (нет тач-устройств) модуль спит и ничего не стоит.
+//  Scheme: SDL converts taps into mouse events while we are in menus
+//  (SDL_TOUCH_MOUSE_EVENTS = 1 — UI buttons get clicked by finger as before).
+//  In game the hint is disabled and this module owns touch:
+//    • left third of the screen — virtual joystick: direction = g_act flags
+//      (the same as "+forward"/"+left" etc.), at the edge — run;
+//    • the rest of the screen — swipe = look (camera.c takes the delta);
+//    • short tap on the right — jump (a +jump pulse for 3 frames).
+//  On desktop (no touch devices) the module sleeps and costs nothing.
 // ============================================================================
 #include "touch.h"
 
@@ -21,25 +21,25 @@
 #include <math.h>
 #include <string.h>
 
-// Зоны экрана (доли ширины) — увеличены для телефона
-#define JOY_ZONE    0.42f    // левая 42% — джойстик (было 0.35, удобно большим пальцем)
-#define JOY_BASE_R  150.0f   // радиус базы джойстика, px (было 90, на 1080p мелко)
-#define JOY_DEAD    0.22f    // мёртвая зона чуть меньше — отзывчивее
-#define TAP_MS      250      // тап короче этого = прыжок
-#define TAP_MOVE_PX 28.0f    // ...и сместился меньше этого (шкала телефона)
+// Screen zones (width fractions) — enlarged for phones
+#define JOY_ZONE    0.42f    // left 42% — joystick (was 0.35, comfy for a thumb)
+#define JOY_BASE_R  150.0f   // joystick base radius, px (was 90, too small at 1080p)
+#define JOY_DEAD    0.22f    // dead zone slightly smaller — more responsive
+#define TAP_MS      250      // a tap shorter than this = jump
+#define TAP_MOVE_PX 28.0f    // ...and moved less than this (phone scale)
 
-static int s_avail = -1;         // кеш: есть ли тач-устройства (-1 — не проверяли)
-static int s_ui_mode = 1;        // 1 — меню (синтетика мыши включена)
-static int s_joystick = 0;       // палец на джойстике
+static int s_avail = -1;         // cache: whether touch devices exist (-1 — not checked)
+static int s_ui_mode = 1;        // 1 — menus (mouse synthesis enabled)
+static int s_joystick = 0;       // finger on the joystick
 static SDL_FingerID s_joy_id = 0;
-static float s_joy_ox, s_joy_oy; // центр джойстика (точка касания)
-static float s_joy_kx, s_joy_ky; // текущее смещение (для рисования)
-static int s_look = 0;           // палец обзора
+static float s_joy_ox, s_joy_oy; // joystick center (touch point)
+static float s_joy_kx, s_joy_ky; // current offset (for drawing)
+static int s_look = 0;           // look finger
 static SDL_FingerID s_look_id = 0;
-static float s_look_dx, s_look_dy;    // накопленная дельта для камеры
-static float s_look_moved;            // суммарный путь пальца (для тапа)
-static Uint64 s_look_t0;              // время касания (для тапа)
-static int s_jump_pulse;              // оставшиеся кадры пульса прыжка
+static float s_look_dx, s_look_dy;    // accumulated delta for the camera
+static float s_look_moved;            // total finger path (for tap detection)
+static Uint64 s_look_t0;              // touch time (for tap detection)
+static int s_jump_pulse;              // remaining frames of the jump pulse
 
 static float touch_scale(float w, float h)
 {
@@ -70,7 +70,7 @@ static void set_action(ActionId id, bool on)
 int touch_available(void)
 {
 #ifdef __ANDROID__
-    return 1; // на телефоне всегда тач, SDL_GetTouchDevices может вернуть 0 до первого тапа
+    return 1; // on a phone it is always touch; SDL_GetTouchDevices may return 0 before the first tap
 #endif
     if (s_avail < 0) {
         int count = 0;
@@ -81,8 +81,8 @@ int touch_available(void)
     return s_avail;
 }
 
-// Единый переключатель тач-элементов. Дефолт — автоматически: Android или
-// тачскрин -> 1, обычный десктоп -> 0. Пользователь перекрывает в config.cfg.
+// Single switch for touch elements. Default — automatic: Android or
+// touchscreen -> 1, plain desktop -> 0. The user overrides it in config.cfg.
 static void touch_register_cvar(void)
 {
     static int done = 0;
@@ -103,8 +103,8 @@ void touch_set_ui_mode(int ui_mode)
     if (!touch_available()) return;
     if (ui_mode == s_ui_mode) return;
     s_ui_mode = ui_mode;
-    // Хинт читается SDL живьём (есть hint-колбэк): в меню тапы = клики мыши,
-    // в игре синтетика отключена — камеру не дёргает.
+    // SDL reads the hint live (there is a hint callback): in menus taps = mouse
+    // clicks, in game the synthesis is off — the camera doesn't jerk.
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, ui_mode ? "1" : "0");
     if (!ui_mode) touch_reset();
 }
@@ -121,7 +121,7 @@ void touch_reset(void)
 void touch_frame(void)
 {
     if (s_jump_pulse > 0 && --s_jump_pulse == 0)
-        set_action(A_JUMP, false);   // пульс прыжка закончился
+        set_action(A_JUMP, false);   // jump pulse ended
 }
 
 void touch_look_take(float *dx, float *dy)
@@ -166,7 +166,7 @@ int touch_event(const SDL_Event *ev)
         float w, h;
         touch_size(&w, &h);
         float px = ev->tfinger.x * w, py = ev->tfinger.y * h;
-        // Кнопка прыжка — правый нижний угол 160x160 (скейлится как в hud_draw)
+        // Jump button — bottom-right corner 160x160 (scaled the same way as in hud_draw)
         float jb = 140.0f * touch_scale(w, h);
         if (px > w - jb - 30.0f && py > h - jb - 30.0f) {
             s_jump_pulse = 6; set_action(A_JUMP, true); return 1;
@@ -197,8 +197,8 @@ int touch_event(const SDL_Event *ev)
             return 1;
         }
         if (s_look && ev->tfinger.fingerID == s_look_id) {
-            // Чувствительность — тот же cvar cl_sens (рад/пиксель), что и у
-            // мыши: камера получает пиксели и умножает сама.
+            // Sensitivity — the same cl_sens cvar (radians/pixel) as for the
+            // mouse: the camera receives pixels and multiplies itself.
             s_look_dx += ev->tfinger.dx * w;
             s_look_dy += ev->tfinger.dy * h;
             s_look_moved += SDL_fabsf(ev->tfinger.dx * w) +
@@ -217,8 +217,8 @@ int touch_event(const SDL_Event *ev)
             return 1;
         }
         if (s_look && ev->tfinger.fingerID == s_look_id) {
-            // Короткий тап без движения — прыжок (пульс на несколько кадров,
-            // чтобы camera_update точно увидел флаг между кадрами)
+            // Short tap without movement — jump (a pulse for a few frames
+            // so that camera_update definitely sees the flag between frames)
             if (SDL_GetTicks() - s_look_t0 < TAP_MS && s_look_moved < TAP_MOVE_PX) {
                 s_jump_pulse = 3;
                 set_action(A_JUMP, true);
@@ -235,16 +235,16 @@ int touch_event(const SDL_Event *ev)
 
 void touch_hud_draw(int vw, int vh)
 {
-    // Кнопки/джойстик по квару r_touch_ui (дефолт — авто по наличию тача).
-    // На обычном десктопе это лишний артефакт в углу, там он выключен.
+    // Buttons/joystick gated by the r_touch_ui cvar (default — auto by touch presence).
+    // On a plain desktop this is a stray artifact in the corner; there it is off.
     touch_register_cvar();
     if (cvar_get("r_touch_ui") < 0.5f) return;
-    // На телефоне джойстик крупнее + кнопка прыжка справа всегда видна
+    // On a phone the joystick is bigger + the jump button on the right is always visible
     const float base[4] = { 0.5f, 0.5f, 0.5f, 0.28f };
     const float knob[4] = { 1.0f, 1.0f, 1.0f, 0.40f };
-    // Кнопка прыжка — правый нижний угол, 140x140 px. Картинка —
-    // img/ui/jump.png; файла нет -> движок показывает img/notfound.png
-    // (Source style, см. hud_button_draw / resources_texture).
+    // Jump button — bottom-right corner, 140x140 px. The image is
+    // img/ui/jump.png; no file -> the engine shows img/notfound.png
+    // (Source style, see hud_button_draw / resources_texture).
     float jb = 140.0f;
     float scale = touch_scale((float)vw, (float)vh);
     jb *= scale;

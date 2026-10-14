@@ -1,11 +1,11 @@
 // ============================================================================
-//  png.h — сохранение RGB-кадра в PNG (см. png.c)
+//  png.h — saving an RGB frame to PNG (see png.c)
 // ============================================================================
 #ifndef PNG_H
 #define PNG_H
 
-// Сохраняет кадр RGB (w*h*3 байт, строки сверху вниз) в PNG по пути path.
-// 0 — успех, -1 — ошибка (нет файла/памяти).
+// Saves the RGB frame (w*h*3 bytes, rows top to bottom) to PNG at path.
+// 0 on success, -1 on error (missing file/memory).
 int png_save(const char *path, int w, int h, const unsigned char *rgb);
 
 #endif

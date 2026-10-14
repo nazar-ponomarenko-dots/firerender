@@ -1,25 +1,25 @@
 -- ============================================================================
---  firerender: движковый скрипт (Lua 5.4)
---  Таблица `engine` (см. src/lua_engine.c):
+--  firerender: engine script (Lua 5.4)
+--  The `engine` table (see src/lua_engine.c):
 --    log / cvar_get / cvar_set / exec / cmd / on / update
 --    entity_class / entity_spawn / entity_kill / entity_find / entity_count
 --    entity_pos / entity_set_pos / entity_classname / world_loaded
---  События (engine.on): entity_spawn, entity_kill, console_open, console_close.
+--  Events (engine.on): entity_spawn, entity_kill, console_open, console_close.
 -- ============================================================================
 
 engine.log("[Lua] скрипты загружены (firerender)")
 
--- --- Консольная команда из Lua -------------------------------------------------
+-- --- Console command defined from Lua -------------------------------------------
 engine.cmd("lua_greet", function(args)
     local who = (args ~= "" and args) or "мир"
     engine.log("[Lua] привет, " .. who .. "!")
 end)
 
--- --- События консоли -------------------------------------------------------------
+-- --- Console events ---------------------------------------------------------------
 engine.on("console_open",  function() engine.log("[Lua] консоль открыта")  end)
 engine.on("console_close", function() engine.log("[Lua] консоль закрыта")  end)
 
--- --- Скриптовая сущность: маяк, качается на месте --------------------------------
+-- --- Scripted entity: a beacon bobbing in place -----------------------------------
 engine.entity_class("beacon", {
     spawn = function(e)
         engine.log("[Lua] маяк появился (" .. engine.entity_classname(e) .. ")")
@@ -35,7 +35,7 @@ engine.entity_class("beacon", {
     end,
 })
 
--- --- После загрузки мира: спавн маяка -------------------------------------------
+-- --- After the world loads: spawn the beacon --------------------------------------
 local world_up = false
 engine.update(function()
     if not world_up and engine.world_loaded() then
@@ -45,31 +45,31 @@ engine.update(function()
     end
 end)
 
--- --- Эффекты частиц (engine.fx_*) ------------------------------------------------
--- Регистрация своего пресета из Lua (параметры — как ParticleParams в particles.h)
+-- --- Particle effects (engine.fx_*) ------------------------------------------------
+-- Registering a custom preset from Lua (parameters mirror ParticleParams in particles.h)
 engine.fx_register("magic", {
-    dir      = { 0, 1, 0 },   -- вверх
-    spread   = 0.7,           -- широкий конус
-    speed    = { 1.0, 3.0 },  -- м/с
-    life     = { 0.5, 1.2 },  -- с
-    size     = { 0.3, 0.05 }, -- старт -> финал
+    dir      = { 0, 1, 0 },   -- upwards
+    spread   = 0.7,           -- wide cone
+    speed    = { 1.0, 3.0 },  -- m/s
+    life     = { 0.5, 1.2 },  -- s
+    size     = { 0.3, 0.05 }, -- start -> end
     alpha    = { 1.0, 0.0 },  -- fade out
     color    = { 0.4, 1.0, 0.8 },
-    gravity  = -0.5,          -- всплывает
+    gravity  = -0.5,          -- floats up
     drag     = 1.0,
-    sway     = 0.6,           -- покачивание
-    blend    = 1,             -- аддитив (светится)
+    sway     = 0.6,           -- sideways wobble
+    blend    = 1,             -- additive (glows)
     count    = 20,
 })
 
--- Команда lua_fx: engine.fx_burst("magic", x, y, z)
+-- Command lua_fx: engine.fx_burst("magic", x, y, z)
 engine.cmd("lua_fx", function()
     local x, y, z = engine.camera()
     engine.fx_burst("magic", x, y, z + 1, 0)
     engine.log("[Lua] магия: fx_burst(magic)")
 end)
 
--- Команда lua_rain: engine.fx_weather("rain") — дождь за игроком
+-- Command lua_rain: engine.fx_weather("rain") — rain behind the player
 engine.cmd("lua_rain", function(args)
     if args == "off" then
         engine.fx_weather("off")

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- firerender: SDLActivity поднимает нативный main() из libmain.so -->
+<!-- firerender: SDLActivity starts the native main() from libmain.so -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="ru.zaworg.firerender"
     android:versionCode="662"

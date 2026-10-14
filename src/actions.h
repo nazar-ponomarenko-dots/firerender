@@ -1,25 +1,25 @@
 // ============================================================================
-//  actions.h — активные действия (движение и т.п.)
+//  actions.h — active actions (movement, etc.)
 // ----------------------------------------------------------------------------
-//  Движение в HL идёт через "+команды": клавиша привязана к "+forward",
-//  при нажатии выполняется "+forward" (флаг=1), при отпускании "-forward"
-//  (флаг=0). Камера читает эти флаги, а не клавиши напрямую — поэтому
-//  любую клавишу можно переназначить через бинды.
+//  HL-style movement goes through "+commands": a key is bound to "+forward",
+//  pressing runs "+forward" (flag=1), releasing runs "-forward" (flag=0).
+//  The camera reads these flags instead of raw keys — which is why any key
+//  can be rebound through the binds.
 // ============================================================================
 #ifndef ACTIONS_H
 #define ACTIONS_H
 #include <stdbool.h>
 
 typedef enum {
-    A_FORWARD = 0,   // +forward  — вперёд
-    A_BACK,          // +back     — назад
-    A_LEFT,          // +left     — влево
-    A_RIGHT,         // +right    — вправо
-    A_JUMP,          // +jump     — прыжок (ходьба) / вверх (полёт)
-    A_DOWN,          // +down     — вниз (полёт)
-    A_SPEED,         // +speed    — бег (Shift)
-    A_DUCK,          // +duck     — присесть (C)
-    A_USE,           // +use      — взаимодействие (E)
+    A_FORWARD = 0,   // +forward  — move forward
+    A_BACK,          // +back     — move back
+    A_LEFT,          // +left     — strafe left
+    A_RIGHT,         // +right    — strafe right
+    A_JUMP,          // +jump     — jump (walk) / up (fly)
+    A_DOWN,          // +down     — down (fly)
+    A_SPEED,         // +speed    — run (Shift)
+    A_DUCK,          // +duck     — crouch (C)
+    A_USE,           // +use      — interact (E)
     A_COUNT
 } ActionId;
 
@@ -30,8 +30,8 @@ typedef enum {
     ACTION_SRC_COUNT
 } ActionSource;
 
-// Итоговое состояние — OR всех источников. Это не даёт отпусканию пальца
-// погасить действие, которое всё ещё удерживает клавиатура или геймпад.
+// The final state is the OR of all sources. This keeps a released touch
+// finger from clearing an action that the keyboard or gamepad still holds.
 extern bool g_act[A_COUNT];
 void action_set(ActionSource src, ActionId id, bool on);
 void action_clear_source(ActionSource src);

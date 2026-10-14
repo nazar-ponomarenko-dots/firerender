@@ -1,15 +1,15 @@
 // ============================================================================
-//  UI-текстура — фрагментный шейдер игровых кнопок/иконок HUD
+//  UI texture — fragment shader for HUD buttons/icons
 // ----------------------------------------------------------------------------
-//  Квад с RGBA-текстурой (PNG из img/), умноженной на uColor — тонировка
-//  и альфа. Не путать с text.fs: там альфа берётся из R-канала атласа
-//  шрифта, а тут — честная RGBA-текстура кнопки.
+//  A quad with an RGBA texture (PNG from img/) multiplied by uColor — tint
+//  and alpha. Not to be confused with text.fs: there alpha comes from the R
+//  channel of the font atlas, here it is a proper RGBA button texture.
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uTex;       // текстура кнопки (img/*.png)
-uniform vec4 uColor;          // тонировка (rgb) + прозрачность (a)
+uniform sampler2D uTex;       // button texture (img/*.png)
+uniform vec4 uColor;          // tint (rgb) + opacity (a)
 
 out vec4 FragColor;
 

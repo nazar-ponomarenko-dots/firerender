@@ -1,14 +1,14 @@
-// particle.vs — instanced-спрайт частицы, биллборд к камере. Квад в -0.5..0.5,
-// инстансы: attr1: pos(xyz), attr2: size(xy), attr3: color(rgb), attr4: alpha,
-// attr5: vel(xyz). Если vel != 0 — это стрик (дождь/капли): квад растягивается
-// вдоль направления скорости на длину size.y.
+// particle.vs — instanced particle sprite, camera-facing billboard. Quad in -0.5..0.5,
+// instances: attr1: pos(xyz), attr2: size(xy), attr3: color(rgb), attr4: alpha,
+// attr5: vel(xyz). If vel != 0 it is a streak (rain/drops): the quad stretches
+// along the velocity direction to length size.y.
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec3 aInstPos;
 layout(location = 2) in vec2 aInstSize;
 layout(location = 3) in vec3 aInstColor;
 layout(location = 4) in float aInstAlpha;
 layout(location = 5) in vec3 aInstVel;
-layout(location = 6) in float aInstPlain;   // 1 = без текстуры (яркий круг)
+layout(location = 6) in float aInstPlain;   // 1 = no texture (bright disc)
 
 uniform mat4 uViewProj;
 uniform vec3 uCamRight;
@@ -35,7 +35,7 @@ void main()
         vStreakLen = streakLen;
         world = aInstPos + v * (aPos.y * streakLen)
                + uCamRight * (aPos.x * aInstSize.x);
-        // Для стрика: U = ширина биллборда, V = позиция вдоль стрика (0..1)
+        // For a streak: U = billboard width, V = position along the streak (0..1)
         vUV = vec2(aPos.x + 0.5, aPos.y + 0.5);
     } else {
         vStreakLen = 0.0;

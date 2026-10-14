@@ -1,9 +1,9 @@
 // ============================================================================
-//  assets.c — создание текстур; загрузка картинок идёт через resources.c
+//  assets.c — texture creation; image loading goes through resources.c
 // ----------------------------------------------------------------------------
-//  stb_image (single-header загрузчик PNG/JPEG/...) подключён в
-//  resources.c (STB_IMAGE_IMPLEMENTATION там). Здесь — только обёртка
-//  load_img() над ресурсным кешем и создание GL-текстур.
+//  stb_image (single-header PNG/JPEG/... loader) is included in
+//  resources.c (STB_IMAGE_IMPLEMENTATION lives there). Here — only the
+//  load_img() wrapper over the resource cache and GL texture creation.
 // ============================================================================
 #include "assets.h"
 
@@ -14,8 +14,8 @@
 
 unsigned char *load_img(const char *name, int *w, int *h, int channels)
 {
-    // Кеш в resources.c: диск -> ../диск -> вшитые данные. Возвращённые
-    // пиксели НЕ освобождать — ими владеет кеш (живут до resources_shutdown).
+    // Cache lives in resources.c: disk -> ../disk -> embedded data. Do NOT free
+    // the returned pixels — the cache owns them (they live until resources_shutdown).
     return resources_image(name, w, h, channels);
 }
 

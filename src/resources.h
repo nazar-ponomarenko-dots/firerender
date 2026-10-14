@@ -1,96 +1,96 @@
 // ============================================================================
-//  resources.h — единый менеджер ресурсов: файлы, картинки, текстуры, шейдеры
+//  resources.h — unified resource manager: files, images, textures, shaders
 // ----------------------------------------------------------------------------
-//  Вся загрузка в проекте идёт через ОДИН модуль:
-//    - файлы:    пак карты -> диск -> ../диск (в папке игры или выше);
-//    - картинки: stb_image с кешем (ключ = путь + число каналов);
-//    - текстуры: GL-текстуры с кешем и подсчётом ссылок — один файл
-//                (напр. img/tree.png у 60 деревьев) грузится в GL один раз;
-//    - шейдеры:  кеш по паре (vs, fs) — один и тот же шейдер компилируется
-//                один раз (например field.vs+field.fs у FieldArea и Selection).
-//  Картинки живут до resources_shutdown() и вручную НЕ освобождаются;
-//  текстуры/программы освобождаются по счётчику ссылок
-//  (resources_*_release вместо glDelete*).
+//  All loading in the project goes through ONE module:
+//    - files:    map pak -> disk -> ../disk (in the game folder or above);
+//    - images:   stb_image with a cache (key = path + channel count);
+//    - textures: GL textures with a cache and refcounting — one file
+//                (e.g. img/tree.png used by 60 trees) is uploaded to GL once;
+//    - shaders:  cache keyed by the (vs, fs) pair — the same shader is
+//                compiled once (e.g. field.vs+field.fs for FieldArea and Selection).
+//  Images live until resources_shutdown() and are NOT freed manually;
+//  textures/programs are freed by refcount
+//  (resources_*_release instead of glDelete*).
 // ============================================================================
 #ifndef RESOURCES_H
 #define RESOURCES_H
 #include <stddef.h>       // size_t
 #include "gl_loader.h"
 
-// Читает файл целиком: ПАК КАРТЫ (если открыт) -> диск -> ../диск -> вшитые данные.
-// Возвращает malloc'нутый буфер (освобождать free()) или NULL.
+// Reads a whole file: MAP PAK (if open) -> disk -> ../disk -> embedded data.
+// Returns a malloc'ed buffer (free with free()) or NULL.
 unsigned char *resources_read_file(const char *path, unsigned int *size);
 
-// Текстовый файл (то же, что read_file, но с завершающим \0).
+// Text file (same as read_file, but with a terminating \0).
 char *resources_read_text(const char *path);
 
-// Загружает картинку через stb_image (с кешем). Возвращает указатель на
-// данные, которыми ВЛАДЕЕТ кеш — НЕ освобождать; живут до shutdown().
-// channels: 3 = RGB, 4 = RGBA. Если файла нет — подставляет img/notfound.png
-// (Source Engine style). NULL — только если и notfound.png отсутствует.
+// Loads an image via stb_image (cached). Returns a pointer to data OWNED
+// by the cache — do NOT free; it lives until shutdown().
+// channels: 3 = RGB, 4 = RGBA. If the file is missing — substitutes
+// img/notfound.png (Source Engine style). NULL only if notfound.png is also missing.
 unsigned char *resources_image(const char *path, int *w, int *h, int channels);
 
-// Строгий вариант без подмены: NULL — если файла нет. Для данных
-// (карта высот), которые не являются рендер-текстурами.
+// Strict variant without substitution: NULL if the file is missing. For data
+// (height maps) that are not render textures.
 unsigned char *resources_image_strict(const char *path, int *w, int *h,
                                       int channels);
 
-// Текстура из файла с кешем и подсчётом ссылок.
+// Texture from file, cached and refcounted.
 // wrap: GL_REPEAT / GL_CLAMP_TO_EDGE; linear: 1 = GL_LINEAR, 0 = GL_NEAREST.
 GLuint resources_texture(const char *path, int channels, int wrap, int linear);
 
-// Шейдерная программа из файлов (кеш + подсчёт ссылок).
+// Shader program from files (cache + refcounting).
 GLuint resources_program(const char *vs_path, const char *fs_path);
 
-// Уменьшить счётчик ссылок ресурса; при нуле — удалить GL-объект.
-// Использовать ВМЕСТО glDeleteProgram/glDeleteTextures для ресурсов кеша.
+// Decrease a resource's refcount; at zero — delete the GL object.
+// Use INSTEAD of glDeleteProgram/glDeleteTextures for cached resources.
 void resources_program_release(GLuint prog);
 void resources_texture_release(GLuint tex);
 
-// Перезапрос программы при hot-reload: берёт свежую программу пары и отдаёт
-// ссылку на старую. old == 0 (первый запрос из *_init) — просто загрузка.
-// Если компиляция не удалась, возвращает 0 и НЕ трогает старый id — вызывающий
-// обязан оставить узлу прежнюю программу (она жива до релиза).
+// Re-request a program on hot-reload: takes a fresh program for the pair and
+// releases the reference to the old one. old == 0 (first request from *_init)
+// — just a load. If compilation fails, returns 0 and does NOT touch the old
+// id — the caller must keep the node's previous program (it stays alive until released).
 GLuint resources_program_replace(GLuint old, const char *vs_path,
                                  const char *fs_path);
 
-// Инициализация — до любых загрузок (в начале main), и полная очистка —
-// в самом конце main, ПОСЛЕ освобождения всех модулей сцены.
+// Initialization — before any loading (at the start of main), and full cleanup
+// — at the very end of main, AFTER all scene modules are released.
 void resources_init(void);
 void resources_shutdown(void);
 
-// --- Hot-reload шейдеров (см. shader.h) ---------------------------------------
-// Хук пересборки: вызывается после перекомпиляции изменённых программ
-// (модуль повторно ищет uniform'ы и статичные uniform'ы).
+// --- Shader hot-reload (see shader.h) ---------------------------------------
+// Rebuild hook: called after modified programs are recompiled
+// (a module re-looks up its uniforms and static uniforms).
 typedef void (*ReshadeFn)(void);
 void resources_on_reshade(ReshadeFn fn);
 
-// Перекомпилирует в кеше шейдерные программы, чьи файлы изменились (по mtime).
-// Программы из zip-пака карты не проверяются. Возвращает число перекомпили-
-// рованных; при изменении зовёт все зарегистрированные хуки.
+// Recompiles cached shader programs whose files changed (by mtime).
+// Programs from the map's zip pak are not checked. Returns the number of
+// recompiled programs; when it changes, calls all registered hooks.
 int resources_shader_reload(void);
 
-// Hot-reload текстур: проверяет mtime файлов текстур на диске и
-// перезагружает изменённые. Текстуры из zip-пака не проверяются.
-// Возвращает число перезагруженных текстур.
+// Texture hot-reload: checks the mtime of texture files on disk and
+// reloads the changed ones. Textures from the zip pak are not checked.
+// Returns the number of reloaded textures.
 int resources_texture_reload(void);
 
-// --- Пак карты (maps/*.zip) ---------------------------------------------------
-// Открывает zip-архив карты: его файлы получают приоритет над диском и
-// вшитыми данными (карта может подсосать движковые ресурсы — их просто
-// кладут в архив либо оставляют в img/ движка). Вызывать при загрузке карты.
-// Возвращает 1, если архив открылся.
+// --- Map pak (maps/*.zip) ---------------------------------------------------
+// Opens the map's zip archive: its files take priority over disk and
+// embedded data (a map can pull in engine resources — they are simply put in
+// the archive or left in the engine's img/). Call when loading a map.
+// Returns 1 if the archive was opened.
 int resources_pak_open(const char *path);
 void resources_pak_close(void);
 int resources_pak_is_open(void);
 
-// Устанавливает базовую директорию ресурсов (путь к папке с map/, shaders/, img/).
-// Вызывать один раз при старте ДО любых загрузок ресурсов.
+// Sets the base resource directory (path to the folder with map/, shaders/, img/).
+// Call once at startup BEFORE any resource loading.
 void resources_set_base_dir(const char *dir);
 
-// Резолвит относительный путь в абсолютный, используя базовую директорию
-// и fallback-цепочку: base_dir/path, base_dir/../path, path, ../path.
-// Возвращает 1 если файл найден, 0 если нет. out буфер должен быть >= 512 байт.
+// Resolves a relative path to an absolute one using the base directory and
+// the fallback chain: base_dir/path, base_dir/../path, path, ../path.
+// Returns 1 if the file was found, 0 if not. The out buffer must be >= 512 bytes.
 int resources_resolve_path(const char *rel_path, char *out, size_t out_sz);
 
 #endif

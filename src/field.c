@@ -1,5 +1,5 @@
 // ============================================================================
-//  field.c — рамка поля пшеницы: замкнутая линия на поверхности рельефа
+//  field.c — wheat field frame: a closed line on the terrain surface
 // ============================================================================
 #include "field.h"
 
@@ -55,7 +55,7 @@ void field_node_render(SceneNode *n, float dt)
 {
     (void)dt;
     FieldParams *p = n->params;
-    if (p->rc->pass == RP_SHADOW) return;   // в карты теней рамка не пишет
+    if (p->rc->pass == RP_SHADOW) return;   // the frame does not write into shadow maps
     float x0 = n->pos[0] - n->size[0] * 0.5f, z0 = n->pos[2] - n->size[2] * 0.5f;
     float x1 = n->pos[0] + n->size[0] * 0.5f, z1 = n->pos[2] + n->size[2] * 0.5f;
     float v[5][3] = {
@@ -66,7 +66,7 @@ void field_node_render(SceneNode *n, float dt)
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, p->rc->viewproj);
-    glUniform3f(p->u_color, 0.95f, 0.75f, 0.15f);   // жёлтая рамка поля
+    glUniform3f(p->u_color, 0.95f, 0.75f, 0.15f);   // yellow field frame
     glBindVertexArray(p->vao);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STREAM_DRAW);
@@ -75,7 +75,7 @@ void field_node_render(SceneNode *n, float dt)
 
 void field_cleanup(SceneNode *n)
 {
-    if (!n) return;   // error-path scene_build: узел мог не создаться
+    if (!n) return;   // error-path scene_build: the node may not have been created
     FieldParams *p = n->params;
     resources_program_release(p->prog);
     glDeleteBuffers(1, &p->vbo);

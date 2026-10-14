@@ -1,20 +1,20 @@
 // ============================================================================
-//  vegetation.h — трава и пшеница (MeshInstance3D): инстансинг, 2 слоя
+//  vegetation.h — grass and wheat (MeshInstance3D): instancing, 2 layers
 // ----------------------------------------------------------------------------
-//  Слой 1 — СТАТИЧНЫЙ: вся карта покрыта травой/пшеницей с минимальной
-//  плотностью. Генерируется ОДИН раз при старте, заливается в VBO и больше
-//  НЕ трогается — растительность есть на всей карте с первой секунды.
-//  Слой 2 — ДИНАМИЧЕСКИЙ: вокруг камеры плотность растёт по LOD-кривой,
-//  пересоздаются только чанки, чья плотность заметно изменилась.
+//  Layer 1 — STATIC: the whole map is covered with grass/wheat at minimal
+//  density. Generated ONCE at startup, uploaded to a VBO and then
+//  never touched again — vegetation exists across the whole map from the first second.
+//  Layer 2 — DYNAMIC: around the camera the density grows along an LOD curve,
+//  only chunks whose density changed noticeably are rebuilt.
 //
-//  Спрайты — слои 2D-массива 256x178: 0/1/2 = три вида травы
-//  (grass.png, grass1.png, grass2.png), 3 = одуванчик (dandelions.png),
-//  4/5/6 = LOD пшеницы (wheat_lod0/1/2.png, LOD выбирается в шейдере по
-//  дистанции). Вид, поворот/размер/тон/наклон — атрибуты экземпляра
-//  (12 float). Отрисовка — 4 инстанс-вызова (2 статики + 2 динамики),
-//  один шейдер.
-//  Слой (quad index q): 0=статика трава, 1=статика пшеница,
-//                       2=динамика трава, 3=динамика пшеница.
+//  Sprites — layers of a 256x178 2D array: 0/1/2 = three grass kinds
+//  (grass.png, grass1.png, grass2.png), 3 = dandelion (dandelions.png),
+//  4/5/6 = wheat LODs (wheat_lod0/1/2.png, the LOD is picked in the shader by
+//  distance). Kind, rotation/size/tint/tilt — instance attributes
+//  (12 float). Drawing — 4 instanced calls (2 static + 2 dynamic),
+//  one shader.
+//  Layer (quad index q): 0=static grass, 1=static wheat,
+//                        2=dynamic grass, 3=dynamic wheat.
 // ============================================================================
 #ifndef VEGETATION_H
 #define VEGETATION_H
@@ -24,41 +24,41 @@
 #include "world.h"
 
 typedef struct {
-    const WorldState *world;            // данные мира: размеры, высоты, поле
-    const RendererContext *rc;          // кадровые данные (renderer.c)
-    SceneUniforms su;                   // общий uniform-набор сцены
-    GLuint prog;                        // общая программа растительности
-    GLuint vao_sg, vao_sw, vao_dg, vao_dw;   // статик/динамик x трава/пшеница
+    const WorldState *world;            // world data: sizes, heights, field
+    const RendererContext *rc;          // per-frame data (renderer.c)
+    SceneUniforms su;                   // scene uniform set shared with the rest
+    GLuint prog;                        // shared vegetation program
+    GLuint vao_sg, vao_sw, vao_dg, vao_dw;   // static/dynamic x grass/wheat
     GLuint vbo_sg, vbo_sw, vbo_dg, vbo_dw;
-    GLuint tex;                         // массив спрайтов (0-2=трава, 3=одуванчик, 4-6=пшеница)
-    GLint u_time;                       // время (ветер)
-    GLint u_walk;                       // 1 = ходьба (малый ветер)
-    GLint u_dyn;                        // 1 = динамический слой (только lod0/lod1)
-    GLint u_windboost;                  // ветер: 1 = штиль, 2 = дождь (x2)
-    GLint u_lodshift;                   // сдвиг LOD пшеницы (мобильный картошка)
-    GLint u_depthonly;                  // 1 = z-prepass (только глубина, без света)
-    GLint u_simple;                     // 1 = упрощённый рендер: циклы света/SSS/обводка → 0
-    GLint u_grassfall;                  // дистанция спада плотности травы (м) — плавное прореживание в шейдере
-    GLint u_grassfloor;                 // доля floor/полная (к чему прореживается трава к краю)
+    GLuint tex;                         // sprite array (0-2=grass, 3=dandelion, 4-6=wheat)
+    GLint u_time;                       // time (wind)
+    GLint u_walk;                       // 1 = walking (light wind)
+    GLint u_dyn;                        // 1 = dynamic layer (lod0/lod1 only)
+    GLint u_windboost;                  // wind: 1 = calm, 2 = rain (x2)
+    GLint u_lodshift;                   // wheat LOD shift (mobile low-end)
+    GLint u_depthonly;                  // 1 = z-prepass (depth only, no lighting)
+    GLint u_simple;                     // 1 = simplified render: light loops/SSS/outline → 0
+    GLint u_grassfall;                  // grass density falloff distance (m) — smooth thinning in the shader
+    GLint u_grassfloor;                 // floor share/full (the density grass thins towards at the field edge)
 } VegParams;
 
-// Создаёт узел Vegetation: компилирует шейдер, грузит спрайты в 2D-массив,
-// строит 4 VAO инстансинга, генерирует статичный слой на всю карту.
-// NULL при ошибке. Прямоугольник поля (g_field_*) должен быть задан заранее.
+// Creates the Vegetation node: compiles the shader, loads sprites into a 2D array,
+// builds 4 instancing VAOs, generates the static layer over the whole map.
+// NULL on error. The field rectangle (g_field_*) must be set beforehand.
 SceneNode *veg_make_node(const WorldState *w, const RendererContext *rc);
 
 void veg_node_render(SceneNode *n, float dt);
 
-// Для HUD: количество растений в слоях.
-// q: 0=статика трава, 1=статика пшеница, 2=динамика трава, 3=динамика пшеница.
+// For the HUD: plant counts per layer.
+// q: 0=static grass, 1=static wheat, 2=dynamic grass, 3=dynamic wheat.
 int veg_count(int q);
 void veg_set_visible_test(int v);
 
-// Освобождает CPU-массивы чанков и GL-ресурсы узла.
+// Frees the CPU chunk arrays and the node's GL resources.
 void veg_cleanup(SceneNode *n);
 
 #endif
 
-// Тестовые тумблеры замеров производительности (FR_TEST в main.c)
+// Test toggles for performance measurements (FR_TEST in main.c)
 void veg_set_static_main(int v);
 void veg_set_dyn_main(int v);

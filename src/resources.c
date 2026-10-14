@@ -1,16 +1,16 @@
 // ============================================================================
-//  resources.c — реализация менеджера ресурсов (см. resources.h)
+//  resources.c — resource manager implementation (see resources.h)
 // ----------------------------------------------------------------------------
-//  Один общий кеш (связный список): картинки (пиксели), текстуры и шейдерные
-//  программы. Ключ — строка, у текстур/программ ещё и счётчик ссылок.
+//  One shared cache (linked list): images (pixels), textures and shader
+//  programs. The key is a string; textures/programs also have a refcount.
 // ============================================================================
 #include "resources.h"
 
 #include "assets.h"      // make_texture
-#include "miniz/miniz.h" // zip-паки карт
+#include "miniz/miniz.h" // map zip packs
 #include "shader.h"      // compile_shader_file
 
-#define STB_IMAGE_IMPLEMENTATION   // реализация stb_image — ровно здесь
+#define STB_IMAGE_IMPLEMENTATION   // stb_image implementation lives right here
 #include "stb_image.h"
 
 #include <SDL3/SDL.h>
@@ -22,30 +22,30 @@
 #include <unistd.h>   // access()
 #include <time.h>
 
-// --- Пак карты (maps/*.zip) ----------------------------------------------------
+// --- Map pack (maps/*.zip) ----------------------------------------------------
 static mz_zip_archive s_pak;
 static int s_pak_open = 0;
-static char s_base_dir[512] = ".";   // базовая директория ресурсов (по умолчанию CWD)
+static char s_base_dir[512] = ".";   // resource base directory (defaults to CWD)
 
-// Устанавливает базовую директорию для поиска ресурсов.
-// Вызывать один раз при старте (из main, после определения пути к exe).
+// Sets the base directory for resource lookup.
+// Call once at startup (from main, after the exe path is determined).
 void resources_set_base_dir(const char *dir)
 {
     if (!dir || !dir[0]) return;
     snprintf(s_base_dir, sizeof s_base_dir, "%s", dir);
-    // Убираем trailing slash
+    // Strip the trailing slash
     size_t len = strlen(s_base_dir);
     if (len > 1 && (s_base_dir[len-1] == '/' || s_base_dir[len-1] == '\\'))
         s_base_dir[len-1] = 0;
     SDL_Log("Resources base dir: %s", s_base_dir);
 }
 
-// Очистка кеша от ресурсов карты (объявлена ниже, используется в pak_close)
+// Purges map resources from the cache (declared below, used in pak_close)
 static void cache_purge_pak(void);
 
 int resources_pak_open(const char *path)
 {
-    if (s_pak_open) resources_pak_close();   // защита от двойного открытия
+    if (s_pak_open) resources_pak_close();   // guard against double open
     memset(&s_pak, 0, sizeof s_pak);
     if (mz_zip_reader_init_file(&s_pak, path, 0)) {
         s_pak_open = 1;
@@ -61,7 +61,7 @@ void resources_pak_close(void)
     if (s_pak_open) {
         mz_zip_reader_end(&s_pak);
         s_pak_open = 0;
-        cache_purge_pak();       // ресурсы карты — долой из кеша
+        cache_purge_pak();       // map resources — drop from the cache
         SDL_Log("Map pak closed");
     }
 }
@@ -71,7 +71,7 @@ int resources_pak_is_open(void)
     return s_pak_open;
 }
 
-// Извлекает файл из пака (malloc'нутый буфер) или NULL
+// Extracts a file from the pack (malloc'ed buffer), or NULL
 static unsigned char *pak_read(const char *path, unsigned int *size)
 {
     if (!s_pak_open) return NULL;
@@ -82,21 +82,21 @@ static unsigned char *pak_read(const char *path, unsigned int *size)
     return buf;
 }
 
-// --- Файлы: пак карты -> диск -> ../диск --------------------------------------
-// Игра подсасывает ресурсы из своей папки (или на уровень выше — при
-// запуске с build/). Вшитых данных нет: для запуска нужны папки рядом.
-// Резолвит относительный путь в первый существующий файл по цепочке fallback
-// (единый источник правды для ВСЕХ модулей: audio, mapdata, lua, textures).
+// --- Files: map pack -> disk -> ../disk --------------------------------------
+// The game pulls resources from its own folder (or one level up — when
+// launched from build/). There is no baked-in data: running requires the folders nearby.
+// Resolves a relative path to the first existing file along the fallback chain
+// (single source of truth for ALL modules: audio, mapdata, lua, textures).
 int resources_resolve_path(const char *rel_path, char *out, size_t out_sz)
 {
     char path[512];
     snprintf(path, sizeof path, "%s", rel_path);
-    // Локальный файл (относительный путь уже абсолютный или есть в CWD)
+    // Local file (relative path already absolute or present in CWD)
     if (access(path, F_OK) == 0) {
         snprintf(out, out_sz, "%s", path);
         return 1;
     }
-    // Через базовую директорию
+    // Via the base directory
     if (s_base_dir[0] && s_base_dir[0] != '.') {
         char cand[512];
         int wr = snprintf(cand, sizeof cand, "%s/%s", s_base_dir, path);
@@ -110,7 +110,7 @@ int resources_resolve_path(const char *rel_path, char *out, size_t out_sz)
             return 1;
         }
     }
-    // Родительская директория текущей
+    // Parent of the current directory
     char up[512];
     int wr = snprintf(up, sizeof up, "../%s", path);
     if (wr > 0 && wr < (int)sizeof up && access(up, F_OK) == 0) {
@@ -122,8 +122,8 @@ int resources_resolve_path(const char *rel_path, char *out, size_t out_sz)
 
 unsigned char *resources_read_file(const char *path, unsigned int *size)
 {
-    // Пак: miniz отдаёт ровно размер файла — добавляем завершающий \0
-    // (нужен текстовым: map.json, шейдеры, скрипты).
+    // Pack: miniz returns exactly the file size — append a terminating \0
+    // (needed by text files: map.json, shaders, scripts).
     unsigned int psz = 0;
     unsigned char *pb = pak_read(path, &psz);
     if (pb) {
@@ -169,17 +169,17 @@ char *resources_read_text(const char *path)
     return (char *)resources_read_file(path, &sz);
 }
 
-// --- Кеш: общий список записей -------------------------------------------------
+// --- Cache: one shared list of entries -----------------------------------------
 typedef struct ResEntry {
-    char key[256];       // ключ (путь#параметры)
-    void *data;          // пиксели / GL-текстура / GL-программа
-    int refs;            // счётчик ссылок (текстуры/программы)
-    int from_pak;        // 1 = ресурс пришёл из zip карты (удаляется со сменой карты)
-    int iw, ih;          // размеры (картинки)
-    // Шейдерная программа: пути и mtime файлов (для hot-reload, см. resources_shader_reload)
+    char key[256];       // key (path#parameters)
+    void *data;          // pixels / GL texture / GL program
+    int refs;            // refcount (textures/programs)
+    int from_pak;        // 1 = resource came from the map zip (dropped when the map changes)
+    int iw, ih;          // dimensions (images)
+    // Shader program: file paths and mtimes (for hot-reload, see resources_shader_reload)
     char vs[128], fs[128];
     uint64_t vs_stamp, fs_stamp;
-    // Текстура: параметры создания и mtime файла (для hot-reload текстур)
+    // Texture: creation parameters and file mtime (for texture hot-reload)
     char tex_path[128];
     int tex_channels, tex_wrap, tex_linear;
     long tex_mt;
@@ -203,14 +203,14 @@ static ResEntry *cache_add(const char *key, void *data, int refs)
     snprintf(e->key, sizeof e->key, "%s", key);
     e->data = data;
     e->refs = refs;
-    e->from_pak = s_pak_open;   // ресурс из текущей zip-карты
+    e->from_pak = s_pak_open;   // resource from the current zip map
     e->iw = e->ih = 0;
     e->next = s_cache;
     s_cache = e;
     return e;
 }
 
-// Удаляет запись из списка (свобождает структуру, data не трогает).
+// Removes an entry from the list (frees the struct, leaves data alone).
 static void cache_remove(ResEntry *e)
 {
     if (s_cache == e) {
@@ -224,22 +224,23 @@ static void cache_remove(ResEntry *e)
     free(e);
 }
 
-// Удаляет из кеша все ресурсы, пришедшие из пака карты: при смене карты
-// те же пути (img/tree.png и т.п.) обязаны загрузиться заново.
-// Использует безопасную итерацию через указатель-на-указатель, чтобы
-// корректно удалять несколько подряд идущих элементов.
+// Drops from the cache every resource that came from the map pack: when the map
+// changes, the same paths (img/tree.png etc.) must reload from scratch.
+// Uses safe pointer-to-pointer iteration so several
+// consecutive elements can be removed correctly.
 static void cache_purge_pak(void)
 {
     ResEntry **pp = &s_cache;
     while (*pp) {
         ResEntry *e = *pp;
         if (e->from_pak) {
-            // Пак карты закрывается — его GL-объекты больше недействительны.
-            // Обычно scene_teardown до этого освободил их через refcount
-            // (resources_*_release: refs->0 + glDelete + cache_remove), и в
-            // кеше их уже нет. Если запись ещё здесь (refs > 0 — кто-то не
-            // дал release), освобождаем объект принудительно, иначе он
-            // утекает навсегда. img# (stbi-пиксели) принадлежат кешу.
+            // The map pack is closing — its GL objects are no longer valid.
+            // Normally scene_teardown freed them beforehand via refcount
+            // (resources_*_release: refs->0 + glDelete + cache_remove), so they
+            // are already gone from the cache. If an entry is still here
+            // (refs > 0 — someone skipped release), free the object
+            // forcefully, otherwise it leaks forever. img# (stbi pixels)
+            // belong to the cache.
             if (strncmp(e->key, "tex#", 4) == 0) {
                 GLuint t = (GLuint)(uintptr_t)e->data;
                 glDeleteTextures(1, &t);
@@ -256,7 +257,7 @@ static void cache_purge_pak(void)
     }
 }
 
-// mtime файла через единый резолвер путей (как resources_read_file)
+// File mtime through the unified path resolver (like resources_read_file)
 static long file_mtime(const char *path)
 {
     char resolved[512];
@@ -267,20 +268,20 @@ static long file_mtime(const char *path)
     return 0;
 }
 
-// --- Картинки ----------------------------------------------------------------
-// Загружает пиксели БЕЗ кеша (пак карты -> диск через резолвер).
-// Возвращает malloc-буфер (stbi), который обязан освободить вызывающий
-// через stbi_image_free(). NULL — не загрузилась.
-// from_pak (может быть NULL) получает 1, если данные ВЗЯЛИСЬ ИЗ ПАКА карты:
-// только такие записи кеша обязаны умереть вместе с паком (cache_purge_pak).
-// Движковые img/*.png читаются с диска и живут между картами.
+// --- Images ----------------------------------------------------------------
+// Loads pixels WITHOUT caching (map pack -> disk via the resolver).
+// Returns a malloc buffer (stbi) that the caller must free
+// with stbi_image_free(). NULL — load failed.
+// from_pak (may be NULL) gets 1 if the data CAME FROM THE MAP PACK:
+// only such cache entries must die together with the pack (cache_purge_pak).
+// Engine img/*.png files are read from disk and survive across maps.
 static unsigned char *image_load_raw(const char *path, int *w, int *h,
                                      int channels, int *from_pak)
 {
     int iw = 0, ih = 0, c = 0;
     unsigned char *p = NULL;
     if (from_pak) *from_pak = 0;
-    {   // пак карты
+    {   // map pack
         unsigned int sz = 0;
         unsigned char *pb = pak_read(path, &sz);
         if (pb) {
@@ -318,8 +319,8 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
     int from_pak = 0;
     unsigned char *p = image_load_raw(path, &iw, &ih, channels, &from_pak);
     if (!p) {
-        // Source Engine style: отсутствующая картинка заменяется notfound.png.
-        // Если и он пропал — честный NULL (не рекурсия: ниже защита).
+        // Source Engine style: a missing image is replaced with notfound.png.
+        // If that is gone too — honest NULL (no recursion: guarded below).
         if (strcmp(path, "img/notfound.png") == 0) return NULL;
         SDL_Log("Texture %s not found -> using img/notfound.png", path);
         p = image_load_raw("img/notfound.png", &iw, &ih, channels, &from_pak);
@@ -327,7 +328,7 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
     if (!p) return NULL;
     ResEntry *ne = cache_add(key, p, 1);
     if (!ne) { stbi_image_free(p); return NULL; }
-    ne->from_pak = from_pak;      // из пака — только если реально из архива
+    ne->from_pak = from_pak;      // from the pack — only if actually from the archive
     ne->iw = iw;
     ne->ih = ih;
     if (w) *w = iw;
@@ -335,15 +336,15 @@ unsigned char *resources_image(const char *path, int *w, int *h, int channels)
     return p;
 }
 
-// Строгий вариант без подмены не-текстурных данных (карта высот): NULL —
-// если картинки нет вообще, не подставлять notfound.png.
+// Strict variant without substituting non-texture data (height map): NULL —
+// if the image does not exist at all, do not fall back to notfound.png.
 unsigned char *resources_image_strict(const char *path, int *w, int *h,
                                       int channels)
 {
     return image_load_raw(path, w, h, channels, NULL);
 }
 
-// --- Текстуры ----------------------------------------------------------------
+// --- Textures ----------------------------------------------------------------
 GLuint resources_texture(const char *path, int channels, int wrap, int linear)
 {
     char key[256];
@@ -356,8 +357,8 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     int w = 0, h = 0;
     unsigned char *img = resources_image(path, &w, &h, channels);
     if (!img) {
-        // Source Engine style: отсутствующая текстура заменяется notfound.png.
-        // Если и он пропал — честный 0 (чёрный) вместо мусора (без рекурсии).
+        // Source Engine style: a missing texture is replaced with notfound.png.
+        // If that is gone too — honest 0 (black) instead of garbage (no recursion).
         if (strcmp(path, "img/notfound.png") == 0) return 0;
         return resources_texture("img/notfound.png", channels, wrap, linear);
     }
@@ -365,10 +366,10 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
                               wrap, linear);
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)tex, 1);
     if (!ne) { glDeleteTextures(1, &tex); return 0; }
-    // «Из пака» наследуем от записи ПИКСЕЛЕЙ: движковые img/*.png читаются с
-    // диска даже при открытом паке и обязаны выживать смену карты (иначе на
-    // повторной загрузке они грузятся заново — с чужими глобальными флагами
-    // stb_image и лишней работой).
+    // We inherit "from the pack" from the PIXELS entry: engine img/*.png files are read
+    // from disk even with a pack open and must survive a map change (otherwise
+    // on a reload they get loaded again — with foreign global stb_image
+    // flags and extra work).
     {
         char ikey[256];
         snprintf(ikey, sizeof ikey, "img#%s#%d", path, channels);
@@ -377,7 +378,7 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     }
     ne->iw = w;
     ne->ih = h;
-    // Для hot-reload текстур: путь и параметры + mtime (если не из пака)
+    // For texture hot-reload: path and parameters + mtime (if not from the pack)
     snprintf(ne->tex_path, sizeof ne->tex_path, "%s", path);
     ne->tex_channels = channels;
     ne->tex_wrap = wrap;
@@ -386,7 +387,7 @@ GLuint resources_texture(const char *path, int channels, int wrap, int linear)
     return tex;
 }
 
-// Hot-reload текстур: перезагружает изменённые на диске файлы
+// Texture hot-reload: reloads files that changed on disk
 int resources_texture_reload(void)
 {
     int changed = 0;
@@ -417,7 +418,7 @@ int resources_texture_reload(void)
         e->iw = w;
         e->ih = h;
         e->tex_mt = mt;
-        // Обновляем и кеш картинки (img#...) — свежие пиксели для новых текстур
+        // Also update the image cache (img#...) — fresh pixels for new textures
         {
             char ikey[256];
             snprintf(ikey, sizeof ikey, "img#%s#%d", e->tex_path,
@@ -452,8 +453,8 @@ void resources_texture_release(GLuint tex)
     SDL_Log("resources: release of unknown texture %u", tex);
 }
 
-// --- Шейдерные программы ------------------------------------------------------
-// Линкует vs+fs в программу (общая для создания и hot-reload'а)
+// --- Shader programs ------------------------------------------------------
+// Links vs+fs into a program (shared by creation and hot-reload)
 static GLuint program_link(const char *vs_path, const char *fs_path)
 {
     GLuint vs = compile_shader_file(GL_VERTEX_SHADER, vs_path);
@@ -494,9 +495,9 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     if (!prog) return 0;
     ResEntry *ne = cache_add(key, (void *)(uintptr_t)prog, 1);
     if (!ne) { glDeleteProgram(prog); return 0; }
-    // Для hot-reload: пути и mtime файлов. cache_add ставит from_pak = "пак
-    // открыт", но шейдер может лежать на ДИСКЕ (пак содержит только свои
-    // шейдеры карты). Уточняем по факту наличия файла в архиве.
+    // For hot-reload: file paths and mtimes. cache_add sets from_pak = "pack
+    // open", but the shader may live on DISK (the pack only contains its map's
+    // shaders). Refine based on whether the file is actually in the archive.
     if (s_pak_open)
         ne->from_pak = (mz_zip_reader_locate_file(&s_pak, vs_path, NULL, 0) >= 0 ||
                         mz_zip_reader_locate_file(&s_pak, fs_path, NULL, 0) >= 0);
@@ -511,30 +512,30 @@ GLuint resources_program(const char *vs_path, const char *fs_path)
     return prog;
 }
 
-// --- Hot-reload шейдеров --------------------------------------------------------
+// --- Shader hot-reload --------------------------------------------------------
 static ReshadeFn *s_reshade;
 static int s_reshade_n, s_reshade_cap;
 
-// Отложенное удаление старых программ после hot-reload. Старую программу НЕЛЬЗЯ
-// удалять сразу: её id ещё держат живые узлы (glb/mesh/anim не слушают reshade),
-// и они продолжают её рисовать. Держим до тех пор, пока ВСЕ держатели не вернут
-// её через resources_program_release (remaining — сколько релизов осталось).
+// Deferred deletion of old programs after hot-reload. The old program must NOT be
+// deleted immediately: live nodes still hold its id (glb/mesh/anim do not listen to
+// reshade), and they keep drawing with it. Keep it until ALL holders return
+// it via resources_program_release (remaining — how many releases are left).
 typedef struct { GLuint prog; int remaining; } PendingProg;
 static PendingProg *s_prog_pending;
 static int s_prog_pending_n, s_prog_pending_cap;
 
 static void prog_pending_add(GLuint prog, int remaining)
 {
-    if (remaining <= 0) { glDeleteProgram(prog); return; }   // держателей нет
-    // Уже есть такой id (повторный reload до релиза) — складываем релизы
+    if (remaining <= 0) { glDeleteProgram(prog); return; }   // no holders
+    // This id is already pending (repeat reload before release) — sum the releases
     for (int i = 0; i < s_prog_pending_n; i++)
         if (s_prog_pending[i].prog == prog) { s_prog_pending[i].remaining += remaining; return; }
     if (s_prog_pending_n == s_prog_pending_cap) {
         int cap = s_prog_pending_cap ? s_prog_pending_cap * 2 : 32;
         PendingProg *p = realloc(s_prog_pending, (size_t)cap * sizeof *p);
         if (!p) {
-            // Старый id ещё используют живые узлы: удалять его при OOM нельзя.
-            // Безопаснее оставить редкую утечку до завершения GL-контекста.
+            // Live nodes still use the old id: deleting it under OOM is not allowed.
+            // Safer to keep a rare leak until the GL context goes away.
             SDL_Log("resources: pending shader list OOM; keeping program %u", prog);
             return;
         }
@@ -546,7 +547,7 @@ static void prog_pending_add(GLuint prog, int remaining)
     s_prog_pending_n++;
 }
 
-// Возвращает 1, если id найден в отложенных и обработан (релиз засчитан).
+// Returns 1 if the id was found among the pending ones and handled (release counted).
 static int prog_pending_release(GLuint prog)
 {
     for (int i = 0; i < s_prog_pending_n; i++) {
@@ -584,19 +585,19 @@ int resources_shader_reload(void)
         uint64_t stamp0 = shader_source_stamp(e->vs);
         uint64_t stamp1 = shader_source_stamp(e->fs);
         if (stamp0 == e->vs_stamp && stamp1 == e->fs_stamp) continue;
-        // Перекомпиляция: новый id встаёт в кеш, а старую программу отдаём в
-        // отложенное удаление — её ещё рисуют узлы, не слушающие reshade.
-        // ВАЖНО: refcount счёта СТАРОЙ программы уходит в pending, поэтому для
-        // нового id счётчик обнуляем: узлы, слушающие reshade, пере-запрашивают
-        // его через make_program (+1 ref), а старые держатели релизят свой
-        // старый id через отложенный список. Не обнулим — новый id унаследует
-        // чужой счёт и никогда не удалится.
+        // Recompilation: the new id goes into the cache, and the old program is handed to
+        // deferred deletion — nodes that do not listen to reshade are still drawing with it.
+        // IMPORTANT: the refcount of the OLD program moves into pending, so for the
+        // new id we zero the counter: nodes listening to reshade re-request
+        // it via make_program (+1 ref), while old holders release their
+        // old id through the pending list. If we don't zero it, the new id inherits
+        // someone else's count and never gets deleted.
         GLuint prog = program_link(e->vs, e->fs);
         if (!prog) continue;
         GLuint old = (GLuint)(uintptr_t)e->data;
         prog_pending_add(old, e->refs);
         e->data = (void *)(uintptr_t)prog;
-        e->refs = 0;                 // новый id: держатели пере-запросят
+        e->refs = 0;                 // new id: holders will re-request it
         e->vs_stamp = stamp0;
         e->fs_stamp = stamp1;
         SDL_Log("shader reloaded: %s + %s", e->vs, e->fs);
@@ -611,7 +612,7 @@ int resources_shader_reload(void)
 void resources_program_release(GLuint prog)
 {
     if (!prog) return;
-    // Сначала — отложенные (старые после hot-reload) программы
+    // First — the pending (old, post-hot-reload) programs
     if (prog_pending_release(prog)) return;
     for (ResEntry *e = s_cache; e; e = e->next) {
         if (strncmp(e->key, "prog#", 5) != 0) continue;
@@ -625,23 +626,23 @@ void resources_program_release(GLuint prog)
     SDL_Log("resources: release of unknown program %u", prog);
 }
 
-// Перезапрос программы для hot-reload: берёт свежую ссылку на текущую
-// программу пары и только потом отдаёт старую. Именно это балансирует
-// refcount при reload: без release(old) каждый hot-reload утекал по одной
-// ссылке на программу у каждого слушателя reshade.
-// Порядок важен: сперва запрашиваем новую (если пара не собралась — старый
-// id остаётся у узла жив и невредим), релиз старой — после успеха.
-// old == 0 (первый вызов из *_init) — release пропускается.
+// Program re-request for hot-reload: takes a fresh reference to the current
+// program of the pair and only then releases the old one. That is exactly what balances
+// the refcount on reload: without release(old), every hot-reload leaked one
+// program reference per reshade listener.
+// Order matters: request the new one first (if the pair fails to link, the old
+// id stays with the node alive and unharmed), release the old one only after success.
+// old == 0 (first call from *_init) — release is skipped.
 GLuint resources_program_replace(GLuint old, const char *vs_path,
                                  const char *fs_path)
 {
     GLuint prog = resources_program(vs_path, fs_path);
-    if (!prog) return 0;                 // не собралась — старую не трогаем
+    if (!prog) return 0;                 // failed to link — leave the old one alone
     if (old) resources_program_release(old);
     return prog;
 }
 
-// --- Жизненный цикл -----------------------------------------------------------
+// --- Lifecycle -----------------------------------------------------------
 void resources_init(void)
 {
     s_cache = NULL;
@@ -649,8 +650,8 @@ void resources_init(void)
 
 void resources_shutdown(void)
 {
-    // Отложенные программы (старые id после hot-reload): их держатели могли
-    // не дожить до shutdown — на выходе удаляем всё разом.
+    // Pending programs (old ids after hot-reload): their holders may not
+    // have lived until shutdown — on exit delete them all at once.
     for (int i = 0; i < s_prog_pending_n; i++)
         glDeleteProgram(s_prog_pending[i].prog);
     free(s_prog_pending);

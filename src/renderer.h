@@ -1,15 +1,15 @@
 // ============================================================================
-//  renderer.h — оркестрация рендера кадра (см. renderer.c)
+//  renderer.h — orchestration of frame rendering (see renderer.c)
 // ----------------------------------------------------------------------------
-//  Отрисовка 3D-сцены (обход дерева узлов), постобработка (bloom, воксельный
-//  туман) и 2D-оверлеи (миникарта, HUD, прицел, сообщение карты, панели
-//  отладки). Владеет FBO сцены/тумана (bloom + voxfog), которые создаются
-//  при загрузке мира (renderer_setup) и уничтожаются при выгрузке.
-//  Состояние мира берётся из Game* (см. game.h) — глобалов нет.
+//  Draws the 3D scene (tree traversal of nodes), post-processing (bloom, voxel
+//  fog) and 2D overlays (minimap, HUD, crosshair, map message, debug
+//  panels). Owns the scene/fog FBOs (bloom + voxfog), which are created
+//  on world load (renderer_setup) and destroyed on unload.
+//  World state comes from Game* (see game.h) — no globals.
 //
-//  Здесь же живёт ЕДИНЫЙ RendererContext (см. render_ctx.h): каждый кадр
-//  renderer_frame собирает в него камеру/свет/туман/тени, и модули сцены
-//  читают его через renderer_context() вместо собственных cam/sun.
+//  The SINGLE RendererContext lives here too (see render_ctx.h): each frame
+//  renderer_frame fills it with camera/lights/fog/shadows, and the scene modules
+//  read it through renderer_context() instead of their own cam/sun.
 // ============================================================================
 #ifndef RENDERER_H
 #define RENDERER_H
@@ -18,57 +18,57 @@
 #include "render_ctx.h"
 #include "scene.h"
 
-// --- Рендер-контекст ------------------------------------------------------------
-// Текущий кадровый контекст сцены (заполняется в renderer_frame). Указатель
-// стабилен — модули сцены получают его при создании узла и читают в render.
+// --- Render context ------------------------------------------------------------
+// Current per-frame scene context (filled in renderer_frame). The pointer is
+// stable — scene modules get it at node creation and read it in render.
 const RendererContext *renderer_context(void);
 
-// --- Размер окна в пикселях ------------------------------------------------------
-// Актуальный размер окна (обновляется main.c и input.c при ресайзе). Модули
-// используют рендер-контекст (rc->vw/vh) или эти функции — вместо глобалов.
+// --- Window size in pixels ------------------------------------------------------
+// Actual window size (updated by main.c and input.c on resize). Modules
+// use the render context (rc->vw/vh) or these functions — instead of globals.
 int renderer_vw(void);
 int renderer_vh(void);
 
-// Устанавливает размер окна в пикселях (вызывать при старте и на ресайз).
+// Sets the window size in pixels (call at startup and on resize).
 void renderer_set_viewport(int vw, int vh);
 
-// Чтение кадра для скриншотов (RGB, 3 байта/пиксель, снизу вверх).
-// На GLES читает scene-target: default framebuffer у EGL-драйверов
-// отдаёт чёрное, хотя на экран после swap картинка идёт.
+// Frame readback for screenshots (RGB, 3 bytes/pixel, bottom-up).
+// On GLES it reads the scene-target: the default framebuffer on EGL drivers
+// returns black, although after swap the picture shows on screen.
 void renderer_read_pixels(unsigned char *px, int vw, int vh);
 
-// --- Жизненный цикл ------------------------------------------------------------
-// Создаёт FBO bloom'а и тумана (размер окна). Вызывать при загрузке мира.
+// --- Lifecycle ------------------------------------------------------------
+// Creates the bloom and fog FBOs (window size). Call on world load.
 void renderer_setup(const WorldState *w, int vw, int vh);
 
-// Пересоздаёт FBO при изменении размера окна (мир загружен).
+// Recreates the FBOs when the window size changes (world loaded).
 void renderer_resize(int vw, int vh);
 
-// Уничтожает FBO bloom'а и тумана. Вызывать при выгрузке мира.
+// Destroys the bloom and fog FBOs. Call on world unload.
 void renderer_teardown(void);
 
-// Каркасный режим (cvar r_wireframe, из main.c sync_cvars).
+// Wireframe mode (cvar r_wireframe, from main.c sync_cvars).
 void renderer_set_wireframe(int on);
 
-// Cubemap reflection texture (6 граней от позиции игрока, вода сэмплит
-// её по вектору отражения; обновляется по мере движения игрока).
+// Cubemap reflection texture (6 faces from the player position, water samples
+// it by the reflection vector; updated as the player moves).
 GpuTex renderer_refl_cubemap(void);
 
-// Cubemap capture: отрендерить 6 граней в позиции pos и сохранить их
-// в cubemaps/*.png (размер size, лимит 512).
+// Cubemap capture: render 6 faces at position pos and save them
+// to cubemaps/*.png (size size, capped at 512).
 void renderer_cubemap_capture_at(Game *g, const float *pos, int size);
 
-// --- Кадр -----------------------------------------------------------------------
-// Начало кадра: сброс профайлера, очистка сцены (в FBO bloom'а, если мир
-// загружен) цветом тумана.
+// --- Frame -----------------------------------------------------------------------
+// Frame start: profiler reset, scene clear (into the bloom FBO if the world is
+// loaded) with the fog color.
 void renderer_begin(void);
 
-// 3D-сцена + постобработка (bloom/voxfog) + UI (миникарта/HUD).
-// g — состояние мира (узлы, камера, солнце). draw_3d — рисовать мир
-// (0 = только фон, напр. меню поверх фотки).
+// 3D scene + post-processing (bloom/voxfog) + UI (minimap/HUD).
+// g — world state (nodes, camera, sun). draw_3d — draw the world
+// (0 = background only, e.g. the menu over a photo).
 void renderer_frame(Game *g, float dt, int draw_3d);
 
-// Конец кадра: прицел-крест, сообщение карты, панели snd_debug/profiler.
+// Frame end: crosshair, map message, snd_debug/profiler panels.
 void renderer_end(Game *g, float dt);
 
 #endif

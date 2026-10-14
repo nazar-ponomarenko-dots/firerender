@@ -1,17 +1,17 @@
 // ============================================================================
-//  snowmask.c — пометка вершин меша "открыто небу сверху" (для снега на GLB)
+//  snowmask.c — marks mesh vertices "open to the sky above" (for snow on GLB)
 // ----------------------------------------------------------------------------
-//  Запечённая мировая маска "видимость неба" (terrain_wetness_mask_bake)
-//  построена по статике карты и НЕ видит glb-модели, поэтому над машиной
-//  она показывает "открыто" и снег сыпался внутрь салона. Здесь мы делаем
-//  локальный, на модель, тест: для каждой вершины пускаем строго вертикальный
-//  луч вверх и смотрим, не пересекает ли он собственную геометрию модели.
-//  Если над вершиной что-то есть (крыша над полом/сиденьем) — 0 (снег не
-//  дойдёт). Если сверху чисто (крыша/капот/багажник) — 1.
+//  The baked world "sky visibility" mask (terrain_wetness_mask_bake) is
+//  built from the map's statics and does NOT see glb models, so above a car
+//  it reports "open" and snow used to fall into the cabin. Here we run a
+//  local, per-model test: for every vertex we cast a strictly vertical ray
+//  upward and check whether it crosses the model's own geometry. If
+//  something is above the vertex (a roof over the floor/seat) — 0 (snow
+//  won't reach it). If it is clear above (roof/hood/trunk) — 1.
 //
-//  Ускорение: кубик-грид по XZ проекции; в каждой ячейке лежат только те
-//  треугольники, чья XZ-проекция её покрывает. Для равной модели это
-//  десятки ячеек и по паре треугольников на запрос.
+//  Speedup: a cell grid over the XZ projection; each cell holds only the
+//  triangles whose XZ projection covers it. For a real model that is a few
+//  dozen cells and a couple of triangles per query.
 // ============================================================================
 #include "snowmask.h"
 
@@ -19,7 +19,7 @@
 #include <string.h>
 #include <math.h>
 
-// Самая маленькая "высота" над точкой, которую считаем преградой (м).
+// Smallest clearance above a point that we count as an obstacle (m).
 #define SNOWMASK_EPS 1e-4f
 
 float *snow_mask_compute(const float *const *verts, const int *vcounts,
@@ -35,7 +35,7 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
     for (int p = 0; p < nprims; p++) ntris += idxcounts[p] / 3;
     if (ntris <= 0) return NULL;
 
-    // Собираем треугольники объединения и его XZ-рамку.
+    // Gather the triangles of the union and its XZ bounds.
     float *tri = malloc((size_t)ntris * 9 * sizeof(float));
     if (!tri) return NULL;
     float xmin = 1e30f, xmax = -1e30f, zmin = 1e30f, zmax = -1e30f;
@@ -77,7 +77,7 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
     nz = nz < 1 ? 1 : nz;
     size_t ncells = (size_t)nx * nz;
 
-    // Пасс 1: сколько треугольников в упор попадёт в каждую ячейку.
+    // Pass 1: count how many triangles fall into each cell.
     size_t *cnt = calloc(ncells, sizeof *cnt);
     for (long k = 0; k < ntris; k++) {
         float ax = tri[9 * k + 0], az = tri[9 * k + 2];
@@ -125,7 +125,7 @@ float *snow_mask_compute(const float *const *verts, const int *vcounts,
                 lst[cur[(size_t)j * nx + i]++] = (size_t)k;
     }
 
-    // Пасс 2: для каждой вершины — вертикальный луч вверх по её ячейке.
+    // Pass 2: for each vertex — a vertical ray up through its cell.
     float *out = malloc((size_t)total * sizeof(float));
     long voff = 0;
     for (int p = 0; p < nprims; p++) {

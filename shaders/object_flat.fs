@@ -1,10 +1,10 @@
 // ============================================================================
-//  ObjectFlat — фрагментный шейдер объекта БЕЗ освещения
+//  ObjectFlat — fragment shader of an object WITHOUT lighting
 // ----------------------------------------------------------------------------
-//  Цвет = текстура * uTint. Используется встроенным режимом "shader": "flat"
-//  (иконки, плашки, интерфейсные объекты) и служит образцом для СВОЕГО
-//  шейдера: объявляйте только те uniform'ы, что нужны, движок найдёт их по
-//  имени и передаст значение.
+//  Color = texture * uTint. Used by the built-in "shader": "flat" mode
+//  (icons, plaques, UI objects) and serves as a template for YOUR OWN shader:
+//  declare only the uniforms you need, the engine finds them by name and
+//  passes the value.
 // ============================================================================
 
 in vec2 vUV;

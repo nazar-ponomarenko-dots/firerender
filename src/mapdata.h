@@ -1,167 +1,169 @@
 // ============================================================================
-//  mapdata.h — данные карты из map/map.json: поле, источники света, объекты
+//  mapdata.h — map data from map/map.json: field, lights, objects
 // ----------------------------------------------------------------------------
-//  Всё, что касается карты, лежит в папке map/ и подтягивается игрой оттуда:
-//    map/map.png   — карта высот (яркость = высота, цвет = цвет земли);
-//    map/map.json  — метаданные: путь к карте, прямоугольник поля,
-//                    список источников света, список объектов (моделей).
-//  JSON парсится мини-парсером json.h один раз при старте (mapdata_load),
-//  дальше модули сцены читают значения через функции ниже. Если какого-то
-//  блока в JSON нет — модули используют свои значения по умолчанию.
+//  Everything map-related lives in the map/ folder and is pulled by the game
+//  from there:
+//    map/map.png   — height map (brightness = height, color = ground color);
+//    map/map.json  — metadata: height map path, field rectangle,
+//                    light list, object (model) list.
+//  The JSON is parsed once at startup by the mini parser in json.h
+//  (mapdata_load), after that scene modules read values through the functions
+//  below. If a block is missing from the JSON — modules use their own
+//  defaults.
 // ============================================================================
 #ifndef MAPDATA_H
 #define MAPDATA_H
 #include "material.h"
 
-// Типы источников света (для будущих точечных/прожекторов)
+// Light types (for future point/spot lights)
 typedef enum {
-    LIGHT_DIRECTIONAL,   // направленный (солнце)
-    LIGHT_POINT,         // точечный
-    LIGHT_SPOT           // прожектор
+    LIGHT_DIRECTIONAL,   // directional (sun)
+    LIGHT_POINT,         // point
+    LIGHT_SPOT           // spotlight
 } MapLightType;
 
 typedef struct {
     MapLightType type;
-    char name[64];       // имя источника (для поиска из кода)
-    float pos[3];        // позиция (point/spot)
-    float dir[3];        // направление (directional/spot)
-    float color[3];      // цвет света
-    float intensity;     // сила света
-    float range;         // радиус действия (point/spot), м
-    float angle;         // полуугол конуса (spot), рад
-    int shadow_on;       // свет отбрасывает тени? (shadow/enabled)
-    float shadow_bias;   // bias теней рельефа (shadow/bias, латеральных текселей)
-    float shadow_bias_veg; // bias теней растительности (shadow/bias_veg)
-    int attached;        // 1 = следует за игроком каждый кадр (point-свет)
+    char name[64];       // light name (for lookup from code)
+    float pos[3];        // position (point/spot)
+    float dir[3];        // direction (directional/spot)
+    float color[3];      // light color
+    float intensity;     // light intensity
+    float range;         // range (point/spot), m
+    float angle;         // cone half-angle (spot), rad
+    int shadow_on;       // does the light cast shadows? (shadow/enabled)
+    float shadow_bias;   // terrain shadow bias (shadow/bias, in lateral texels)
+    float shadow_bias_veg; // vegetation shadow bias (shadow/bias_veg)
+    int attached;        // 1 = follows the player every frame (point light)
 } MapLight;
 
-// Материал объекта — единый тип (см. material.h): blend/cull/wrap/filter/
-// tint/alpha/UV-анимация. Парсится из блока "render" в map.json.
-// --- Коллизии карты: collisions[] — произвольные квадраты ----------------------
+// Object material — unified type (see material.h): blend/cull/wrap/filter/
+// tint/alpha/UV animation. Parsed from the "render" block in map.json.
+// --- Map collisions: collisions[] — arbitrary rectangles ---------------------
 typedef struct {
-    char object[64];     // имя объекта, к которому привязан ("tree1") или ""
-    float pos[3];        // центр (x, y, z) или смещение от объекта
-    float size[2];       // [w, d] — размер квадрата в метрах
-    float height;        // высота коллизии, м (задел; сейчас блок по XZ)
+    char object[64];     // object this collision is attached to ("tree1") or ""
+    float pos[3];        // center (x, y, z) or offset from the object
+    float size[2];       // [w, d] — rectangle size in meters
+    float height;        // collision height, m (placeholder; block is on XZ now)
 } MapCollision;
 
-// --- Позиционные звуки карты: sounds[] -----------------------------------------
+// --- Positional map sounds: sounds[] -----------------------------------------
 typedef struct {
-    float pos[3];        // позиция источника, м
-    char sound[256];     // путь к wav
-    float volume;        // громкость 0..1
-    float radius;        // радиус слышимости, м
+    float pos[3];        // source position, m
+    char sound[256];     // path to wav
+    float volume;        // volume 0..1
+    float radius;        // audible radius, m
 } MapSound3D;
 
-// --- Команды/сообщение/звук — общие для use и triggers -------------------------
-#define MAP_ACTIONS_MAX  8     // максимум команд в действии
+// --- Commands/message/sound — shared by use and triggers ---------------------
+#define MAP_ACTIONS_MAX  8     // max commands per action
 #define MAP_CMD_LEN      256
 
-// Блок "use" объекта: что происходит при нажатии E рядом
+// Object "use" block: what happens when E is pressed nearby
 typedef struct {
     int set;
     char commands[MAP_ACTIONS_MAX][MAP_CMD_LEN];
     int cmd_n;
     char message[256];
     char sound[256];
-    int once;            // сработать один раз
+    int once;            // fire only once
     int used;
 } MapUse;
 
-// Триггер: прямоугольная область, срабатывает при входе игрока
+// Trigger: rectangular area, fires when the player enters it
 typedef struct {
     char name[64];
-    float pos[3];        // центр области
-    float size[2];       // [w, d] в метрах
-    int once;            // сработать один раз
-    int entered;         // игрок был внутри в прошлом кадре (движок)
-    int fired;           // уже сработал (движок)
+    float pos[3];        // area center
+    float size[2];       // [w, d] in meters
+    int once;            // fire only once
+    int entered;         // player was inside last frame (engine state)
+    int fired;           // already fired (engine state)
     char commands[MAP_ACTIONS_MAX][MAP_CMD_LEN];
     int cmd_n;
     char message[256];
     char sound[256];
-    float teleport[3];   // телепорт при входе (если has_tp)
+    float teleport[3];   // teleport on entry (if has_tp)
     int has_tp;
 } MapTrigger;
 
-// --- Объекты: objects[] --------------------------------------------------------
-// Встроенные шейдеры объекта (MapObject.shader_kind)
+// --- Objects: objects[] -------------------------------------------------------
+// Built-in object shaders (MapObject.shader_kind)
 typedef enum {
-    OBJ_SHADER_DEFAULT,   // крест из двух квадов, полное освещение
-    OBJ_SHADER_BILLBOARD, // один квад всегда лицом к камере, полное освещение
-    OBJ_SHADER_FLAT,      // без освещения: текстура * tint (иконки, UI)
-    OBJ_SHADER_CUSTOM     // свой шейдер (vs/fs из карты)
+    OBJ_SHADER_DEFAULT,   // cross of two quads, full lighting
+    OBJ_SHADER_BILLBOARD, // one quad always facing the camera, full lighting
+    OBJ_SHADER_FLAT,      // unlit: texture * tint (icons, UI)
+    OBJ_SHADER_CUSTOM     // custom shader (vs/fs from the map)
 } MapObjectShader;
 
 typedef struct {
-    char name[64];       // имя объекта
-    char model[256];     // путь к текстуре-спрайту (PNG, относительно карты)
-    char class[64];      // класс сущности (entity-система, по умолчанию "prop_static")
-    float pos[3];        // позиция
-    float rot[3];        // поворот (радианы)
-    float scale[3];      // масштаб
-    int billboard;       // 1 — квад всегда лицом к камере (вместо креста)
-    int collision;       // 1 — объект непроходим (цилиндр radius вокруг базы)
-    float radius;        // радиус коллизии, м (по умолчанию 1.5)
-    MapObjectShader shader_kind; // встроенный шейдер
-    char shader_vs[256]; // свой вершинный шейдер (если custom)
-    char shader_fs[256]; // свой фрагментный шейдер (если custom)
-    Material render;         // материал (render = { ... }, см. material.h)
-    MapUse use;              // взаимодействие по E (use = { ... })
+    char name[64];       // object name
+    char model[256];     // sprite texture path (PNG, relative to the map)
+    char class[64];      // entity class (entity system, defaults to "prop_static")
+    float pos[3];        // position
+    float rot[3];        // rotation (radians)
+    float scale[3];      // scale
+    int billboard;       // 1 — quad always faces the camera (instead of a cross)
+    int collision;       // 1 — object is solid (cylinder of radius around its base)
+    float radius;        // collision radius, m (default 1.5)
+    MapObjectShader shader_kind; // built-in shader
+    char shader_vs[256]; // custom vertex shader (if custom)
+    char shader_fs[256]; // custom fragment shader (if custom)
+    Material render;         // material (render = { ... }, see material.h)
+    MapUse use;              // interaction via E (use = { ... })
 } MapObject;
 
-// --- Воксельный объёмный туман: fog = { ... } --------------------------------
+// --- Voxel volumetric fog: fog = { ... } --------------------------------------
 typedef struct {
-    int enabled;              // 1 — туман включён (клавиша P)
-    float strength;           // общий множитель плотности
-    float density_ground;     // дымка у земли (на метр пути)
-    float ground_height;      // высота дымки у земли, м
-    float density_field;      // доп. туман над полем пшеницы
-    float field_height;       // высота полевого тумана, м
-    float density_water;      // туман над водоёмами (на метр пути)
-    float water_height;       // высота тумана над уровнем воды, м
-    float color[3];           // БАЗОВЫЙ цвет тумана (везде)
-    float color_sun[3];       // цвет солнечного рассеяния (тёплый, у солнца)
-    float glare;              // ореол у самого солнца
-    float ray_strength;       // контраст god rays (0 = нет, 2 = очень резкие)
+    int enabled;              // 1 — fog enabled (key P)
+    float strength;           // global density multiplier
+    float density_ground;     // ground haze (per meter of path)
+    float ground_height;      // ground haze height, m
+    float density_field;      // extra fog over the wheat field
+    float field_height;       // field fog height, m
+    float density_water;      // fog over water bodies (per meter of path)
+    float water_height;       // fog height above the water level, m
+    float color[3];           // BASE fog color (everywhere)
+    float color_sun[3];       // sun scattering color (warm, near the sun)
+    float glare;              // halo right at the sun
+    float ray_strength;       // god rays contrast (0 = none, 2 = very sharp)
 } MapFog;
 
-// --- Рельеф: terrain = { ... } ------------------------------------------------
+// --- Terrain: terrain = { ... } -----------------------------------------------
 typedef struct {
-    float min_height, max_height;   // кривая высот: мин/макс мира
-    float band_t0, band_t1;         // полоса игровых высот (по яркости)
-    float band_h0, band_h1;         // высоты полосы
-    int blur;                       // сглаживание карты высот (проходы)
-    int blur_radius;                // радиус сглаживания, метры
-    int erosion;                    // проходы ограничения крутизны (0 = выкл)
-    float erosion_slope;            // макс. крутизна после эрозии, градусы
-    char ground_tex[256];           // текстура земли (img/ground.png)
-    float tex_scale;                // метр на тайл текстуры
-    float field_color[3];           // тон почвы поля пшеницы
-    float field_blend;              // сила смешивания (0..1)
-    float fog_start, fog_end;       // дистанция тумана (множители мира)
+    float min_height, max_height;   // height curve: world min/max
+    float band_t0, band_t1;         // gameplay height band (by brightness)
+    float band_h0, band_h1;         // heights of the band
+    int blur;                       // height map smoothing (passes)
+    int blur_radius;                // smoothing radius, meters
+    int erosion;                    // steepness-clamp passes (0 = off)
+    float erosion_slope;            // max steepness after erosion, degrees
+    char ground_tex[256];           // ground texture (img/ground.png)
+    float tex_scale;                // meters per texture tile
+    float field_color[3];           // soil tint of the wheat field
+    float field_blend;              // blend strength (0..1)
+    float fog_start, fog_end;       // fog distance (world size multipliers)
 } MapTerrain;
 
-// --- Поверхности рельефа: surfaces = { ... } ----------------------------------
-//  Слои splat-карты (см. src/splat.h). Базовый слой — трава/земля из
-//  terrain.ground_tex; поверх него по маске смешиваются 4 материала.
-//  Индексы фиксированы: 0 dirt (грунт), 1 sand (песок), 2 gravel (щебень/
-//  тропинка), 3 asphalt (асфальт). tex — текстура, scale — метров на тайл.
+// --- Terrain surfaces: surfaces = { ... } -------------------------------------
+//  Splat map layers (see src/splat.h). The base layer is grass/dirt from
+//  terrain.ground_tex; 4 materials blend over it by mask.
+//  Indices are fixed: 0 dirt, 1 sand, 2 gravel (path), 3 asphalt.
+//  tex — texture, scale — meters per tile.
 #define SPLAT_LAYERS 4
 enum { SPLAT_DIRT = 0, SPLAT_SAND, SPLAT_GRAVEL, SPLAT_ASPHALT };
 
 typedef struct {
-    char tex[SPLAT_LAYERS][256];   // текстуры слоёв
-    float scale[SPLAT_LAYERS];     // метров на тайл текстуры
-    float grass[SPLAT_LAYERS];     // множитель плотности травы на слое (0 = нет)
-    float resolution;              // метров на тексель splat-карты
-    float slope_rock;              // с какого уклона (град) проступает щебень
-    int set;                       // блок surfaces был в JSON
+    char tex[SPLAT_LAYERS][256];   // layer textures
+    float scale[SPLAT_LAYERS];     // meters per texture tile
+    float grass[SPLAT_LAYERS];     // grass density multiplier on the layer (0 = none)
+    float resolution;              // meters per splat map texel
+    float slope_rock;              // from which slope (deg) gravel shows through
+    int set;                       // the surfaces block was present in JSON
 } MapSurfaces;
 
-// --- Покраска поверхности: paints[] -------------------------------------------
-//  Пятна материала: круг (pos + radius), прямоугольник (pos + size) или
-//  полоса по осевой линии (points + width). edge — мягкость края, м.
+// --- Surface painting: paints[] -----------------------------------------------
+//  Material patches: circle (pos + radius), rectangle (pos + size) or
+//  a strip along a centerline (points + width). edge — edge softness, m.
 typedef enum { PAINT_CIRCLE = 0, PAINT_RECT, PAINT_PATH } MapPaintShape;
 
 #define MAP_MAX_PAINTS       64
@@ -170,23 +172,23 @@ typedef enum { PAINT_CIRCLE = 0, PAINT_RECT, PAINT_PATH } MapPaintShape;
 typedef struct {
     int material;        // SPLAT_DIRT..SPLAT_ASPHALT
     int shape;           // MapPaintShape
-    float pos[2];        // центр (circle/rect)
-    float radius;        // радиус (circle)
+    float pos[2];        // center (circle/rect)
+    float radius;        // radius (circle)
     float size[2];       // [w, d] (rect)
-    float width;         // ширина полосы (path)
+    float width;         // strip width (path)
     float points[MAP_PAINT_MAX_POINTS][2];
     int point_n;
-    float edge;          // мягкость края, м
-    float strength;      // сила слоя 0..1
+    float edge;          // edge softness, m
+    float strength;      // layer strength 0..1
 } MapPaint;
 
-// --- Дороги: roads[] ----------------------------------------------------------
-//  Дорога — осевая линия points[] + ширина. type задаёт пресет:
-//    "auto"   асфальтовая автодорога (обочина щебнем, сильное выравнивание)
-//    "dirt"   грунтовка (бурая земля, лёгкое выравнивание, колеи)
-//    "gravel" щебёночная дорога
-//    "path"   тропинка (узкая, вытоптанная земля, почти без выравнивания)
-//  Любое поле пресета можно переопределить в JSON.
+// --- Roads: roads[] -----------------------------------------------------------
+//  A road is a centerline points[] + width. type selects a preset:
+//    "auto"   asphalt highway (gravel shoulder, strong flattening)
+//    "dirt"   dirt road (brown earth, light flattening, ruts)
+//    "gravel" gravel road
+//    "path"   footpath (narrow, trampled earth, almost no flattening)
+//  Any preset field can be overridden in JSON.
 typedef enum { ROAD_AUTO = 0, ROAD_DIRT, ROAD_GRAVEL, ROAD_PATH } MapRoadType;
 
 #define MAP_MAX_ROADS       32
@@ -194,117 +196,117 @@ typedef enum { ROAD_AUTO = 0, ROAD_DIRT, ROAD_GRAVEL, ROAD_PATH } MapRoadType;
 
 typedef struct {
     char name[64];
-    int type;                 // MapRoadType (пресет)
-    int material;             // SPLAT_* — покрытие полотна
-    int shoulder_material;    // SPLAT_* — покрытие обочины
-    float width;              // ширина полотна, м
-    float shoulder;           // ширина обочины с каждой стороны, м (0 = нет)
-    float edge;               // мягкость кромки полотна, м
-    float flatten;            // 0..1 — насколько полотно выравнивает рельеф
-    float flatten_extra;      // за пределы полотна выравнивание сходит, м
-    float ruts;               // колеи 0..1 (грунтовка): продавленность
-    int veg_clear;            // 1 — растительность на полотне не растёт
+    int type;                 // MapRoadType (preset)
+    int material;             // SPLAT_* — road surface
+    int shoulder_material;    // SPLAT_* — shoulder surface
+    float width;              // carriageway width, m
+    float shoulder;           // shoulder width on each side, m (0 = none)
+    float edge;               // carriageway edge softness, m
+    float flatten;            // 0..1 — how much the road flattens the terrain
+    float flatten_extra;      // beyond the road, flattening tapers off, m
+    float ruts;               // ruts 0..1 (dirt road): depression strength
+    int veg_clear;            // 1 — vegetation does not grow on the carriageway
     float points[MAP_ROAD_MAX_POINTS][2];
     int point_n;
 } MapRoad;
 
-// --- Растительность: veg = { ... } -------------------------------------------
+// --- Vegetation: veg = { ... } ------------------------------------------------
 typedef struct {
-    float grass_density, wheat_density;  // шт/м2 вплотную к камере
-    float grass_floor, wheat_floor;      // минимум на всей карте
-    float dandelion_density;             // одуванчики шт/м2 у камеры (редкие,
-                                         // добавляются СВЕРХ травы)
-    float dandelion_floor;               // минимум одуванчиков на карте
-    float dyn_radius, vis_radius;        // радиусы динамики/видимости
-    float falloff;                       // радиус падения плотности
+    float grass_density, wheat_density;  // stems/m2 right next to the camera
+    float grass_floor, wheat_floor;      // minimum across the whole map
+    float dandelion_density;             // dandelions stems/m2 near the camera (rare,
+                                         // added ON TOP OF the grass)
+    float dandelion_floor;               // minimum dandelions across the map
+    float dyn_radius, vis_radius;        // dynamics/visibility radii
+    float falloff;                       // density falloff radius
 } MapVeg;
 
-// --- Небо: sky = { ... } ------------------------------------------------------
+// --- Sky: sky = { ... } -------------------------------------------------------
 typedef struct {
-    float tint[3];              // тон панорамы
-    char tex[256];              // текстура неба (img/skybox.png)
+    float tint[3];              // panorama tint
+    char tex[256];              // sky texture (img/skybox.png)
 } MapSky;
 
-// --- Постобработка: bloom = { ... } -------------------------------------------
+// --- Post-processing: bloom = { ... } -----------------------------------------
 typedef struct {
-    float threshold, intensity, strength;   // порог яркости, сила, свечение
+    float threshold, intensity, strength;   // brightness threshold, strength, glow
 } MapBloom;
 
-// --- Тени: shadows = { ... } --------------------------------------------------
+// --- Shadows: shadows = { ... } -----------------------------------------------
 typedef struct {
-    int size;                   // размер карт теней (1024/2048/4096)
+    int size;                   // shadow map size (1024/2048/4096)
 } MapShadows;
 
-// --- Информация о карте: info = { name, author, description } -----------------
+// --- Map info: info = { name, author, description } ---------------------------
 typedef struct {
-    char name[128];             // название (для меню/логов)
-    char author[128];           // автор
-    char description[256];      // описание
+    char name[128];             // title (for menus/logs)
+    char author[128];           // author
+    char description[256];      // description
 } MapInfo;
 
-// --- Звук карты: ambient = { sound, volume }, music = { sound, volume } -------
+// --- Map sound: ambient = { sound, volume }, music = { sound, volume } --------
 typedef struct {
-    char sound[256];            // путь к wav (относительно корня: audio/x.wav)
-    float volume;               // громкость 0..1
+    char sound[256];            // path to wav (relative to root: audio/x.wav)
+    float volume;               // volume 0..1
 } MapSound;
 
-// Загружает map/map.json: путь к карте высот, прямоугольник поля,
-// источники света и объекты. Вызывать ДО world_load (нужно имя карты).
-// 0 — успех, -1 — файл не прочитался или JSON битый.
+// Loads map/map.json: height map path, field rectangle, lights and objects.
+// Call BEFORE world_load (the map name is needed).
+// 0 — success, -1 — file unreadable or JSON broken.
 int mapdata_load(const char *path);
 
-// Имя карты высот относительно map/ (по умолчанию "map.png")
+// Height map name relative to map/ (default "map.png")
 const char *mapdata_image(void);
 
-// Прямоугольник поля пшеницы в метрах: center[2] = (x, z), size[2] = (w, d).
-// Возвращает 1, если поле задано в JSON, иначе 0 (брать центр мира).
+// Wheat field rectangle in meters: center[2] = (x, z), size[2] = (w, d).
+// Returns 1 if the field is defined in JSON, otherwise 0 (use world center).
 int mapdata_field(float center[2], float size[2]);
 
-// Поле, прикреплённое к игроку (field/attached): 1 — пшеница растёт на
-// всей карте (бесконечное поле), рамка следует за камерой.
+// Field attached to the player (field/attached): 1 — wheat grows across the
+// whole map (infinite field), the frame follows the camera.
 int mapdata_field_attached(void);
 
-// Стартовая позиция игрока (player/pos [x,y,z]) и взгляд
-// (player/yaw, player/pitch). Возвращает 1, если player задан в JSON.
-// y <= 0 означает "высоту взять из рельефа в точке спавна".
-// fov — угол обзора (player.fov, по умолчанию 60).
+// Player start position (player/pos [x,y,z]) and view
+// (player/yaw, player/pitch). Returns 1 if player is defined in JSON.
+// y <= 0 means "take the height from the terrain at the spawn point".
+// fov — field of view (player.fov, default 60).
 int mapdata_player(float pos[3], float *yaw, float *pitch, float *fov);
 
-// --- Источники света ----------------------------------------------------------
+// --- Light sources ------------------------------------------------------------
 int mapdata_light_count(void);
 const MapLight *mapdata_light(int i);
 
-// --- Воксельный объёмный туман (voxfog.c) -------------------------------------
+// --- Voxel volumetric fog (voxfog.c) ------------------------------------------
 void mapdata_fog(MapFog *f);
 
-// --- Рельеф / растительность / небо / bloom / тени ---------------------------
+// --- Terrain / vegetation / sky / bloom / shadows -----------------------------
 void mapdata_terrain(MapTerrain *t);
 void mapdata_veg(MapVeg *v);
 void mapdata_sky(MapSky *s);
 void mapdata_bloom(MapBloom *b);
 void mapdata_shadows(MapShadows *s);
 
-// --- Поверхности рельефа (splat) / покраска / дороги --------------------------
+// --- Terrain surfaces (splat) / painting / roads ------------------------------
 void mapdata_surfaces(MapSurfaces *s);
 int mapdata_paint_count(void);
 const MapPaint *mapdata_paint(int i);
 int mapdata_road_count(void);
 const MapRoad *mapdata_road(int i);
 
-// --- Объекты (модели) ---------------------------------------------------------
+// --- Objects (models) ---------------------------------------------------------
 int mapdata_object_count(void);
 const MapObject *mapdata_object(int i);
 
-// --- Коллизии-квадраты: collisions[] ------------------------------------------
+// --- Collision rectangles: collisions[] ---------------------------------------
 int mapdata_collision_count(void);
 const MapCollision *mapdata_collision(int i);
 
-// --- Позиционные звуки: sounds[] -----------------------------------------------
+// --- Positional sounds: sounds[] ----------------------------------------------
 #define MAP_MAX_SOUNDS 16
 int mapdata_sound_count(void);
 const MapSound3D *mapdata_sound(int i);
 
-// --- Триггеры: triggers[] -------------------------------------------------------
+// --- Triggers: triggers[] -------------------------------------------------------
 #define MAP_MAX_TRIGGERS 64
 int mapdata_trigger_count(void);
 const MapTrigger *mapdata_trigger(int i);
@@ -312,85 +314,85 @@ int mapdata_trigger_fired(int i);
 void mapdata_trigger_set_fired(int i, int v);
 void mapdata_object_set_used(const char *name, int v);
 
-// --- Вода: waters[] -----------------------------------------------------------
-// Четыре типа водоёмов. Каждый блок задаёт уровень воды (level), форму
-// (круг pos/radius для лужи/озера/моря или осевая линия points + width для
-// реки) и вид (цвет, прозрачность, волны, течение, пена у берега).
+// --- Water: waters[] ----------------------------------------------------------
+// Four water body types. Each block sets the water level (level), the shape
+// (circle pos/radius for a puddle/lake/sea, or a centerline points + width
+// for a river) and the look (color, transparency, waves, flow, shore foam).
 typedef enum {
-    WATER_PUDDLE,   // лужа: маленькая, почти гладкая, быстро сходит
-    WATER_LAKE,     // озеро: спокойное, мягкая волна
-    WATER_RIVER,    // река: течение вдоль осевой линии (flow_speed)
-    WATER_SEA       // море: глобальный уровень воды, крупная волна
+    WATER_PUDDLE,   // puddle: small, nearly still, dries out fast
+    WATER_LAKE,     // lake: calm, gentle wave
+    WATER_RIVER,    // river: flow along the centerline (flow_speed)
+    WATER_SEA       // sea: global water level, large waves
 } MapWaterType;
 
-#define MAP_MAX_WATERS        32   // потолок водоёмов из JSON
-#define MAP_WATER_MAX_POINTS  16   // максимум точек осевой линии реки
+#define MAP_MAX_WATERS        32   // cap on water bodies from JSON
+#define MAP_WATER_MAX_POINTS  16   // max points in a river centerline
 
 typedef struct {
     int type;              // MapWaterType
-    char name[64];         // имя водоёма (для поиска из кода)
-    float level;           // уровень поверхности (метры); у моря — глобальный
-    float center[2];       // центр круга [x, z] (лужа/озеро/море)
-    float radius;          // радиус круга, м (море: 0 = весь мир)
-    float width;           // ширина русла, м (река)
-    float points[MAP_WATER_MAX_POINTS][2]; // осевая линия реки [x, z]
+    char name[64];         // water body name (for lookup from code)
+    float level;           // surface level (meters); for the sea — global
+    float center[2];       // circle center [x, z] (puddle/lake/sea)
+    float radius;          // circle radius, m (sea: 0 = whole world)
+    float width;           // channel width, m (river)
+    float points[MAP_WATER_MAX_POINTS][2]; // river centerline [x, z]
     int point_n;
-    float depth;           // глубина: просвет дна сквозь воду, м
-    float color[3];        // цвет воды (тон на глубине)
-    float alpha;           // базовая непрозрачность 0..1
-    float wave_amp;        // амплитуда волны, м
-    float wave_speed;      // скорость волны (множитель времени)
-    float flow[2];         // направление течения (река: авто из points по XZ)
-    float flow_speed;      // скорость течения, м/с (река сносит игрока)
-    float foam;            // сила пены у берега 0..1
+    float depth;           // depth: how far the bottom shows through water, m
+    float color[3];        // water color (deep tint)
+    float alpha;           // base opacity 0..1
+    float wave_amp;        // wave amplitude, m
+    float wave_speed;      // wave speed (time multiplier)
+    float flow[2];         // flow direction (river: derived from points on XZ)
+    float flow_speed;      // flow speed, m/s (river pushes the player)
+    float foam;            // shore foam strength 0..1
 } MapWater;
 
-// --- Фауна: fauna[] -------------------------------------------------------------
+// --- Fauna: fauna[] -----------------------------------------------------------
 typedef enum {
-    FAUNA_FIREFLIES,   // светлячки (светящиеся точки, мерцают)
-    FAUNA_BUTTERFLIES, // бабочки (машут крыльями, летают в области)
-    FAUNA_BIRDS        // птицы (кружат в небе над областью)
+    FAUNA_FIREFLIES,   // fireflies (glowing points, flickering)
+    FAUNA_BUTTERFLIES, // butterflies (flapping wings, flying within an area)
+    FAUNA_BIRDS        // birds (circling in the sky above an area)
 } MapFaunaType;
 
 typedef struct {
     int type;            // MapFaunaType
-    float area[2];       // центр области [x, z]
+    float area[2];       // area center [x, z]
     float size[2];       // [w, d]
-    int count;           // число особей
-    float height;        // высота полёта, м
+    int count;           // number of individuals
+    float height;        // flight height, m
 } MapFauna;
 
 #define MAP_MAX_FAUNA 8
 int mapdata_fauna_count(void);
 const MapFauna *mapdata_fauna(int i);
 
-// --- Информация о карте -------------------------------------------------------
+// --- Map information ----------------------------------------------------------
 void mapdata_info(MapInfo *i);
 
-// --- Звук карты: ambient/music. 1 — задан в JSON (играть петлёй). --------------
+// --- Map sound: ambient/music. 1 — defined in JSON (play on loop). ------------
 int mapdata_ambient(MapSound *a);
 int mapdata_music(MapSound *m);
 
-// --- Вода: waters[] -------------------------------------------------------------
+// --- Water: waters[] ----------------------------------------------------------
 int mapdata_water_count(void);
 const MapWater *mapdata_water(int i);
 
-// --- Команды карты: commands = [ "команда", ... ] -----------------------------
-// Выполняются через консоль при загрузке карты (после построения сцены),
-// можно менять cvar'ы, бинды, запускать скрипты.
-#define MAP_MAX_COMMANDS 64     // потолок команд в карте
-#define MAP_CMD_LEN      256    // максимум на команду
+// --- Map commands: commands = [ "command", ... ] ------------------------------
+// Executed through the console on map load (after the scene is built);
+// can change cvars, binds, run scripts.
+#define MAP_MAX_COMMANDS 64    // cap on commands per map
+#define MAP_CMD_LEN      256    // max per command
 int mapdata_command_count(void);
 const char *mapdata_command(int i);
 
-// --- Cvar'ы карты: cvars = { "имя": значение, ... } ---------------------------
-// Применяются при загрузке карты (после сцены, до команд).
+// --- Map cvars: cvars = { "name": value, ... } --------------------------------
+// Applied on map load (after the scene, before commands).
 #define MAP_MAX_CVARS 64
 int mapdata_cvar_count(void);
 const char *mapdata_cvar_name(int i);
 float mapdata_cvar_value(int i);
 
-// Освобождает JSON-арену. Вызывать при выходе.
+// Frees the JSON arena. Call on shutdown.
 void mapdata_free(void);
 
 #endif

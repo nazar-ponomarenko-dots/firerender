@@ -1,8 +1,8 @@
 // ============================================================================
-//  linalg.h — маленький "glm своими руками": векторы и матрицы 4x4
+//  linalg.h — a small "hand-rolled glm": vectors and 4x4 matrices
 // ----------------------------------------------------------------------------
-//  Векторы — просто float[3], матрицы 4x4 — float[16] в колоночном порядке
-//  (как их ждёт OpenGL).
+//  Vectors are plain float[3]; 4x4 matrices are float[16] in column-major
+//  order (as OpenGL expects them).
 // ============================================================================
 #ifndef LINALG_H
 #define LINALG_H
@@ -11,19 +11,19 @@ void vec3_normalize(float *v);
 void vec3_cross(const float *a, const float *b, float *out);
 float vec3_dot(const float *a, const float *b);
 
-// out = a * b (умножение матриц 4x4, колоночный порядок)
+// out = a * b (4x4 matrix multiply, column-major order)
 void mat4_mul(float *out, const float *a, const float *b);
 
-// Матрица перспективной проекции (fovy в радианах)
+// Perspective projection matrix (fovy in radians)
 void mat4_perspective(float *m, float fovy, float aspect, float zn, float zf);
 
-// Матрица ортографической проекции (бокс)
+// Orthographic projection matrix (box)
 void mat4_ortho(float *m, float l, float r, float b, float t, float zn, float zf);
 
-// Матрица вида "смотрим из eye на center"
+// View matrix: "look from eye at center"
 void mat4_lookat(float *m, const float *eye, const float *center, const float *up);
 
-// Обратная матрица 4x4 (Gauss-Jordan). 1 — успех, 0 — вырожденная.
+// Inverse 4x4 matrix (Gauss-Jordan). 1 on success, 0 if singular.
 int mat4_invert(float *out, const float *m);
 
 #endif

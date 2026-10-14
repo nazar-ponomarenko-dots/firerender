@@ -1,18 +1,19 @@
 // ============================================================================
-//  objects.c — объекты из map.json: биллборды (деревья и пр.)
+//  objects.c — objects from map.json: billboards (trees and the like)
 // ----------------------------------------------------------------------------
-//  Читает objects[] из map.json: каждый объект — квад(ы) с текстурой
-//  (model — путь к PNG, напр. "img/tree.png"), позицией pos и масштабом
-//  scale. По умолчанию — КРЕСТ из двух статичных квадов; billboard=1 —
-//  один квад всегда лицом к камере. Высота квада = 5 м * scale.y
-//  (OBJECT_BASE_H), ширина — из пропорций текстуры. База ложится на рельеф
-//  (если y <= 0). Шейдер: встроенный default/billboard/flat или СВОЙ
-//  (vs/fs из карты) — uniform'ы те же, что у object.vs/object.fs
-//  (обязательные uTex/uTint/uObjPos/uObjSize/uObjRight/uViewProj, остальные
-//  можно не объявлять). collision=1 — объект непроходим (цилиндр radius
-//  вокруг базы, objects_collide выталкивает игрока).
-//  Освещение — как у растительности: все направленные источники из
-//  map.json + CSM-тени солнца + туман.
+//  Reads objects[] from map.json: each object is a quad (or a cross of quads)
+//  with a texture (model — path to a PNG, e.g. "img/tree.png"), position pos
+//  and scale scale. By default — a CROSS of two static quads; billboard=1 —
+//  a single quad always facing the camera. Quad height = 5 m * scale.y
+//  (OBJECT_BASE_H), width — from the texture proportions. The base sits on
+//  the terrain (if y <= 0). Shader: built-in default/billboard/flat or a
+//  CUSTOM one (vs/fs from the map) — the uniforms are the same as in
+//  object.vs/object.fs (mandatory uTex/uTint/uObjPos/uObjSize/uObjRight/uViewProj,
+//  the rest need not be declared). collision=1 — the object is impenetrable
+//  (a cylinder of given radius around the base; objects_collide pushes the
+//  player out).
+//  Lighting — same as vegetation: all directional sources from
+//  map.json + CSM sun shadows + fog.
 // ============================================================================
 #include "objects.h"
 
@@ -37,64 +38,65 @@
 #include <SDL3/SDL.h>
 
 #define OBJECT_MAX 256
-#define OBJECT_BASE_H 9.0f     // высота квада при scale.y = 1
+#define OBJECT_BASE_H 9.0f     // quad height at scale.y = 1
 
-// Uniform-локации шейдера объекта (общие для всех программ):
-// общий набор сцены (SceneUniforms) + геометрия объекта + материал.
+// Uniform locations of the object shader (shared across all programs):
+// the common scene set (SceneUniforms) + object geometry + material.
 typedef struct {
-    SceneUniforms su;            // общий набор сцены (render_ctx.h)
+    SceneUniforms su;            // common scene uniform set (render_ctx.h)
     GLint u_objpos, u_objsize, u_objright, u_objslope, u_tex;
-    MaterialLocs mat;            // материал (material.h)
+    MaterialLocs mat;            // material (material.h)
 } ObjLocs;
 
 typedef struct {
     GLuint tex;
-    GLuint tex_custom;       // своя текстура (кастомные wrap/filter)
-    GLuint prog;             // свой шейдер (0 = общий p->prog)
-    ObjLocs locs;            // локации для prog
-    int billboard;           // квад к камере (вместо креста)
-    int src;                 // индекс в map.json (objects[]): инстансы идут
-                             // плотнее mapdata (пустые model пропускаются),
-                             // поэтому связь только через src
+    GLuint tex_custom;       // own texture (custom wrap/filter)
+    GLuint prog;             // own shader (0 = shared p->prog)
+    ObjLocs locs;            // uniform locations for prog
+    int billboard;           // quad faces the camera (instead of a cross)
+    int src;                 // index into map.json (objects[]): instances are
+                             // packed tighter than mapdata (empty model entries
+                             // are skipped), so they map back only through src
     float pos[3];
-    float slope[2];          // уклон земли под объектом (dh/dx, dh/dz):
-                             // низ креста ложится на рельеф, как у травы
+    float slope[2];          // ground slope under the object (dh/dx, dh/dz):
+                             // the cross base lies on the terrain, like grass
     float width, height;
-    int collision;           // цилиндр непроходимости
-    float radius;            // радиус коллизии, м
-    Material r;              // материал (material.h)
+    int collision;           // impenetrable cylinder
+    float radius;            // collision radius, m
+    Material r;              // material (material.h)
 } ObjectInst;
 
 typedef struct {
-    const WorldState *world; // данные мира: высоты (посадка на рельеф)
-    const RendererContext *rc;   // кадровые данные (renderer.c)
+    const WorldState *world; // world data: heights (placing onto the terrain)
+    const RendererContext *rc;   // per-frame data (renderer.c)
     GLuint prog, vao, vbo, ibo;
-    GLuint flat_prog;        // встроенный "flat" (без освещения)
-    GLuint shadow_prog;      // глубина в карты теней
+    GLuint flat_prog;        // built-in "flat" (unlit)
+    GLuint shadow_prog;      // depth into shadow maps
     GLint s_viewproj, s_objpos, s_objsize, s_objright, s_objslope;
-    // Blob-тени (режим r_shadows_mode 3): мягкое пятно под объектом
+    // Blob shadows (r_shadows_mode 3): a soft patch under the object
     GLuint blob_prog, blob_tex;
     GLint b_viewproj, b_objpos, b_objsize, b_objright, b_objfwd, b_tex, b_color;
     int count;
     ObjectInst inst[OBJECT_MAX];
-    ObjLocs locs;            // локации общих программ (p->prog)
+    ObjLocs locs;            // uniform locations of the shared programs (p->prog)
     ObjLocs flat_locs;
 } ObjectsParams;
 
-// Цилиндры коллизий объектов (для camera.c — выталкивание игрока)
-struct ObjCol { float x, z, r; float base, h; };   // base..base+h — для тел
+// Object collision cylinders (for camera.c — pushing the player out)
+struct ObjCol { float x, z, r; float base, h; };   // base..base+h — for rigid bodies
 static struct ObjCol s_col[OBJECT_MAX];
 static int s_col_n = 0;
-// Квадраты коллизий из collisions[] (XZ-прямоугольники)
+// Collision squares from collisions[] (XZ rectangles)
 struct ObjBox { float x, z, hw, hz; float base, h; };
 static struct ObjBox s_box[OBJECT_MAX];
 static int s_box_n = 0;
-static ObjectsParams *s_objs = NULL;   // для hot-reload (shader_on_reshade)
-// Время (для анимации UV)
+static ObjectsParams *s_objs = NULL;   // for hot-reload (shader_on_reshade)
+// Time (for UV animation)
 static float s_time = 0.0f;
 
-// Те же цилиндры/квадраты, из которых выталкивается игрок, отдают объём и
-// твёрдым телам (phys_body): без этого ящик пролетает сквозь дерево насквозь.
+// The very same cylinders/squares the player is pushed out of also hand their
+// volume to rigid bodies (phys_body): otherwise a crate flies straight
+// through a tree.
 static void objects_sync_phys_statics(void)
 {
     for (int i = 0; i < s_col_n; i++)
@@ -108,13 +110,13 @@ static void objects_sync_phys_statics(void)
     }
 }
 
-// Заполняет локации uniform'ов программы (необязательные = -1)
+// Fills in a program's uniform locations (optional ones = -1)
 static ObjLocs obj_locs(GLenum prog)
 {
     ObjLocs l;
     memset(&l, 0, sizeof l);
-    scene_uniforms_init(&l.su, prog);      // общий набор сцены
-    material_locs_init(&l.mat, prog);      // материал (tint/blend/UV)
+    scene_uniforms_init(&l.su, prog);      // common scene uniform set
+    material_locs_init(&l.mat, prog);      // material (tint/blend/UV)
     l.u_objpos   = glGetUniformLocation(prog, "uObjPos");
     l.u_objsize  = glGetUniformLocation(prog, "uObjSize");
     l.u_objright = glGetUniformLocation(prog, "uObjRight");
@@ -123,12 +125,13 @@ static ObjLocs obj_locs(GLenum prog)
     return l;
 }
 
-// Пересоздаёт программы объектов и переищет uniform'ы (для hot-reload).
-// replace балансирует refcount (release старой + новая ссылка); если пара
-// не собралась — возвращает 0 и остаётся прежний id. Пересоздаём ВСЕ
-// программы узла (включая flat/shadow/blob и custom каждого инстанса),
-// иначе после reload часть объектов рисовала бы старым шейдером, а его
-// ссылка утекала навсегда (старый код даже не перезапрашивал flat/shadow).
+// Recreates the object programs and re-looks-up their uniforms (for hot-reload).
+// replace balances the refcount (release the old one + take a new reference);
+// if the pair fails to link it returns 0 and the old id is kept. We recreate
+// ALL of the node's programs (including flat/shadow/blob and each instance's
+// custom one), otherwise after a reload some objects would still draw with
+// the old shader and its reference would leak forever (the old code did not
+// even re-request flat/shadow).
 static void objects_reshade(void)
 {
     ObjectsParams *p = s_objs;
@@ -194,24 +197,24 @@ static void objects_reshade(void)
     p->s_objslope = glGetUniformLocation(p->shadow_prog, "uObjSlope");
 }
 
-// Кадровые uniform'ы (виды, свет, тени, туман) — при переключении программы
+// Per-frame uniforms (views, light, shadows, fog) — on program switch
 static void set_per_frame(const ObjLocs *l, const ObjectsParams *p)
 {
     const RendererContext *rc = p->rc;
-    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
+    // Common set: views, light, environment, fog, shadow cascades (from rc)
     scene_uniforms_bind(&l->su, rc);
-    // Объекты: bias как у растительности (shadow_bias_veg из map.json),
-    // градиент ~5 м вглубь тени
+    // Objects: bias like vegetation (shadow_bias_veg from map.json),
+    // gradient over ~5 m into the shadow
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         if (l->su.u_shadowbias[c] >= 0)
             glUniform1f(l->su.u_shadowbias[c], rc->shadow_bias_veg[c]);
         if (l->su.u_shadowgrad[c] >= 0)
             glUniform1f(l->su.u_shadowgrad[c], 5.0f / rc->shadow_depth[c]);
     }
-    // Материал (tint/blend/UV-анимация) применяет material_bind на инстанс
+    // Material (tint/blend/UV animation) is applied per instance via material_bind
 }
 
-// Копия текстуры с другими параметрами (wrap/filter) — кеш движка не трогаем
+// Texture copy with other parameters (wrap/filter) — the engine cache is left alone
 static GLuint texture_custom(const unsigned char *img, int w, int h,
                              int wrap, int filter)
 {
@@ -241,7 +244,7 @@ static void objects_params_release(ObjectsParams *p)
     if (s_objs == p) s_objs = NULL;
     s_col_n = 0;
     s_box_n = 0;
-    phys_static_clear();   // объекты разобраны — их коллайдеры больше не живые
+    phys_static_clear();   // objects torn down — their colliders are no longer live
     for (int i = 0; i < p->count; i++) {
         if (p->inst[i].tex_custom)
             glDeleteTextures(1, &p->inst[i].tex_custom);
@@ -266,30 +269,30 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     p->world = ws;
     p->rc = rc;
 
-    // Объекты из map.json: путь к PNG — model, позиция — pos,
-    // масштаб — scale. y <= 0 — высота из рельефа.
+    // Objects from map.json: PNG path — model, position — pos,
+    // scale — scale. y <= 0 — height taken from the terrain.
     int n = mapdata_object_count();
     if (n > OBJECT_MAX) n = OBJECT_MAX;
     s_col_n = 0;
     s_box_n = 0;
-    phys_static_clear();   // новая карта — новая статика для тел
+    phys_static_clear();   // new map — new statics for rigid bodies
     for (int i = 0; i < n; i++) {
         const MapObject *o = mapdata_object(i);
         if (!o || !o->model[0]) continue;
         ObjectInst *it = &p->inst[p->count];
-        it->src = i;             // помним индекс map.json (инстансы плотнее)
+        it->src = i;             // remember the map.json index (instances are denser)
         int w = 0, h = 0;
-        // Пиксели нужны для пропорций и кастомных текстур; текстура —
-        // через кеш ресурсов (60 деревьев tree.png = ОДНА GL-текстура).
+        // Pixels are needed for the proportions and custom textures; the texture
+        // goes through the resource cache (60 tree.png trees = ONE GL texture).
         unsigned char *img = load_img(o->model, &w, &h, STBI_rgb_alpha);
         if (!img || w <= 0 || h <= 0) {
             SDL_Log("Object %s: cannot load texture %s (will use notfound)", o->name, o->model);
-            w = 64; h = 64;   // фолбек-пропорции
+            w = 64; h = 64;   // fallback proportions
         }
-        // Материал: дефолты + переопределения из блока render в JSON
+        // Material: defaults + overrides from the render block in JSON
         material_defaults(&it->r);
         if (o->render.set) it->r = o->render;
-        // Своя текстура, если заданы нестандартные wrap/filter
+        // Own texture when non-default wrap/filter are set
         if (it->r.set &&
             (it->r.wrap != MAT_WRAP_CLAMP || it->r.filter != MAT_FILTER_LINEAR)) {
             it->tex_custom = texture_custom(img, w, h, it->r.wrap, it->r.filter);
@@ -302,13 +305,14 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         it->pos[0] = o->pos[0];
         it->pos[1] = o->pos[1];
         it->pos[2] = o->pos[2];
-        if (it->pos[1] <= 0.0f)   // y = 0 — поставить на рельеф
+        if (it->pos[1] <= 0.0f)   // y = 0 — place onto the terrain
             it->pos[1] = sample_height(ws, it->pos[0], it->pos[2]);
-        // Уклон земли под объектом: низ креста ложится на рельеф по уклону
-        // (как база растительности в wheat.vs). Дерево шириной ~12.5 м иначе
-        // на склоне висело одним углом в воздухе, а другим уходило в землю.
+        // Ground slope under the object: the cross base lies on the terrain
+        // along the slope (like the vegetation base in wheat.vs). Otherwise a
+        // ~12.5 m wide tree on a hill hung one corner in the air while the
+        // other sank into the ground.
         {
-            const float e = 1.0f;         // шаг замера уклона, м
+            const float e = 1.0f;         // slope sampling step, m
             float sdx = sample_height(ws, it->pos[0] + e, it->pos[2])
                       - sample_height(ws, it->pos[0] - e, it->pos[2]);
             float sdz = sample_height(ws, it->pos[0], it->pos[2] + e)
@@ -324,7 +328,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
             it->height = OBJECT_BASE_H * sy;
             it->width = it->height * (float)w / (float)h;
         }
-        // Биллборд/коллизия/шейдер
+        // Billboard/collision/shader
         it->billboard = o->billboard;
         it->collision = o->collision;
         it->radius = o->radius > 0.01f ? o->radius : 1.5f;
@@ -350,12 +354,12 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         return NULL;
     }
 
-    // --- Коллизии-квадраты из collisions[]: привязка к объектам по имени ------
+    // --- Collision squares from collisions[]: bound to objects by name -----
     for (int i = 0; i < mapdata_collision_count() && s_box_n < OBJECT_MAX; i++) {
         const MapCollision *c = mapdata_collision(i);
         if (!c || c->size[0] <= 0.01f || c->size[1] <= 0.01f) continue;
         float x = c->pos[0], z = c->pos[2];
-        if (c->object[0]) {            // привязан к объекту: база = объект
+        if (c->object[0]) {            // bound to an object: base = the object
             int found = 0;
             for (int k = 0; k < p->count; k++) {
                 const MapObject *o = mapdata_object(p->inst[k].src);
@@ -374,8 +378,9 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         s_box[s_box_n].z = z;
         s_box[s_box_n].hw = c->size[0] * 0.5f;
         s_box[s_box_n].hz = c->size[1] * 0.5f;
-        // Игрок блокируется по XZ (высота ему безразлична), а телам нужен
-        // объём: base — рельеф под квадратом, h — height из JSON (0 = заглушка).
+        // The player is blocked on XZ only (height is irrelevant to it), but
+        // rigid bodies need a volume: base — terrain under the square, h —
+        // height from JSON (0 = stub).
         s_box[s_box_n].base = sample_height(ws, x, z);
         s_box[s_box_n].h = c->height > 0.01f ? c->height : 2.0f;
         s_box_n++;
@@ -384,10 +389,10 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
                 c->object[0] ? " -> " : "", c->object[0] ? c->object : "");
     }
 
-    // Коллизии карты → статические тела физики (после обоих реестров).
+    // Map collisions → static physics bodies (after both registries).
     objects_sync_phys_statics();
 
-    // --- Шейдеры ---
+    // --- Shaders ---
     p->prog = make_program("shaders/object.vs", "shaders/object.fs");
     if (!p->prog) { objects_params_release(p); free(p); return NULL; }
     p->locs = obj_locs(p->prog);
@@ -395,7 +400,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     if (p->flat_prog) p->flat_locs = obj_locs(p->flat_prog);
     glUseProgram(p->prog);
     glUniform1i(p->locs.u_tex, 0);
-    // Каскады на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d)
+    // Cascades on units 3-6 (uShadowMap%d and raw depth uShadowDepth%d)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         if (p->locs.su.u_shadowmap[c] >= 0)
             glUniform1i(p->locs.su.u_shadowmap[c], 3 + c);
@@ -403,9 +408,9 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
             glUniform1i(p->locs.su.u_shadowdepth[c], 3 + c);
     }
     glUseProgram(0);
-    // Свои шейдеры объектов (custom): отдельная программа на объект.
-    // Индекс инстанса НЕ равен индексу map.json (пустые model пропускаются) —
-    // поэтому mapdata_object берём по сохранённому src.
+    // Objects' own shaders (custom): a separate program per object.
+    // The instance index is NOT the map.json index (empty model entries are
+    // skipped) — so mapdata_object is fetched via the saved src.
     for (int i = 0; i < p->count; i++) {
         const MapObject *o = mapdata_object(p->inst[i].src);
         if (!o || o->shader_kind != OBJ_SHADER_CUSTOM) continue;
@@ -428,7 +433,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         glUseProgram(0);
     }
 
-    // Общий квад: x -0.5..0.5 (ширина), y 0..1 (высота), uv 0..1
+    // Shared quad: x -0.5..0.5 (width), y 0..1 (height), uv 0..1
     glGenVertexArrays(1, &p->vao);
     glBindVertexArray(p->vao);
     glGenBuffers(1, &p->vbo);
@@ -451,7 +456,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
     glBindVertexArray(0);
 
-    // --- Теневой шейдер (глубина с альфа-тестом) ---
+    // --- Shadow shader (depth with alpha test) ---
     p->shadow_prog = make_program("shaders/object_shadow.vs",
                                   "shaders/object_shadow.fs");
     if (!p->shadow_prog) { objects_params_release(p); free(p); return NULL; }
@@ -464,7 +469,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     glUniform1i(glGetUniformLocation(p->shadow_prog, "uTex"), 0);
     glUseProgram(0);
 
-    // --- Blob-тени (режим 3): мягкое пятно под каждым объектом --------------
+    // --- Blob shadows (mode 3): a soft patch under every object ------------
     p->blob_prog = make_program("shaders/blob.vs", "shaders/blob.fs");
     if (p->blob_prog) {
         p->b_viewproj = glGetUniformLocation(p->blob_prog, "uViewProj");
@@ -481,7 +486,7 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
         glUseProgram(0);
     }
 
-    s_objs = p;                   // для hot-reload
+    s_objs = p;                   // for hot-reload
     shader_on_reshade(objects_reshade);
 
     const float size[3] = { 100.0f, OBJECT_BASE_H * 4.0f, 100.0f };
@@ -494,22 +499,23 @@ SceneNode *objects_make_node(const WorldState *ws, const RendererContext *rc)
     return node;
 }
 
-// Теневой проход (RP_SHADOW): та же геометрия и выбор грани, что в цветном
-// проходе, но программа object_shadow (глубина с альфа-тестом). Только
-// объекты внутри бокса каскада. Раньше это была копипаста objects_shadow_render.
+// Shadow pass (RP_SHADOW): the same geometry and face choice as in the color
+// pass, but with the object_shadow program (depth with alpha test). Only
+// objects inside the cascade box. This used to be copy-paste of objects_shadow_render.
 static void objects_shadow_draw(ObjectsParams *p, const RendererContext *rc)
 {
     if (p->count <= 0) return;
-    glDisable(GL_CULL_FACE);   // биллборды — с двух сторон
+    glDisable(GL_CULL_FACE);   // billboards — drawn from both sides
     glUseProgram(p->shadow_prog);
     glUniformMatrix4fv(p->s_viewproj, 1, GL_FALSE, rc->shadow_vp);
     glBindVertexArray(p->vao);
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
-        // отсечение по боксу каскада (от камеры). Но объект рисует и дальний,
-        // если его ДЛИННАЯ ТЕНЬ достаёт до бокса: тень уходит по направлению
-        // солнца на height*shadow_slope метров. Иначе ближние каскады не
-        // рисуют дальние деревья, хотя их тень лежит рядом с игроком.
+        // Cull by the cascade box (from the camera). But an object also draws
+        // when far away, if its LONG SHADOW reaches the box: the shadow
+        // stretches along the sun direction by height*shadow_slope meters.
+        // Otherwise the near cascades would not draw far trees even though
+        // their shadow lies right next to the player.
         float reach = it->height * rc->shadow_slope + it->width * 0.5f;
         float r = rc->shadow_box_cur * 0.7071f + 6.0f + reach;
         float r2 = r * r;
@@ -522,7 +528,7 @@ static void objects_shadow_draw(ObjectsParams *p, const RendererContext *rc)
         glUniform2f(p->s_objsize, it->width, it->height);
         if (p->s_objslope >= 0)
             glUniform2f(p->s_objslope, it->slope[0], it->slope[1]);
-        // тот же выбор грани, что в objects_node_render
+        // the same face choice as in objects_node_render
         if (it->billboard) {
             float d = sqrtf(dx * dx + dz * dz);
             if (d < 0.001f) d = 1.0f;
@@ -542,27 +548,27 @@ void objects_node_render(SceneNode *n, float dt)
     ObjectsParams *p = n->params;
     if (p->count <= 0) return;
     const RendererContext *rc = p->rc;
-    // Теневой проход (RP_SHADOW): глубина с альфа-тестом
+    // Shadow pass (RP_SHADOW): depth with alpha test
     if (rc->pass == RP_SHADOW) {
         if (g_shadow_obj) objects_shadow_draw(p, rc);
         return;
     }
     s_time += dt;
     glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);   // по умолчанию — двусторонний (cull: none)
+    glDisable(GL_CULL_FACE);   // two-sided by default (cull: none)
     glBindVertexArray(p->vao);
 
-    // --- Blob-тени (режим 3): мягкое пятно на земле под каждым объектом -----
-    // Смещение пятна от солнца: тень падает по направлению света.
+    // --- Blob shadows (mode 3): a soft patch on the ground under each object --
+    // Patch offset from the sun: the shadow falls along the light direction.
     if (cvar_get("r_shadows_mode") == 3.0f && p->blob_prog) {
         const float *ld = p->rc->light_dir[0];
         float ll = sqrtf(ld[0] * ld[0] + ld[2] * ld[2]);
-        float sdx = ll > 0.001f ? ld[0] / ll : 0.0f;   // горизонталь к солнцу
+        float sdx = ll > 0.001f ? ld[0] / ll : 0.0f;   // horizontal toward the sun
         float sdz = ll > 0.001f ? ld[2] / ll : 0.0f;
         const float col[4] = { 0.05f, 0.05f, 0.06f, 0.5f };
-        // БЕЗ записи глубины: пятна полупрозрачные, а запись глубины
-        // отсекала биллборды, нарисованные позже ЗА пятном (дырки в траве
-        // вокруг теней деревьев). Блендинг поверх рельефа, глубина читается.
+        // NO depth writes: the patches are translucent, and writing depth
+        // would cut off billboards drawn BEHIND the patch (holes in the grass
+        // around tree shadows). Blend over the terrain, depth is still read.
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(GL_FALSE);
@@ -573,8 +579,9 @@ void objects_node_render(SceneNode *n, float dt)
         glBindTexture(GL_TEXTURE_2D, p->blob_tex);
         for (int i = 0; i < p->count; i++) {
             ObjectInst *it = &p->inst[i];
-            // Пятно не во фрустуме — мимо (и uniform'ы не льём): без этого
-            // слабый iGPU перемалывал тысячи невидимых квадов каждый кадр
+            // Patch outside the frustum — skip (and don't flood uniforms):
+            // without this a weak iGPU chewed through thousands of invisible
+            // quads every frame
             if (!frustum_test_sphere(&p->rc->frustum, it->pos[0],
                                      it->pos[1] + it->height * 0.5f,
                                      it->pos[2],
@@ -584,7 +591,7 @@ void objects_node_render(SceneNode *n, float dt)
             float sz = it->width * 0.65f;
             float px = it->pos[0] - sdx * h * 0.55f;
             float pz = it->pos[2] - sdz * h * 0.55f;
-            // пятно ложится на рельеф ПОД СОБОЙ (на склонах не проваливается)
+            // the patch sits on the terrain BELOW ITSELF (doesn't sink on slopes)
             float base = sample_height(p->world, px, pz);
             glUniform3f(p->b_objpos, px, base + 0.25f, pz);
             glUniform2f(p->b_objsize, sz, sz);
@@ -600,15 +607,15 @@ void objects_node_render(SceneNode *n, float dt)
     GLuint cur = 0, cur_tex = 0;
     Material mat_cache;
     int mat_valid = 0;
-    // MSAA не сглаживает alpha-cutout края (discard) — для альфа-тестовых
-    // материалов включаем alpha-to-coverage (полупрозрачная кромка текселя
-    // даёт частичное покрытие сэмплов). Блендинговые материалы не трогаем:
-    // там частичное покрытие умножалось бы на блендинг (a*a на краях).
+    // MSAA does not smooth alpha-cutout edges (discard) — for alpha-test
+    // materials enable alpha-to-coverage (a semi-transparent texel edge gives
+    // partial sample coverage). Leave blending materials alone: there partial
+    // coverage would multiply into the blending (a*a at the edges).
     const int msaa_on = bloom_msaa_active() > 0;
     int a2c = 0;
     for (int i = 0; i < p->count; i++) {
         ObjectInst *it = &p->inst[i];
-        // Отсечение фрустумом: сфера (позиция + максимальный размер)
+        // Frustum cull: sphere (position + maximum size)
         if (!frustum_test_sphere(&p->rc->frustum, it->pos[0], it->pos[1],
                                  it->pos[2],
                                  it->height + it->width * 0.5f))
@@ -641,12 +648,12 @@ void objects_node_render(SceneNode *n, float dt)
         glUniform2f(l->u_objsize, it->width, it->height);
         if (l->u_objslope >= 0)
             glUniform2f(l->u_objslope, it->slope[0], it->slope[1]);
-        // Запечённый свет: сэмплим пробу в середине высоты объекта (крона).
+        // Baked light: sample the probe at the object's mid height (the crown).
         scene_uniforms_probe(&l->su, it->pos[0], it->pos[1] + it->height * 0.5f,
                              it->pos[2]);
-        // Ось ширины квада:
-        //  - биллборд: перпендикуляр к направлению на камеру (квад к ней);
-        //  - крест: статичный выбор грани по углу обзора.
+        // Width axis of the quad:
+        //  - billboard: perpendicular to the direction to the camera (quad faces it);
+        //  - cross: static face choice by view angle.
         float dx = p->rc->cam_pos[0] - it->pos[0];
         float dz = p->rc->cam_pos[2] - it->pos[2];
         if (it->billboard) {
@@ -668,8 +675,8 @@ void objects_node_render(SceneNode *n, float dt)
     glUseProgram(0);
 }
 
-// Выталкивание точки из коллизий карты: цилиндры объектов + квадраты
-// collisions[]. Игрок радиусом pr не может зайти внутрь. Изменяет *x,*z.
+// Push a point out of the map collisions: object cylinders + collisions[]
+// squares. A player with radius pr cannot get inside. Modifies *x,*z.
 void objects_collide(float *x, float *z, float pr)
 {
     for (int i = 0; i < s_col_n; i++) {
@@ -678,7 +685,7 @@ void objects_collide(float *x, float *z, float pr)
         float rr = s_col[i].r + pr;
         float d2 = dx * dx + dz * dz;
         if (d2 >= rr * rr) continue;
-        if (d2 < 1e-6f) {          // стоим на центре — толкаем в сторону X
+        if (d2 < 1e-6f) {          // standing at the center — push toward X
             *x += rr;
             continue;
         }
@@ -687,16 +694,16 @@ void objects_collide(float *x, float *z, float pr)
         *x += dx * push;
         *z += dz * push;
     }
-    // Квадраты: выталкивание по ближайшей грани
+    // Squares: push out through the nearest face
     for (int i = 0; i < s_box_n; i++) {
         float hx = s_box[i].hw + pr;
         float hz = s_box[i].hz + pr;
         float dx = *x - s_box[i].x;
         float dz = *z - s_box[i].z;
         if (fabsf(dx) >= hx || fabsf(dz) >= hz) continue;
-        float ox = hx - fabsf(dx);   // перекрытие по X
-        float oz = hz - fabsf(dz);   // перекрытие по Z
-        if (ox < oz)                 // толкаем по меньшему перекрытию
+        float ox = hx - fabsf(dx);   // overlap along X
+        float oz = hz - fabsf(dz);   // overlap along Z
+        if (ox < oz)                 // push along the smaller overlap
             *x += (dx >= 0.0f ? ox : -ox);
         else
             *z += (dz >= 0.0f ? oz : -oz);

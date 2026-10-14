@@ -1,5 +1,5 @@
 // ============================================================================
-//  scene.c — дерево сцены: создание узлов, трансформы и обход
+//  scene.c — scene tree: node creation, transforms and traversal
 // ============================================================================
 #include "scene.h"
 
@@ -10,8 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Локальные помощники матриц (linalg.c даёт mat4_mul, но здесь нужен ещё
-// TRS-сбор; держим его рядом с узлом, чтобы scene.c не тянул лишнего).
+// Local matrix helpers (linalg.c provides mat4_mul, but a TRS builder is
+// also needed here; kept next to the node so scene.c pulls in nothing extra).
 static void m4_identity(float m[16])
 {
     memset(m, 0, 16 * sizeof(float));
@@ -55,12 +55,12 @@ SceneNode *node_new(const char *name, const char *type,
 void node_add(SceneNode *parent, SceneNode *child)
 {
     if (!parent || !child) return;
-    if (child->parent) node_remove(child);   // не даём двойного родителя
+    if (child->parent) node_remove(child);   // never allow a double parent
     child->parent = parent;
     if (parent->last_child) parent->last_child->next = child;
     else                    parent->first_child = child;
     parent->last_child = child;
-    events_emit(EV_NODE_INIT, child, NULL);  // узел вошёл в дерево
+    events_emit(EV_NODE_INIT, child, NULL);  // node entered the tree
 }
 
 void node_remove(SceneNode *n)
@@ -87,14 +87,14 @@ SceneNode *node_find(SceneNode *root, const char *name)
     return NULL;
 }
 
-// Локальная матрица: T * Ry * Rx * Rz * S. Порядок поворотов как в Godot
-// (yaw вокруг Y — главный, поэтому применяется последним).
+// Local matrix: T * Ry * Rx * Rz * S. Rotation order matches Godot
+// (yaw around Y is primary, so it is applied last).
 void node_local_matrix(const SceneNode *n, float out[16])
 {
     float sy = sinf(n->rot[1]), cy = cosf(n->rot[1]);
     float sx = sinf(n->rot[0]), cx = cosf(n->rot[0]);
     float sz = sinf(n->rot[2]), cz = cosf(n->rot[2]);
-    // R = Ry * Rx * Rz (столбцовый порядок GL: m[col*4 + row])
+    // R = Ry * Rx * Rz (GL column-major order: m[col*4 + row])
     float r00 =  cy * cz + sy * sx * sz;
     float r01 = -cy * sz + sy * sx * cz;
     float r02 =  sy * cx;
@@ -127,15 +127,15 @@ void node_update_transforms(SceneNode *n)
     float local[16];
     node_local_matrix(n, local);
     if (n->parent) {
-        // Точка крепления родителя (кость скелета и т.п.): вставляется
-        // МЕЖДУ мировой матрицей родителя и локальной матрицей ребёнка.
+        // Parent attachment point (skeleton bone etc.): inserted BETWEEN
+        // the parent's world matrix and the child's local matrix.
         if (n->attach_slot >= 0 && n->parent->attach_fn) {
             float att[16];
             m4_identity(att);
             n->parent->attach_fn(n->parent, n->attach_slot, att);
             if (n->attach_upright) {
-                // Оставляем только позицию точки: спрайт/иконка не должны
-                // крутиться вместе с костью (маркеры, метки над головой).
+                // Keep only the point's position: sprites/icons must not
+                // rotate with the bone (markers, overhead labels).
                 float t[3] = { att[12], att[13], att[14] };
                 m4_identity(att);
                 att[12] = t[0]; att[13] = t[1]; att[14] = t[2];
@@ -170,7 +170,7 @@ void node_render_tree(SceneNode *n, float dt)
 void node_free_tree(SceneNode *n)
 {
     if (!n) return;
-    events_emit(EV_NODE_EXIT, n, NULL);      // узел уходит из дерева
+    events_emit(EV_NODE_EXIT, n, NULL);      // node leaves the tree
     for (SceneNode *c = n->first_child; c;) {
         SceneNode *tmp = c->next;
         node_free_tree(c);

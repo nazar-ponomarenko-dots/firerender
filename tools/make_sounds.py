@@ -16,11 +16,11 @@ RATE = 22050
 
 def save(name, samples, target_rms=3000.0):
     n = len(samples)
-    # нормализация до целевого RMS, но без клиппинга (ограничение по пику)
+    # normalize to the target RMS, but without clipping (peak limit)
     s = sum(x * x for x in samples) / n
     rms = math.sqrt(s) if s > 0 else 1.0
     peak = max(abs(x) for x in samples) or 1.0
-    # target_rms — в единицах int16 (0..32767); rms/peak — в float-шкале (-1..1)
+    # target_rms — in int16 units (0..32767); rms/peak — in float scale (-1..1)
     k = min(target_rms / (rms * 32767.0 + 1e-9), 1.0 / peak)
     buf = bytearray()
     for x in samples:
@@ -38,8 +38,8 @@ def white(rng):
     return rng.uniform(-1.0, 1.0)
 
 
-# --- Шаг по траве/земле ---------------------------------------------------------
-# Низкочастотный "бамп" (привод грунта) + мягкий шум подошвы.
+# --- Footstep on grass/dirt ---------------------------------------------------
+# Low-frequency "bump" (ground thump) + soft sole noise.
 def make_step(seed, hardness=0.6, noise=0.3, dur=0.12):
     rng = random.Random(seed)
     n = int(RATE * dur)
@@ -53,8 +53,8 @@ def make_step(seed, hardness=0.6, noise=0.3, dur=0.12):
     return out
 
 
-# --- Прыжок: воздушный "отрыв" --------------------------------------------------
-# Короткий свист вверх (частота растёт) + выдох. Тихо — фоновая деталь.
+# --- Jump: airy "lift-off" ----------------------------------------------------
+# Short upward whistle (frequency rises) + exhale. Quiet — background detail.
 def make_jump(seed=11):
     rng = random.Random(seed)
     dur = 0.32
@@ -63,7 +63,7 @@ def make_jump(seed=11):
     ph = 0.0
     for i in range(n):
         t = i / RATE
-        f = 150 + 220 * (t / dur)          # свип вверх
+        f = 150 + 220 * (t / dur)          # sweep upward
         ph += 2 * math.pi * f / RATE
         whistle = math.sin(ph) * math.sin(math.pi * t / dur) ** 2 * 0.06
         breath = white(rng) * math.exp(-t * 14) * 0.22
@@ -71,7 +71,7 @@ def make_jump(seed=11):
     return out
 
 
-# --- Приземление: глухой удар + пыль -------------------------------------------
+# --- Landing: dull thud + dust ------------------------------------------------
 def make_land(seed=5):
     rng = random.Random(seed)
     dur = 0.30
@@ -85,8 +85,8 @@ def make_land(seed=5):
     return out
 
 
-# --- Шелест растительности ------------------------------------------------------
-# Три варианта (чередуются при ходьбе): лёгкий / средний / густой с хрустом.
+# --- Vegetation rustle --------------------------------------------------------
+# Three variants (alternate while walking): light / medium / dense with crunch.
 def make_rustle(seed=3, dur=0.6, mod_f=18.0, crack_p=0.03, low=0.20):
     rng = random.Random(seed)
     n = int(RATE * dur)
@@ -95,18 +95,18 @@ def make_rustle(seed=3, dur=0.6, mod_f=18.0, crack_p=0.03, low=0.20):
     for i in range(n):
         t = i / RATE
         w = white(rng)
-        flt = flt * (1.0 - low) + w * low              # приглушённый шум
+        flt = flt * (1.0 - low) + w * low              # muted noise
         swish = (w * 0.55 + flt * 0.85)
         mod = 0.55 + 0.45 * math.sin(t * mod_f) * math.sin(t * (mod_f * 0.35) + 0.8)
         crack = 0.0
         if rng.random() < crack_p:
             crack = white(rng) * math.exp(-t * 90) * 0.9
-        env = math.sin(math.pi * t / dur) ** 0.7       # мягкие начало/конец
+        env = math.sin(math.pi * t / dur) ** 0.7       # soft start/end
         out.append(swish * mod * env * 0.6 + crack * env * 0.7)
     return out
 
 
-# --- Ветер ----------------------------------------------------------------------
+# --- Wind ---------------------------------------------------------------------
 def make_wind(seed=7):
     rng = random.Random(seed)
     dur = 4.0
@@ -115,14 +115,14 @@ def make_wind(seed=7):
     b = 0.0
     for i in range(n):
         t = i / RATE
-        b = b * 0.97 + white(rng) * 0.03        # коричневый шум
+        b = b * 0.97 + white(rng) * 0.03        # brown noise
         gust = 0.65 + 0.35 * math.sin(t * 0.7) * math.sin(t * 0.23 + 1.3)
         out.append(b * gust * 1.1)
     return out
 
 
-# --- Дождь: белый шум с быстрыми модуляциями капель (плотный шум дождя) ---------
-# (Не используется: в дождь движок делает громче петлю ветра — см. fx.c)
+# --- Rain: white noise with fast droplet modulation (dense rain hiss) ---------
+# (Unused: during rain the engine simply turns up the wind loop — see fx.c)
 
 def main():
     os.makedirs(OUT, exist_ok=True)
@@ -131,14 +131,14 @@ def main():
     save("step3.wav", make_step(303, hardness=0.62, noise=0.35), target_rms=2500.0)
     save("jump.wav", make_jump(), target_rms=900.0)
     save("land.wav", make_land(), target_rms=3200.0)
-    # три варианта шелеста: лёгкий / средний / густой с хрустом
+    # three rustle variants: light / medium / dense with crunch
     save("rustle1.wav", make_rustle(31, dur=0.45, mod_f=26.0, crack_p=0.01),
          target_rms=1800.0)
     save("rustle2.wav", make_rustle(32, dur=0.60, mod_f=18.0, crack_p=0.03),
          target_rms=2000.0)
     save("rustle3.wav", make_rustle(33, dur=0.75, mod_f=12.0, crack_p=0.06,
                                     low=0.28), target_rms=2200.0)
-    save("rustle.wav", make_rustle(3), target_rms=2000.0)   # общий (для карт)
+    save("rustle.wav", make_rustle(3), target_rms=2000.0)   # generic (for maps)
     save("wind.wav", make_wind(), target_rms=2400.0)
     save("rain.wav", make_rain(), target_rms=2600.0)
     save("thunder.wav", make_thunder(), target_rms=4200.0)

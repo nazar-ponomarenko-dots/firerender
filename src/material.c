@@ -1,12 +1,12 @@
 // ============================================================================
-//  material.c — материал поверхности: состояние GL и uniform'ы (см. material.h)
+//  material.c — surface material: GL state and uniforms (see material.h)
 // ============================================================================
 #include "material.h"
 
 #include <stdio.h>
 #include <string.h>
 
-// --- Реестр материалов по имени --------------------------------------------------
+// --- Material registry by name --------------------------------------------------
 static struct { char name[32]; Material m; } s_mats[MATERIALS_MAX];
 static int s_mat_n = 0;
 
@@ -86,10 +86,10 @@ void material_locs_init(MaterialLocs *ml, GLuint prog)
     ml->u_time    = glGetUniformLocation(prog, "uTime");
 }
 
-// Применяет материал: состояние GL (блендинг/отсечение/глубина) и uniform'ы
-// (tint/alpha/blend/UV-анимация). Дефолты материала заполняются заранее
-// (material_defaults), поэтому uniform'ы применяются ВСЕГДА — значения от
-// предыдущего инстанса не «протекают».
+// Applies the material: GL state (blending/cull/depth) and uniforms
+// (tint/alpha/blend/UV animation). Material defaults are filled in ahead of
+// time (material_defaults), so uniforms are ALWAYS applied — values from the
+// previous instance cannot "leak through".
 void material_bind(const Material *m, const MaterialLocs *ml, float time)
 {
     if (m->set) {

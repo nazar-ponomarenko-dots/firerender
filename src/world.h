@@ -1,103 +1,105 @@
 // ============================================================================
-//  world.h — мир: данные карты высот и функции работы с рельефом
+//  world.h — the world: heightmap data and terrain functions
 // ----------------------------------------------------------------------------
-//  Всё состояние мира (размеры, сетка, высоты, поле пшеницы) собрано в
-//  WorldState — модули получают его параметром, а не хватают глобалы.
-//  Экземпляр принадлежит game.c (Game.world), заполняет world_load.
+//  All world state (sizes, grid, heights, wheat field rect) is gathered in
+//  WorldState — modules receive it as a parameter instead of grabbing
+//  globals. The instance belongs to game.c (Game.world), filled by world_load.
 //
-//  1 пиксель карты = 1 метр (карта 2000x1125 -> мир 2000x1125 м).
-//  Карта высот лежит в папке map/ (имя файла — из map/map.json, см.
-//  mapdata.h). Высота рельефа — НЕ линейно от яркости: чёрный = +400 м,
-//  белый = -100 м, а по кривой height_curve, которая отдаёт больше
-//  разрешения игровой полосе около -20..100 м (полоса t=0.16..0.40 растянута
-//  на высоты -50..200 м, края сжаты пологими линейными участками). Высоты
-//  считаются один раз при загрузке (world_load), сглаживаются (blur_heights)
-//  и кладутся в текстуру GL_R8 — шейдер её билинейно интерполирует.
+//  1 map pixel = 1 meter (a 2000x1125 map -> a 2000x1125 m world).
+//  The heightmap lives in the map/ folder (file name comes from map/map.json,
+//  see mapdata.h). Terrain height is NOT linear in brightness: black = +400 m,
+//  white = -100 m, following the height_curve, which gives more resolution to
+//  the gameplay band around -20..100 m (the t=0.16..0.40 band is stretched
+//  over heights -50..200 m, the edges are squeezed into gentle linear
+//  segments). Heights are computed once at load (world_load), smoothed
+//  (blur_heights) and stored in a GL_R8 texture — the shader interpolates it
+//  bilinearly.
 // ============================================================================
 #ifndef WORLD_H
 #define WORLD_H
 #include "gl_loader.h"
 
-// --- Состояние мира -----------------------------------------------------------
-// Тег WorldState — не только для typedef: audio.h объявляет указатель на
-// неполный тип, чтобы не тянуть в звук GL-заголовки world.h.
+// --- World state -----------------------------------------------------------
+// The WorldState tag exists not only for the typedef: audio.h declares a
+// pointer to the incomplete type so it doesn't drag in world.h's GL headers.
 typedef struct WorldState {
-    // Кривая высот (конфигурируется из map.json: terrain = { ... }).
-    // Высота рельефа от цвета карты (инвертировано): чёрный (яркость 0) ->
-    // max_height, белый (яркость 1) -> min_height. Игровая полоса
-    // t=band_t0..t1 отдаёт весь диапазон высот band_h0..band_h1 (больше
-    // разрешения), края — пологие линейные участки. t = 1 - яркость.
+    // Height curve (configured from map.json: terrain = { ... }).
+    // Terrain height from the map color (inverted): black (brightness 0) ->
+    // max_height, white (brightness 1) -> min_height. The gameplay band
+    // t=band_t0..t1 covers the whole height range band_h0..band_h1 (more
+    // resolution), the edges are gentle linear segments. t = 1 - brightness.
     float min_height, max_height;
     float band_t0, band_t1, band_h0, band_h1;
-    int terrain_blur;        // проходы сглаживания карты высот (из map.json)
-    int terrain_blur_radius; // радиус сглаживания, метры
-    int terrain_erosion;     // проходы ограничения крутизны (эрозия склонов)
-    float terrain_erosion_slope; // макс. крутизна после эрозии, градусы
+    int terrain_blur;        // heightmap smoothing passes (from map.json)
+    int terrain_blur_radius; // smoothing radius, meters
+    int terrain_erosion;     // steepness-clamp passes (slope erosion)
+    float terrain_erosion_slope; // max steepness after erosion, degrees
 
-    // 1 пиксель карты = 1 метр мира: размер мира и сетка берутся из карты
-    // высот при загрузке (карта 2000x1125 -> мир 2000x1125 м, карта 6k ->
-    // мир 6k м).
-    float world_w, world_d;  // размер мира по X и Z (метры)
-    int tex_w, tex_h;        // разрешение карты (пиксели)
-    int grid_w, grid_h;      // квадов в сетке рельефа
-    float tex_per_quad;      // пикселей карты на один квад
-    int vert_count;          // вершин рельефа (для HUD)
-    float *heights;          // сглаженные высоты рельефа (метры)
+    // 1 map pixel = 1 world meter: world size and grid come from the heightmap
+    // at load (a 2000x1125 map -> a 2000x1125 m world, a 6k map ->
+    // a 6k m world).
+    float world_w, world_d;  // world size along X and Z (meters)
+    int tex_w, tex_h;        // map resolution (pixels)
+    int grid_w, grid_h;      // quads in the terrain grid
+    float tex_per_quad;      // map pixels per quad
+    int vert_count;          // terrain vertices (for the HUD)
+    float *heights;          // smoothed terrain heights (meters)
 
-    // Прямоугольник поля пшеницы (задаёт game.c при загрузке мира):
+    // Wheat field rectangle (set by game.c at world load):
     // x0..x0+w, z0..z0+d
     float field_x0, field_z0, field_w, field_d;
 } WorldState;
 
-// 1 квад сетки на GRID_DIV пикселей карты. GRID_DIV=1 -> сетка 1 вершина
-// на метр: рельеф плавно билинейно интерполирует карту высот (без крупных
-// "фасеток") и ТОЧНО совпадает с коллизией (sample_height), поэтому игрок,
-// трава и пшеница стоят ровно на отрисованной земле. Потолок квадов по одной
-// оси — для гигантских карт (там точность приближается крупным шагом).
+// 1 grid quad per GRID_DIV map pixels. GRID_DIV=1 -> a grid of 1 vertex
+// per meter: the terrain smoothly bilinearly interpolates the heightmap (no
+// big "facets") and matches the collision (sample_height) EXACTLY, so the
+// player, grass and wheat stand right on the drawn ground. The quad cap along
+// one axis is for gigantic maps (there precision approaches a coarse step).
 #define GRID_DIV 1
 #define GRID_MAX 2048
 
-// Текстуры мира, созданные world_load (владеет world_free)
+// World textures created by world_load (owned by world_free)
 typedef struct {
-    GLuint tex_height;   // высоты рельефа (GL_R8, LINEAR)
-    GLuint tex_base;     // цвет карты (мини-карта)
-    GLuint tex_norm;     // normal map рельефа
+    GLuint tex_height;   // terrain heights (GL_R8, LINEAR)
+    GLuint tex_base;     // map color (minimap)
+    GLuint tex_norm;     // terrain normal map
 } WorldTextures;
 
-// --- Функции ------------------------------------------------------------------
+// --- Functions ------------------------------------------------------------------
 
-// Простой xorshift-генератор 0..1 (без rand(), чтобы было одинаково везде)
+// Simple xorshift generator 0..1 (no rand(), so results are identical everywhere)
 float frnd(unsigned int *s);
 
-// Кривая высот: t = 1 - яркость (0 = белый/низ, 1 = чёрный/пик) -> метры.
-// Та же формула зашита в terrain.vs (полосы высот там — uniform'ы).
+// Height curve: t = 1 - brightness (0 = white/low, 1 = black/peak) -> meters.
+// The same formula is baked into terrain.vs (the height bands there are uniforms).
 float height_curve(const WorldState *w, float t);
 
-// Высота земли под точкой (wx, wz) — билинейная интерполяция КВАНТОВАННЫХ
-// высот (тот же GL_R8 байт, что читает вершинный шейдер рельефа LINEAR).
-// Благодаря этому растения и рамка поля стоят ровно на отрисованном рельефе
-// и не проваливаются под землю на микроподъёмах (шаг квантования ~2 м).
-// 1 пиксель карты = 1 метр, поэтому texel-координата = мировая - 0.5.
+// Ground height under a point (wx, wz) — bilinear interpolation of QUANTIZED
+// heights (the same GL_R8 byte the terrain vertex shader reads with LINEAR).
+// Because of this, plants and the field border stand exactly on the drawn
+// terrain and don't sink underground at micro-bumps (quantization step ~2 m).
+// 1 map pixel = 1 meter, so the texel coordinate = world minus 0.5.
 float sample_height(const WorldState *w, float wx, float wz);
 
-// Насколько отрезок from->to открыт рельефу: 1 = прямая видимость, 0 = путь
-// целиком под землёй. Считается как доля точек отрезка, где земля выше линии
-// (шаг 2.5 м). Нужен звуку, чтобы «за холмом» было глухо; держится здесь,
-// чтобы audio.c не тянул карту высот.
+// How much the segment from->to is exposed to the terrain: 1 = straight line
+// of sight, 0 = the whole path is underground. Computed as the fraction of
+// segment points where the ground is above the line (2.5 m step). Sound needs
+// it so that "behind a hill" sounds muffled; it lives here so audio.c doesn't
+// pull in the heightmap.
 float world_line_open(const WorldState *w, const float from[3], const float to[3]);
 
-// Загружает карту высот из map/ (имя — из map/map.json): считает размеры
-// мира, высоты (кривая + blur) и нормали, создаёт текстуры
-// высот/цвета/нормалей. Заполняет w. 0 — успех.
+// Loads the heightmap from map/ (name — from map/map.json): computes the world
+// sizes, heights (curve + blur) and normals, creates the height/color/normal
+// textures. Fills w. 0 — success.
 int world_load(WorldState *w, WorldTextures *out);
 
-// Освобождает CPU-массивы высот и GL-текстуры мира.
+// Frees the CPU height arrays and the world's GL textures.
 void world_free(WorldState *w);
 
-// Средняя яркость карты (нужна камере для стартовой высоты).
+// Average map brightness (the camera needs it for the starting height).
 float world_avg_lum(void);
 
-// Текстура карты высот (GL_R16) — для пост-проходов (волюметрика). 0 = нет.
+// Heightmap texture (GL_R16) — for post-passes (volumetrics). 0 = none.
 GLuint world_height_tex(void);
 
 #endif

@@ -1,9 +1,9 @@
 // ============================================================================
-//  audio.c — реализация звука (см. audio.h)
+//  audio.c — sound implementation (see audio.h)
 // ----------------------------------------------------------------------------
-//  Устройство + N каналов (SDL_AudioStream, привязаны к устройству —
-//  микширует SDL). Каждый Sound хранит wav-данные и spec; канал
-//  конвертирует spec файла в spec устройства автоматически.
+//  Device + N channels (SDL_AudioStream, bound to the device —
+//  SDL does the mixing). Each Sound keeps the wav data and spec; the channel
+//  converts the file spec to the device spec automatically.
 // ============================================================================
 #include "audio.h"
 
@@ -19,60 +19,60 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define AUDIO_CHANNELS 8     // одновременных звуков (шаги, клики, ...)
+#define AUDIO_CHANNELS 8     // simultaneous sounds (footsteps, clicks, ...)
 
 struct Sound {
     char path[128];
-    SDL_AudioSpec spec;      // формат wav-файла
-    Uint8 *data;             // pcm-данные (владеем)
-    Uint32 len;              // размер в байтах
+    SDL_AudioSpec spec;      // wav file format
+    Uint8 *data;             // pcm data (owned)
+    Uint32 len;              // size in bytes
 };
 
 static SDL_AudioDeviceID s_dev = 0;
-static SDL_AudioSpec s_dev_spec;           // формат устройства
+static SDL_AudioSpec s_dev_spec;           // device format
 static SDL_AudioStream *s_chan[AUDIO_CHANNELS];
-static Sound *s_chan_snd[AUDIO_CHANNELS];  // звук, играющий на канале
+static Sound *s_chan_snd[AUDIO_CHANNELS];  // sound playing on the channel
 
-// Фоновая петля
+// Background loop
 static SDL_AudioStream *s_loop = NULL;
 static Sound *s_loop_snd = NULL;
 static float s_loop_vol = 0.0f;
 static Uint32 s_loop_sent = 0;
-// Множитель громкости петли (погода: в дождь ветер громче). 1 = без изменений
+// Loop volume multiplier (weather: wind is louder in rain). 1 = unchanged
 static float s_loop_mul = 1.0f;
 
-// Музыка карты (вторая петля, независимая от ambient)
+// Map music (a second loop, independent of ambient)
 static SDL_AudioStream *s_music = NULL;
 static Sound *s_music_snd = NULL;
 static float s_music_vol = 0.0f;
 
-// Позиционные (3D) источники: до 8 каналов, громкость от дистанции.
-// У каждого — два эхо-потока (реверб): с дистанцией звук тише, а эхо
-// с задержкой ~90/180 мс — громче (признак "издалека").
+// Positional (3D) sources: up to 8 channels, volume from distance.
+// Each has two echo streams (reverb): with distance the sound gets quieter,
+// while the delayed echo (~90/180 ms) gets louder (the "from afar" cue).
 #define AUDIO_3D_CHANNELS 8
-#define AUDIO_ECHO_N 2          // число эхо-повторов
+#define AUDIO_ECHO_N 2          // number of echo repeats
 #define AUDIO_ECHO_DELAY_MS 90
 typedef struct {
     SDL_AudioStream *stream;
-    SDL_AudioStream *echo[AUDIO_ECHO_N];   // эхо-потоки
+    SDL_AudioStream *echo[AUDIO_ECHO_N];   // echo streams
     Sound *snd;
     float pos[3];
     float vol;
     float radius;
-    int loop;              // 1 — петля, 0 — один раз (канал освобождается)
+    int loop;              // 1 — loop, 0 — one shot (the channel is released)
     int active;
 } Audio3D;
 static Audio3D s_3d[AUDIO_3D_CHANNELS];
 static float s_listener[3] = { 0, 0, 0 };
-static const struct WorldState *s_world = NULL;   // окклюзия: карта высот
+static const struct WorldState *s_world = NULL;   // occlusion: heightmap
 
-// Кеш звуков
+// Sound cache
 #define AUDIO_CACHE 16
 static Sound *s_cache[AUDIO_CACHE];
 static int s_cache_n = 0;
 
-// Итоговая громкость: общая (snd_master) x категория (sfx/music/dialog).
-// Читается каждый кадр — ползунки меню действуют мгновенно.
+// Final volume: master (snd_master) x category (sfx/music/dialog).
+// Read every frame — menu sliders take effect instantly.
 static float snd_gain(const char *cat)
 {
     return cvar_get("snd_master") * cvar_get(cat);
@@ -80,7 +80,7 @@ static float snd_gain(const char *cat)
 
 void audio_init(void)
 {
-    // Просим моно 16-bit 22050 (или что даст устройство)
+    // Ask for mono 16-bit 22050 (or whatever the device gives)
     SDL_AudioSpec want = { 0 };
     want.format = SDL_AUDIO_S16;
     want.channels = 1;
@@ -118,7 +118,7 @@ Sound *audio_load(const char *path)
     for (int i = 0; i < s_cache_n; i++)
         if (strcmp(s_cache[i]->path, path) == 0) return s_cache[i];
 
-    // Через ресурсы: пак карты -> диск -> вшитые (карта может переопределить)
+    // Via resources: map pak -> disk -> built-in (the map may override)
     unsigned int sz = 0;
     unsigned char *buf = resources_read_file(path, &sz);
     if (!buf) return NULL;
@@ -150,7 +150,7 @@ Sound *audio_load(const char *path)
     return s;
 }
 
-// Канал: свободен, если очередь пуста и он не занят другим звуком
+// Channel: free if its queue is empty and it is not held by another sound
 static SDL_AudioStream *channel_take(Sound *s, int *idx)
 {
     int oldest = 0;
@@ -161,7 +161,7 @@ static SDL_AudioStream *channel_take(Sound *s, int *idx)
             *idx = i;
             return s_chan[i];
         }
-        // "самый старый" — где очередь меньше всех (грубая оценка)
+        // "oldest" — the one with the smallest queue (rough estimate)
         if (SDL_GetAudioStreamQueued(s_chan[i]) <
             SDL_GetAudioStreamQueued(s_chan[oldest]))
             oldest = i;
@@ -174,16 +174,16 @@ void audio_play(Sound *s, float volume, float pitch)
 {
     if (!s_dev || !s) return;
     if (volume <= 0.0f) return;
-    // pitch = множитель частоты входа: поток пересэмплирует в формат
-    // устройства, сдвигая и тональность, и скорость (0.5..2 = октава вниз/вверх).
+    // pitch = input frequency multiplier: the stream resamples to the device
+    // format, shifting both pitch and speed (0.5..2 = one octave down/up).
     if (pitch < 0.5f) pitch = 0.5f;
     if (pitch > 2.0f) pitch = 2.0f;
     int idx = 0;
     SDL_AudioStream *ch = channel_take(s, &idx);
     if (!ch) return;
     SDL_ClearAudioStream(ch);
-    // Задаём формат входа (wav) и выхода (устройство): иначе поток не
-    // конвертирует 22050 моно -> 44100 стерео и звук молчит.
+    // Set the input (wav) and output (device) formats: otherwise the stream
+    // won't convert 22050 mono -> 44100 stereo and the sound stays silent.
     SDL_AudioSpec src = s->spec;
     src.freq = (int)(src.freq * pitch + 0.5f);
     SDL_SetAudioStreamFormat(ch, &src, &s_dev_spec);
@@ -199,7 +199,7 @@ void audio_loop_start(Sound *s, float volume)
     s_loop_vol = volume;
     s_loop_sent = 0;
     SDL_ClearAudioStream(s_loop);
-    SDL_SetAudioStreamFormat(s_loop, &s->spec, &s_dev_spec);  // как в audio_play
+    SDL_SetAudioStreamFormat(s_loop, &s->spec, &s_dev_spec);  // as in audio_play
     SDL_SetAudioStreamGain(s_loop, volume * snd_gain("snd_sfx"));
     SDL_PutAudioStreamData(s_loop, s->data, (int)s->len);
     s_loop_sent = s->len;
@@ -217,7 +217,7 @@ void audio_loop_mul_volume(float mul)
 {
     if (mul < 0.0f) mul = 0.0f;
     if (mul > 4.0f) mul = 4.0f;
-    s_loop_mul = mul;   // gain (vol * mul) применяет audio_update каждый кадр
+    s_loop_mul = mul;   // the gain (vol * mul) is applied by audio_update each frame
 }
 
 void audio_music_start(Sound *s, float volume)
@@ -250,11 +250,11 @@ void audio_set_world(const struct WorldState *w)
     s_world = w;
 }
 
-// Множитель громкости из-за перекрытия линии слушатель->источник.
-// 1 = прямо слышно; ниже — часть пути под землёй. snd_occlusion — сила
-// эффекта (0 = выключено, поведение старших сборок), snd_occlusion_min —
-// пол: даже полностью заслонённый источник остаётся едва слышным (дифракция
-// вокруг холма), иначе за холмом наступала бы абсолютная тишина.
+// Volume multiplier from obstruction of the listener->source line.
+// 1 = plainly audible; lower — part of the path is underground. snd_occlusion —
+// effect strength (0 = off, pre-older-build behavior), snd_occlusion_min —
+// the floor: even a fully blocked source stays faintly audible (diffraction
+// over the hill), otherwise behind a hill there would be absolute silence.
 float audio_occlusion_at(const float to[3])
 {
     float k = cvar_get("snd_occlusion");
@@ -277,13 +277,13 @@ void cmd_snd_occlude(const char *args)
     float f = audio_occlusion_at(p);
     console_print("snd_occlude: %.2f (snd_occlusion %.2f, пол %.2f)",
                   f, cvar_get("snd_occlusion"), cvar_get("snd_occlusion_min"));
-    // console_print виден только на экране — лог даёт то же число из headless.
+    // console_print is only visible on screen — the log gives the same number from headless.
     SDL_Log("snd_occlude: (%.0f %.0f %.0f) -> %.2f", p[0], p[1], p[2], f);
 }
 
-// --- Самопроверка (FR_TEST 'Z') ------------------------------------------------
-// Рельеф синтетический (сетка 8x8 м со стеной 10 м в столбце x=4): тест не
-// должен зависеть от высот конкретной карты.
+// --- Self-check (FR_TEST 'Z') ------------------------------------------------
+// Terrain is synthetic (8x8 m grid with a 10 m wall in column x=4): the test
+// must not depend on the heights of any particular map.
 int audio_selftest(void)
 {
     static float h[8 * 8];
@@ -295,8 +295,8 @@ int audio_selftest(void)
     w.world_w = w.world_d = 7.0f;
 
     const float from[3]   = { 0.0f, 0.0f, 3.0f };
-    const float behind[3] = { 7.0f, 0.0f, 3.0f };    // за стеной, на уровне земли
-    const float above[3]  = { 7.0f, 20.0f, 3.0f };   // та же точка, но над стеной
+    const float behind[3] = { 7.0f, 0.0f, 3.0f };    // behind the wall, at ground level
+    const float above[3]  = { 7.0f, 20.0f, 3.0f };   // same point, but above the wall
     int fails = 0;
     if (world_line_open(&w, from, behind) > 0.1f) {
         SDL_Log("audio selftest FAIL: стена не перекрыла прямую");
@@ -306,7 +306,7 @@ int audio_selftest(void)
         SDL_Log("audio selftest FAIL: путь над стеной считается закрытым");
         fails++;
     }
-    // Громкость: выключенная окклюзия = 1.0, включённая — до самого пола.
+    // Volume: occlusion off = 1.0, occlusion on — down to the floor itself.
     float k0 = cvar_get("snd_occlusion"), m0 = cvar_get("snd_occlusion_min");
     audio_set_world(&w);
     audio_set_listener(from);
@@ -332,9 +332,9 @@ int audio_selftest(void)
     return fails;
 }
 
-// То же на реальной карте: множитель для каждого sounds[] из map.json.
-// Без этого синтетический тест не доказывает, что на Ферме между игроком
-// и источником вообще есть холм.
+// The same on a real map: the multiplier for each sounds[] entry from map.json.
+// Without it the synthetic test does not prove that on the Farm there is a hill
+// between the player and a source at all.
 void audio_selftest_world(const WorldState *w, const float listener[3])
 {
     if (!w || !listener) return;
@@ -346,14 +346,14 @@ void audio_selftest_world(const WorldState *w, const float listener[3])
         SDL_Log("FR_TEST Z: звук %d (%.0f %.0f %.0f) -> %.2f", i,
                 s->pos[0], s->pos[1], s->pos[2], audio_occlusion_at(s->pos));
     }
-    // Контрольная точка: источник в 50 м ПОД ногами обязан быть заглушён —
-    // иначе высоты не читаются (пустой мир), и все «1.00» выше ничего не значат.
+    // Control point: a source 50 m UNDER the feet must be muffled —
+    // otherwise the heights are not read (empty world) and all "1.00" above mean nothing.
     float under[3] = { listener[0], listener[1] - 50.0f, listener[2] };
     SDL_Log("FR_TEST Z: контрольно, под ногами -> %.2f", audio_occlusion_at(under));
     audio_set_world(NULL);
 }
 
-// Заливает в эхо-поток: тишина (задержка) + звук — паттерн реверба
+// Fills the echo stream: silence (delay) + sound — the reverb pattern
 static void echo_fill(SDL_AudioStream *st, Sound *s, int delay_ms)
 {
     if (!st || !s) return;
@@ -371,7 +371,7 @@ static void echo_fill(SDL_AudioStream *st, Sound *s, int delay_ms)
     SDL_PutAudioStreamData(st, s->data, (int)s->len);
 }
 
-// Внутренняя: play/play_once = play_ex с loop 1/0
+// Internal: play/play_once = play_ex with loop 1/0
 static int audio_3d_play_ex(Sound *s, float volume, const float pos[3],
                             float radius, int loop);
 
@@ -389,9 +389,9 @@ static int audio_3d_play_ex(Sound *s, float volume, const float pos[3],
                             float radius, int loop)
 {
     if (!s_dev || !s || radius <= 0.1f) return -1;
-    // Петлевой источник: занятый канал с тем же звуком — двигаем позицию.
-    // РАЗОВЫЙ звук так не делаем: каждый вызов обязан перезапуститься
-    // (иначе частые шаги/шелест замолкают после первого раза).
+    // Looping source: a busy channel with the same sound — just move the position.
+    // A ONE-SHOT sound is not handled this way: every call must restart
+    // (otherwise frequent footsteps/rustle would go silent after the first one).
     if (loop) {
         for (int i = 0; i < AUDIO_3D_CHANNELS; i++) {
             if (s_3d[i].active && s_3d[i].snd == s && s_3d[i].loop) {
@@ -404,8 +404,8 @@ static int audio_3d_play_ex(Sound *s, float volume, const float pos[3],
             }
         }
     }
-    // Ищем свободный канал; если все заняты — перезапускаем самый старый
-    // (с наименьшей очередью), чтобы звук не пропадал.
+    // Look for a free channel; if all are busy — restart the oldest one
+    // (with the smallest queue) so the sound does not disappear.
     int slot = -1;
     int oldest = -1;
     Uint32 minq = 0xFFFFFFFF;
@@ -429,7 +429,7 @@ static int audio_3d_play_ex(Sound *s, float volume, const float pos[3],
     SDL_SetAudioStreamFormat(a->stream, &s->spec, &s_dev_spec);
     SDL_SetAudioStreamGain(a->stream, 0.0f);
     SDL_PutAudioStreamData(a->stream, s->data, (int)s->len);
-    // эхо: задержки 90 и 180 мс
+    // echo: delays of 90 and 180 ms
     for (int e = 0; e < AUDIO_ECHO_N; e++) {
         SDL_ClearAudioStream(a->echo[e]);
         SDL_SetAudioStreamFormat(a->echo[e], &s->spec, &s_dev_spec);
@@ -457,7 +457,7 @@ void audio_3d_stop_all(void)
 void audio_update(void)
 {
     if (!s_dev) return;
-    // Ползунки громкости действуют сразу: переустанавливаем gain каждый кадр
+    // Volume sliders act immediately: reinstall the gain every frame
     float sfx = snd_gain("snd_sfx");
     float mus = snd_gain("snd_music");
     if (s_loop && s_loop_snd) {
@@ -477,7 +477,7 @@ void audio_update(void)
             SDL_PutAudioStreamData(s_music, s_music_snd->data,
                                    (int)s_music_snd->len);
     }
-    // 3D-источники: громкость от дистанции, эхо усиливается вдали
+    // 3D sources: volume from distance, echo grows louder far away
     for (int i = 0; i < AUDIO_3D_CHANNELS; i++) {
         Audio3D *a = &s_3d[i];
         if (!a->active) continue;
@@ -486,7 +486,7 @@ void audio_update(void)
         float dz = a->pos[2] - s_listener[2];
         float dist = sqrtf(dx * dx + dy * dy + dz * dz);
         float t = dist / a->radius;
-        // Разовый звук отыграл — канал свободен (вне зависимости от t)
+        // One-shot sound finished playing — the channel is free (regardless of t)
         if (!a->loop && SDL_GetAudioStreamQueued(a->stream) <= 0) {
             audio_3d_stop(i);
             continue;
@@ -494,10 +494,10 @@ void audio_update(void)
         float gain = 0.0f;
         float occ = 1.0f;
         if (t < 1.0f) {
-            // Окклюзия считается только для слышимого канала: это ~160
-            // выборок высоты на источник, а не на все 8 каналов.
+            // Occlusion is computed only for the audible channel: that is ~160
+            // height samples per source, not for all 8 channels.
             occ = audio_occlusion_at(a->pos);
-            gain = a->vol * sfx * (1.0f - t) * (1.0f - t) * occ;   // квадратичное затухание
+            gain = a->vol * sfx * (1.0f - t) * (1.0f - t) * occ;   // quadratic falloff
             if (a->loop) {
                 int queued = SDL_GetAudioStreamQueued(a->stream);
                 if (queued < (int)a->snd->len / 2)
@@ -506,8 +506,8 @@ void audio_update(void)
             }
         }
         SDL_SetAudioStreamGain(a->stream, gain);
-        // Реверб: лёгкий хвост есть ВСЕГДА, с дистанцией усиливается
-        // (звук издалека = тише + отчётливое эхо).
+        // Reverb: a light tail is ALWAYS present, strengthening with distance
+        // (a sound from afar = quieter + a distinct echo).
         Uint32 bps = (Uint32)(SDL_AUDIO_BITSIZE(a->snd->spec.format) / 8) *
                      (a->snd->spec.channels ? a->snd->spec.channels : 1);
         for (int e = 0; e < AUDIO_ECHO_N; e++) {
@@ -526,7 +526,7 @@ void audio_update(void)
     }
 }
 
-// Отладка: какие звуки сейчас на каналах (имя без audio/ и .wav)
+// Debug: which sounds are on the channels now (name without audio/ and .wav)
 int audio_active_names(char *buf, int size)
 {
     int n = 0;

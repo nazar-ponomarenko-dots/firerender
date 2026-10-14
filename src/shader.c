@@ -1,10 +1,10 @@
 // ============================================================================
-//  shader.c — чтение файлов шейдеров и сборка программ
+//  shader.c — reading shader files and building programs
 // ----------------------------------------------------------------------------
-//  Файлы читаются через менеджер ресурсов (resources_read_text: диск ->
-//  ../диск -> вшитые данные). Программы КЕШИРУЮТСЯ по паре (vs, fs) в
-//  resources.c — один и тот же шейдер компилируется один раз, сколько бы
-//  узлов его ни использовали (см. resources_program).
+//  Files are read through the resource manager (resources_read_text: disk ->
+//  ../disk -> embedded data). Programs are CACHED by the (vs, fs) pair in
+//  resources.c — the same shader is compiled once no matter how many nodes
+//  use it (see resources_program).
 // ============================================================================
 #include "shader.h"
 
@@ -62,7 +62,7 @@ uint64_t shader_source_stamp(const char *path)
     return path ? shader_stamp_recursive(path, 0) : 0;
 }
 
-// Префикс GLSL для текущей платформы
+// GLSL prefix for the current platform
 static const char *shader_version(GLenum type)
 {
 #ifdef USE_GLES_PATH
@@ -71,14 +71,15 @@ static const char *shader_version(GLenum type)
     return "#version 300 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
 #else
     if (type == GL_COMPUTE_SHADER)
-        return "#version 430 core\n";   // compute-шейдеры требуют GLSL 4.30+
+        return "#version 430 core\n";   // compute shaders require GLSL 4.30+
     return "#version 330 core\n";
 #endif
 }
 
-// Разворачивает #include "файл" — рекурсивно подставляет содержимое
-// (глубина до 8, циклы не проверяются). Пути — относительно директории
-// шейдера. Так вся сцена делит общий код (shaders/snow.glsl, csm.glsl).
+// Expands #include "file" — recursively substitutes the contents
+// (depth up to 8, cycles are not checked). Paths are relative to the shader
+// directory. This way the whole scene shares common code (shaders/snow.glsl,
+// csm.glsl).
 static int buf_grow(char **buf, size_t *len, size_t *cap, const char *s)
 {
     size_t sl = strlen(s);
@@ -129,7 +130,7 @@ static char *shader_expand_includes(const char *text, const char *dir, int depth
                 }
                 free(exp);
             } else {
-                // файла нет — оставляем как есть (ошибка будет в GLSL-логе)
+                // file missing — leave the line as is (the error shows in the GLSL log)
                 if (!buf_grow(&out, &len, &cap, line)) goto oom;
             }
         } else {
@@ -151,7 +152,7 @@ GLuint compile_shader_file(GLenum type, const char *path)
         SDL_Log("Cannot read shader file: %s", path);
         return 0;
     }
-    // Директория шейдера — база для относительных #include
+    // Shader directory — base for relative #include paths
     char dir[512] = "";
     const char *slash = strrchr(path, '/');
     if (slash) {
@@ -196,7 +197,7 @@ GLuint compile_shader_file(GLenum type, const char *path)
 
 GLuint make_program(const char *vs_path, const char *fs_path)
 {
-    // Кеш в resources.c: одна программа на пару файлов, ссылки считаются.
+    // Cache lives in resources.c: one program per file pair, refcounted.
     return resources_program(vs_path, fs_path);
 }
 

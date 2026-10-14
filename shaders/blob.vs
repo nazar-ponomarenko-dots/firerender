@@ -1,8 +1,8 @@
 // ============================================================================
-//  Blob — плоский квад-пятно на земле (режим теней 3)
+//  Blob — flat spot-quad on the ground (shadow mode 3)
 // ----------------------------------------------------------------------------
-//  Квад лежит в плоскости XZ: aPos.x — вдоль uObjRight, aPos.y — вдоль
-//  uObjFwd. База (центр) — uObjPos.
+//  The quad lies in the XZ plane: aPos.x runs along uObjRight, aPos.y along
+//  uObjFwd. The base (center) is uObjPos.
 // ============================================================================
 
 layout (location = 0) in vec2 aPos;    // x -0.5..0.5, y -0.5..0.5

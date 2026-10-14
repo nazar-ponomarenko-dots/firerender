@@ -1,9 +1,9 @@
 // ============================================================================
-//  decals.c — декали на рельефе
+//  decals.c — decals on terrain
 // ----------------------------------------------------------------------------
-//  Каждая декаль — квад, проецируемый на рельеф: 9 сэмплов высоты (3x3)
-//  для плавного следования за склонами. Полигон-оффсет вместо ручного
-//  смещения — без z-fighting и парения.
+//  Each decal is a quad projected onto the terrain: 9 height samples (3x3)
+//  for smooth tracking of slopes. Polygon offset instead of manual
+//  displacement — no z-fighting and no floating.
 // ============================================================================
 #include "decals.h"
 
@@ -19,22 +19,22 @@
 #include <SDL3/SDL.h>
 
 typedef struct {
-    float cx, cz;          // центр
-    float hw, hd;          // полуширина/полувысота
-    float rot;             // поворот вокруг Y
-    float offset;          // смещение от рельефа (м)
+    float cx, cz;          // center
+    float hw, hd;          // half-width/half-depth
+    float rot;             // rotation around Y
+    float offset;          // offset from the terrain (m)
     GLuint tex;
     float r, g, b, a;
 } Decal;
 
 typedef struct {
-    const WorldState *world;      // карта высот (посадка на рельеф)
+    const WorldState *world;      // heightmap (terrain placement)
     const RendererContext *rc;
     GLuint prog, vao, vbo, ibo;
     GLint u_viewproj, u_tex, u_color, u_alpha;
     Decal d[DECALS_MAX];
     int n;
-    int head;        // следующий слот кольца (при n == DECALS_MAX)
+    int head;        // next ring slot (when n == DECALS_MAX)
 } DecalsParams;
 
 static DecalsParams *s_d = NULL;
@@ -58,7 +58,7 @@ SceneNode *decals_make_node(const WorldState *w, const RendererContext *rc)
     glUniform1i(p->u_tex, 0);
     glUseProgram(0);
 
-    // Плоский квад XZ: -0.5..0.5, UV 0..1
+    // Flat XZ quad: -0.5..0.5, UV 0..1
     glGenVertexArrays(1, &p->vao);
     glBindVertexArray(p->vao);
     glGenBuffers(1, &p->vbo);
@@ -96,7 +96,7 @@ SceneNode *decals_make_node(const WorldState *w, const RendererContext *rc)
     return node;
 }
 
-// Колбэк узла: рендер всех декалей (из обхода сцены)
+// Node callback: render all decals (from the scene traversal)
 static void decals_node_render(SceneNode *n, float dt)
 {
     (void)dt;
@@ -105,12 +105,12 @@ static void decals_node_render(SceneNode *n, float dt)
     decals_draw(p->rc);
 }
 
-// --- Внутренний хелпер: сэмпл 3x3 для плавного склона -----------------------
+// --- Internal helper: 3x3 sample for smooth slopes --------------------------
 static float decal_sample_terrain(const WorldState *w, float x, float z,
                                   float hw, float hd, float u, float v)
 {
-    (void)u; (void)v;               // зарезервированы: смещение сэмпла по UV
-    // 3x3 сетка сэмплов (u,v в 0..1): центр + 4 угла + 4 середины сторон
+    (void)u; (void)v;               // reserved: per-UV sample offset
+    // 3x3 grid of samples (u,v in 0..1): center + 4 corners + 4 edge midpoints
     const float du[3] = { -1.0f, 0.0f, 1.0f };
     const float dv[3] = { -1.0f, 0.0f, 1.0f };
     float sum = 0.0f;
@@ -124,7 +124,7 @@ static float decal_sample_terrain(const WorldState *w, float x, float z,
     return sum / 9.0f;
 }
 
-// --- Публичный API -----------------------------------------------------------
+// --- Public API --------------------------------------------------------------
 void decal_place(float x, float z, float half_w, float half_d, float rot,
                  const char *tex_path, float r, float g, float b, float alpha)
 {
@@ -142,9 +142,9 @@ void decal_place_ex(float x, float z, float half_w, float half_d, float rot,
         slot = p->n++;
         p->d[slot].tex = 0;
     } else {
-        // Настоящее кольцо: раньше всегда переписывался slot 0 — самая
-        // старая декаль вытеснялась каждым новым штампением, остальные жили
-        // вечно (кольцо не работало).
+        // True ring buffer: previously slot 0 was always overwritten — the
+        // oldest decal was evicted by every new stamp while the rest lived
+        // forever (the ring did not work).
         slot = p->head;
         p->head = (p->head + 1) % DECALS_MAX;
         if (p->d[slot].tex) { resources_texture_release(p->d[slot].tex); p->d[slot].tex = 0; }
@@ -166,19 +166,19 @@ void decals_clear(void)
     s_d->n = 0;
 }
 
-// --- Рендер: один draw per decal, polygon offset вместо смещения -----------
+// --- Render: one draw per decal, polygon offset instead of displacement -----
 void decals_draw(const RendererContext *rc)
 {
     if (!s_d || s_d->n == 0) return;
-    if (rc->pass == RP_SHADOW) return;   // декали не пишут в карты теней
+    if (rc->pass == RP_SHADOW) return;   // decals do not write into shadow maps
     DecalsParams *p = s_d;
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(-1.0f, -1.0f);   // притягиваем к поверхности
+    glPolygonOffset(-1.0f, -1.0f);   // pull toward the surface
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);           // декали друг на друге без глубины
+    glDepthMask(GL_FALSE);           // decals stack without depth writes
     glDisable(GL_CULL_FACE);
     glUseProgram(p->prog);
     glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, rc->viewproj);
@@ -192,7 +192,7 @@ void decals_draw(const RendererContext *rc)
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, d->tex);
 
-        // Квад с поворотом и высотой по рельефу (3x3 сэмплирование)
+        // Quad with rotation and terrain-driven height (3x3 sampling)
         float ct = cosf(d->rot), st = sinf(d->rot);
         float off[4][2] = {
             { -d->hw, -d->hd }, {  d->hw, -d->hd },
@@ -202,7 +202,7 @@ void decals_draw(const RendererContext *rc)
         for (int k = 0; k < 4; k++) {
             tmp[k][0] = d->cx + off[k][0] * ct - off[k][1] * st;
             tmp[k][2] = d->cz + off[k][0] * st + off[k][1] * ct;
-            // 3x3 сэмплирование для плавного склона
+            // 3x3 sampling for smooth slopes
             tmp[k][1] = decal_sample_terrain(p->world,
                                              tmp[k][0], tmp[k][2],
                                              d->hw, d->hd,
@@ -234,5 +234,5 @@ void decals_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->ibo);
     glDeleteVertexArrays(1, &p->vao);
-    // params (p) освобождает node_free_tree(g->root)
+    // params (p) is freed by node_free_tree(g->root)
 }

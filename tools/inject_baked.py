@@ -29,7 +29,7 @@ baked_files = sorted(f for f in os.listdir(BAKED)
                      if os.path.isfile(os.path.join(BAKED, f)))
 baked_names = {"baked/" + f for f in baked_files}
 
-# Перечитываем существующий zip, откидывая старые baked/*, затем дописываем свежие.
+# Re-read the existing zip, dropping the old baked/* entries, then append the fresh ones.
 with zipfile.ZipFile(ZIP, "r") as zin:
     keep = [(i, zin.read(i.filename)) for i in zin.infolist()
             if i.filename not in baked_names]

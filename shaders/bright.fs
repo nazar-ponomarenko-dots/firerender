@@ -1,16 +1,16 @@
 // ============================================================================
-//  Bright — вырезка ярких пикселей для bloom (glow)
+//  Bright — bright-pixel extraction for bloom (glow)
 // ----------------------------------------------------------------------------
-//  Порог мягкий (smoothstep): яркие участки сцены (небо, колосья на солнце)
-//  уходят в отдельный буфер, темнота — в ноль. Потом этот буфер блюрится
-//  и добавляется обратно к сцене.
+//  The threshold is soft (smoothstep): bright scene areas (sky, sunlit wheat
+//  ears) go into a separate buffer, darkness goes to zero. That buffer is then
+//  blurred and added back to the scene.
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uTex;        // сцена (полный экран)
-uniform float uThreshold;      // порог яркости (0..1)
-uniform float uIntensity;      // множитель ярких пикселей
+uniform sampler2D uTex;        // scene (full screen)
+uniform float uThreshold;      // luminance threshold (0..1)
+uniform float uIntensity;      // multiplier for bright pixels
 
 out vec4 FragColor;
 

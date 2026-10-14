@@ -1,15 +1,15 @@
 // ============================================================================
-//  srender_gl.c — бэкенд SIMPLE RENDER на OpenGL / OpenGL ES
+//  srender_gl.c — SIMPLE RENDER backend on OpenGL / OpenGL ES
 // ----------------------------------------------------------------------------
-//  Реализация sr_* (srender.h) поверх gl_loader.h. Один файл знает про GL —
-//  весь остальной движок видит только srender.h. Работает и на desktop GL
-//  (3.3+), и на GLES 3.x: версии GLSL и точности подставляет shader.c,
-//  отсутствующие фичи (compute/indirect/baseinstance/queries/MSAA) честно
-//  отражаются в SrCaps, вызывающие обязаны их уважать.
+//  Implementation of sr_* (srender.h) on top of gl_loader.h. This is the one
+//  file that knows GL — the rest of the engine only sees srender.h. Works on
+//  both desktop GL (3.3+) and GLES 3.x: GLSL versions and precisions are
+//  substituted by shader.c; missing features (compute/indirect/baseinstance/
+//  queries/MSAA) are honestly reported in SrCaps, and callers must respect them.
 //
-//  Draw-вызовы идут через обёртки fr_glDraw* (макросы gl_loader.h) — счётчики
-//  профайлера продолжают работать. Новые бэкенды (Vulkan/Metal) реализуют тот
-//  же sr_* и подсчитывают статистику сами.
+//  Draw calls go through the fr_glDraw* wrappers (gl_loader.h macros) so the
+//  profiler counters keep working. New backends (Vulkan/Metal) implement the
+//  same sr_* and tally their own statistics.
 // ============================================================================
 #include "srender.h"
 
@@ -54,7 +54,7 @@ static int probe_rgba16f_target(void)
     return ok;
 }
 
-// --- Форматы -----------------------------------------------------------------
+// --- Formats -----------------------------------------------------------------
 struct FmtMap { GLint internal; GLenum pix; GLenum type; };
 static const struct FmtMap *fmt_map(SrFormat f)
 {
@@ -71,7 +71,7 @@ static const struct FmtMap *fmt_map(SrFormat f)
     return &m[f];
 }
 
-// Раскладка пикселей при загрузке с CPU может отличаться от внутреннего формата.
+// The pixel layout when uploading from the CPU may differ from the internal format.
 static void pix_map(SrPixFormat p, GLenum *fmt, GLenum *type)
 {
     switch (p) {
@@ -135,7 +135,7 @@ static GLint wrap_gl(SrWrap w)
     }
 }
 
-// --- Жизненный цикл ------------------------------------------------------------
+// --- Lifecycle -----------------------------------------------------------------
 SrDevice *sr_create(void)
 {
     SrDevice *d = calloc(1, sizeof *d);
@@ -152,7 +152,7 @@ SrDevice *sr_create(void)
     glGetIntegerv(GL_MAJOR_VERSION, &major);
     glGetIntegerv(GL_MINOR_VERSION, &minor);
     if (glGetError() == GL_NO_ERROR) { c->gl_major = major; c->gl_minor = minor; }
-    else { c->gl_major = c->gles ? 2 : 1; }   // старые контексты не дают версии
+    else { c->gl_major = c->gles ? 2 : 1; }   // old contexts do not report a version
 
     const char *exts = (const char *)glGetString(GL_EXTENSIONS);
     int compute_version = c->gles ? (c->gl_major > 3 ||
@@ -195,7 +195,7 @@ const SrCaps *sr_caps(const SrDevice *d)
     return d ? &d->caps : NULL;
 }
 
-// --- Кадр -------------------------------------------------------------------------
+// --- Frame -------------------------------------------------------------------------
 void sr_bind_fbo(SrDevice *d, SrFbo fbo)
 {
     (void)d;
@@ -238,7 +238,7 @@ int sr_fbo_complete(SrDevice *d)
     return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 }
 
-// --- Состояние ------------------------------------------------------------------------
+// --- State ------------------------------------------------------------------------
 void sr_cap(SrDevice *d, SrStateCap cap, int on)
 {
     (void)d;
@@ -283,11 +283,11 @@ void sr_wireframe(SrDevice *d, int on)
     if (p_glPolygonMode)
         glPolygonMode(GL_FRONT_AND_BACK, on ? GL_LINE : GL_FILL);
 #else
-    (void)on;   // каркас недоступен в GLES — полигонный режим не эмулируем
+    (void)on;   // wireframe unavailable in GLES — we do not emulate polygon mode
 #endif
 }
 
-// --- Текстуры ---------------------------------------------------------------------------
+// --- Textures ---------------------------------------------------------------------------
 SrTex sr_tex_gen(SrDevice *d)
 {
     (void)d;
@@ -377,7 +377,7 @@ void sr_tex_generate_mipmap(SrDevice *d, SrTex t, SrTexTarget target)
     glGenerateMipmap(tex_target(target));
 }
 
-// --- Рендербуферы и FBO --------------------------------------------------------------------
+// --- Renderbuffers and FBO --------------------------------------------------------------------
 SrRb sr_rb_gen(SrDevice *d)
 {
     (void)d;
@@ -422,7 +422,7 @@ void sr_fbo_delete(SrDevice *d, SrFbo *fbo)
     *fbo = 0;
 }
 
-// Прицепить текстуру к точке: attachment 0 = color0, -1 = depth.
+// Attach a texture to a point: attachment 0 = color0, -1 = depth.
 void sr_fbo_attach_tex(SrDevice *d, SrFbo fbo, int attachment,
                        SrTexTarget target, SrTex t, int face)
 {
@@ -432,7 +432,7 @@ void sr_fbo_attach_tex(SrDevice *d, SrFbo fbo, int attachment,
         ? GL_DEPTH_ATTACHMENT
         : (GLenum)(GL_COLOR_ATTACHMENT0 + attachment);
     if (target == SR_TEX_CUBE) {
-        // GL требует конкретную грань кубомапы (face 0..5).
+        // GL requires a concrete cubemap face (face 0..5).
         GLenum gtex = (face >= 0)
             ? (GLenum)(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face)
             : GL_TEXTURE_CUBE_MAP;
@@ -464,7 +464,7 @@ void sr_blit(SrDevice *d, SrFbo src, SrFbo dst,
     glBindFramebuffer(GL_FRAMEBUFFER, dst);
 }
 
-// --- Шейдерные программы -----------------------------------------------------------------------
+// --- Shader programs -----------------------------------------------------------------------
 SrProg sr_prog_new(SrDevice *d, const char *vs_path, const char *fs_path)
 {
     (void)d;
@@ -497,7 +497,7 @@ SrLoc sr_prog_loc(SrDevice *d, SrProg prog, const char *name)
     return (SrLoc)glGetUniformLocation(prog, name);
 }
 
-// --- Юниформы -------------------------------------------------------------------------------------
+// --- Uniforms -------------------------------------------------------------------------------------
 void sr_uniform_int(SrDevice *d, SrLoc loc, int v)
 { (void)d; glUniform1i(loc, v); }
 
@@ -525,7 +525,7 @@ void sr_uniform_float4v(SrDevice *d, SrLoc loc, int n, const float *v)
 void sr_uniform_mat4(SrDevice *d, SrLoc loc, const float *m)
 { (void)d; glUniformMatrix4fv(loc, 1, GL_FALSE, m); }
 
-// --- Буферы и атрибуты ------------------------------------------------------------------------------
+// --- Buffers and attributes ------------------------------------------------------------------------------
 SrBuf sr_buf_gen(SrDevice *d)
 {
     (void)d;
@@ -648,7 +648,7 @@ void sr_draw_elements_instanced_base(SrDevice *d, SrPrim prim, int count,
         return;
     }
     if (!p_glDrawElementsInstancedBaseInstance) {
-        // caps->base_instance == 0: вызывающий не должен сюда попадать.
+        // caps->base_instance == 0: the caller must not get here.
         static int warned = 0;
         if (!warned) {
             SDL_Log("sr: base_instance недоступен — draw пропущен");
@@ -696,7 +696,7 @@ void sr_barrier(SrDevice *d, unsigned int barrier_bits)
     glMemoryBarrier(bits);
 }
 
-// --- GPU-таймеры --------------------------------------------------------------------------------------------
+// --- GPU timers --------------------------------------------------------------------------------------------
 SrQuery sr_query_gen(SrDevice *d)
 {
     (void)d;
@@ -738,7 +738,7 @@ float sr_query_result_ms(SrDevice *d, SrQuery q)
     return (float)((double)v / 1000000.0);
 }
 
-// --- Чтение обратно --------------------------------------------------------------------------------------------
+// --- Readback --------------------------------------------------------------------------------------------
 void sr_read_pixels(SrDevice *d, int x, int y, int w, int h,
                     SrPixFormat pix, void *out)
 {

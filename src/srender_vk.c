@@ -1,21 +1,21 @@
 // ============================================================================
-//  srender_vk.c — каркас Vulkan-бэкенда (сборка: make vulkan)
+//  srender_vk.c — skeleton of the Vulkan backend (build: make vulkan)
 // ----------------------------------------------------------------------------
-//  ЧЕСТНЫЙ зачаток: sr_create() реально поднимает Vulkan — грузит библиотеку
-//  через SDL (никакого Vulkan SDK при сборке НЕ нужно: типы/прототипы
-//  минимально объявлены здесь), создаёт VkInstance, выбирает физическое
-//  устройство с graphics-очередью, создаёт логическое устройство. sr_caps()
-//  отдаёт возможности. Всё остальное (текстуры/FBO/шейдеры/draw) — заглушки
-//  с однократным предупреждением: рендер-пайплайн на Vulkan не портирован.
+//  HONEST starter: sr_create() really brings up Vulkan — loads the library
+//  through SDL (NO Vulkan SDK is needed at build time: the types/prototypes
+//  are minimally declared here), creates a VkInstance, picks a physical
+//  device with a graphics queue, creates a logical device. sr_caps()
+//  returns the capabilities. Everything else (textures/FBO/shaders/draw) are
+//  stubs with a one-time warning: the render pipeline is not ported to Vulkan.
 //
-//  Дорожная карта (порядок портирования):
-//    1. SDL_Vulkan_CreateSurface + swapchain (present), барьеры кадров.
-//    2. Текстуры/FBO -> VkImage/VkImageView/VkFramebuffer + render pass.
+//  Roadmap (porting order):
+//    1. SDL_Vulkan_CreateSurface + swapchain (present), frame barriers.
+//    2. Textures/FBO -> VkImage/VkImageView/VkFramebuffer + render pass.
 //    3. GLSL -> SPIR-V (glslc --target-env=vulkan1.1) + pipeline cache.
-//    4. Draw: команды в VkCommandBuffer, состояние ->VkPipeline по хешу.
-//    5. Compute/SSBO/indirect — прямой маппинг на Vulkan-примитивы.
-//  Компилируется как: $(CC) -DFR_BACKEND_VULKAN -DSR_ENABLE_VULKAN=1
-//  (srender_gl.c из сборки исключён).
+//    4. Draw: commands into VkCommandBuffer, state -> VkPipeline by hash.
+//    5. Compute/SSBO/indirect — direct mapping onto Vulkan primitives.
+//  Compiles as: $(CC) -DFR_BACKEND_VULKAN -DSR_ENABLE_VULKAN=1
+//  (srender_gl.c is excluded from the build).
 // ============================================================================
 #if defined(FR_BACKEND_VULKAN)
 
@@ -28,8 +28,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Настоящие заголовки Vulkan, если стоят (предпочтительно); иначе
-// минимальные объявления ниже — сборка работает и без Vulkan SDK.
+// Real Vulkan headers if installed (preferred); otherwise the minimal
+// declarations below — the build works even without the Vulkan SDK.
 #if defined(__has_include)
 #  if __has_include(<vulkan/vulkan.h>)
 #    include <vulkan/vulkan.h>
@@ -38,7 +38,7 @@
 #endif
 
 #ifndef SR_VK_REAL_HEADERS
-// --- Минимальные Vulkan-типы (/layouts по спеке v1.1) ------------------------
+// --- Minimal Vulkan types (/layouts per the v1.1 spec) ------------------------
 typedef void    *VkInstance, *VkPhysicalDevice, *VkDevice, *VkQueue;
 typedef int32_t  VkResult;
 
@@ -98,7 +98,7 @@ typedef void (*PFN_vkDestroyInstance)(VkInstance, const void *);
 typedef void (*PFN_vkDestroyDevice)(VkDevice, const void *);
 #endif // !SR_VK_REAL_HEADERS
 
-// --- Девайс ------------------------------------------------------------------
+// --- Device ------------------------------------------------------------------
 struct SrDevice {
     VkInstance  instance;
     VkPhysicalDevice phys;
@@ -108,7 +108,7 @@ struct SrDevice {
     SrCaps      caps;
 };
 
-// --- Заглушки операций: одно предупреждение на операцию -----------------------
+// --- Operation stubs: one warning per operation -----------------------
 #define SR_VK_UNIMPL(op)                                                      \
     do {                                                                      \
         static int warned;                                                    \
@@ -121,15 +121,15 @@ struct SrDevice {
 #define SR_VK_STUB_VOID(name)      void name(SrDevice *d) { (void)d; SR_VK_UNIMPL(#name); }
 #define SR_VK_STUB_ZERO(ret, name) ret name(SrDevice *d) { (void)d; SR_VK_UNIMPL(#name); return 0; }
 
-// --- sr_create: бутстрап Vulkan ------------------------------------------------
+// --- sr_create: Vulkan bootstrap ------------------------------------------------
 SrDevice *sr_create(void)
 {
-    void *vklib = NULL;   // свой dlopen-хэндл (fallback, если SDL не грузит)
+    void *vklib = NULL;   // own dlopen handle (fallback if SDL cannot load it)
     PFN_vkGetInstanceProcAddr gpa = NULL;
     if (SDL_Vulkan_LoadLibrary(NULL) == 0) {
         gpa = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
     } else {
-        // Fallback: грузим libvulkan напрямую (SDL-путь иногда недоступен).
+        // Fallback: load libvulkan directly (the SDL path is sometimes unavailable).
         vklib = SDL_LoadObject("libvulkan.so.1");
         if (!vklib) vklib = SDL_LoadObject("libvulkan.so");
         if (vklib)
@@ -172,7 +172,7 @@ SrDevice *sr_create(void)
         return NULL;
     }
 
-    // Физическое устройство с graphics-очередью (первый подходящий)
+    // Physical device with a graphics queue (the first suitable one)
     PFN_vkEnumeratePhysicalDevices vkEnumPhys =
         VKLOAD(d->instance, vkEnumeratePhysicalDevices);
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkQueueProps =
@@ -216,7 +216,7 @@ SrDevice *sr_create(void)
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    // Расширения поверхностей/swapchain добавляются на шаге present.
+    // Surface/swapchain extensions are added at the present step.
     if (vkCreateDevice(d->phys, &dci, NULL, &d->dev) != VK_SUCCESS) {
         SDL_Log("Vulkan: vkCreateDevice не удался");
         goto fail;
@@ -224,12 +224,12 @@ SrDevice *sr_create(void)
     d->queue_family = qf;
     vkGetQueue(d->dev, qf, 0, &d->queue);
 
-    // Возможности: Vulkan 1.1 гарантирует compute/indirect/3D-текстуры.
+    // Capabilities: Vulkan 1.1 guarantees compute/indirect/3D textures.
     static char ver[64];
     snprintf(ver, sizeof ver, "Vulkan 1.1 (queue family %u)", qf);
     d->caps.gles = 0;
     d->caps.gl_major = 1;
-    d->caps.gl_minor = 1;              // семантика версии: 1.1 = Vulkan 1.1
+    d->caps.gl_minor = 1;              // version semantics: 1.1 = Vulkan 1.1
     d->caps.compute = 1;
     d->caps.indirect = 1;
     d->caps.base_instance = 1;
@@ -277,7 +277,7 @@ void sr_destroy(SrDevice *d)
 
 const SrCaps *sr_caps(const SrDevice *d) { return d ? &d->caps : NULL; }
 
-// --- Операции рендера: каркас, реализация по дорожной карте -------------------
+// --- Render operations: skeleton, implementation per the roadmap -------------------
 void sr_bind_fbo(SrDevice *d, SrFbo fbo) { (void)d; (void)fbo; SR_VK_UNIMPL("sr_bind_fbo"); }
 void sr_viewport(SrDevice *d, int x, int y, int w, int h) { (void)d; (void)x; (void)y; (void)w; (void)h; SR_VK_UNIMPL("sr_viewport"); }
 void sr_clear(SrDevice *d, float r, float g, float b, float a, int cc, int cd) { (void)d; (void)r; (void)g; (void)b; (void)a; (void)cc; (void)cd; SR_VK_UNIMPL("sr_clear"); }
@@ -357,6 +357,6 @@ void sr_read_pixels(SrDevice *d, int x, int y, int w, int h, SrPixFormat pix, vo
 typedef int sr_scaffold_marker;
 
 #else
-// Не Vulkan-сборка — файл пуст (движок собирает srender_gl.c).
+// Not a Vulkan build — the file is empty (the engine builds srender_gl.c).
 typedef int sr_vk_disabled_marker;
 #endif

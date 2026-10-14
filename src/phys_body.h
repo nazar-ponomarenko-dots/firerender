@@ -1,33 +1,33 @@
 // ============================================================================
-//  phys_body.h — твёрдые тела поверх Verlet-мира (см. physics.h)
+//  phys_body.h — rigid bodies on top of the Verlet world (see physics.h)
 // ----------------------------------------------------------------------------
-//  Физика движка остаётся «частицы + связи» (дешёвый Verlet, без C++-SDK).
-//  Этот слой добавляет то, чего в ядре не было: ТЕЛО как группу частиц с
-//  формой, СТАТИЧЕСКИЕ коллайдеры сцены (сферы/цилиндры/боксы из GLB-пропов
-//  и map.json) и взаимодействие «частица-с-частицей» — иначе ящик
-//  проваливается сквозь ящик.
+//  The engine physics stays "particles + constraints" (cheap Verlet, no C++ SDK).
+//  This layer adds what the core lacked: a BODY as a group of particles with
+//  a shape, STATIC scene colliders (spheres/cylinders/boxes from GLB props
+//  and map.json) and "particle-vs-particle" interaction — otherwise a crate
+//  falls through a crate.
 //
-//    * сфера  = 1 частица с radius;
-//    * бокс   = 8 углов + рёбра + диагонали граней (жёсткий кадр, как скелет
-//               рэгдолла в glb_anim.c: связи держат форму);
-//    * гравитация/интеграция/связи — унаследованы из physics.c, ничего
-//      своего не считается дважды;
-//    * массы — inv_mass на частицу, тело массой m даёт 8 частиц по m/8.
+//    * sphere  = 1 particle with radius;
+//    * box     = 8 corners + edges + face diagonals (a rigid frame, like the
+//                ragdoll skeleton in glb_anim.c: constraints hold the shape);
+//    * gravity/integration/constraints — inherited from physics.c, nothing
+//      is computed twice;
+//    * masses — inv_mass per particle, a body of mass m gives 8 particles of m/8.
 //
-//  Тела живут в ГЛОБАЛЬНОМ мире physics_world() вместе с верёвками, поэтому
-//  верёвка может цеплять ящик. Рубильник phys_bodies (cvar) выключает
-//  симуляцию тел, состояния сохраняются (включил — тела там же, где были).
+//  Bodies live in the GLOBAL world physics_world() alongside ropes, so a rope
+//  can grab a crate. The switch phys_bodies (cvar) disables body simulation,
+//  states are preserved (turn it on — bodies are where they were).
 //
-//  Консоль: phys_sphere/phys_box/phys_props/phys_bodies; FR_TEST 'u' — selftest,
-//  'U' — стопка ящиков перед камерой (живой прогон).
+//  Console: phys_sphere/phys_box/phys_props/phys_bodies; FR_TEST 'u' — selftest,
+//  'U' — a stack of crates in front of the camera (live run).
 // ============================================================================
 #ifndef PHYS_BODY_H
 #define PHYS_BODY_H
 
 #include "physics.h"
 
-#define PHYS_BODY_MAX      128     // тел в мире
-#define PHYS_STATIC_MAX    256     // статических коллайдеров
+#define PHYS_BODY_MAX      128     // bodies in the world
+#define PHYS_STATIC_MAX    256     // static colliders
 
 typedef enum {
     PHYS_SPHERE = 0,
@@ -36,49 +36,49 @@ typedef enum {
 
 typedef struct {
     int      shape;
-    int      first_part;           // индекс частицы в PhysWorld
+    int      first_part;           // index of the particle in PhysWorld
     int      nparts;
-    float    half;                 // сфера: радиус; бокс: полудиагональ
-    float    half_ext[3];          // бокс: половинные размеры (local axes)
-    int      sleeping;             // покоится (для статистики/отладки)
+    float    half;                 // sphere: radius; box: half-diagonal
+    float    half_ext[3];          // box: half sizes (local axes)
+    int      sleeping;             // at rest (for statistics/debugging)
 } PhysBody;
 
-// Статический коллайдер: сфера, вертикальный цилиндр (x,z,r + base..top)
-// или box по оси Y (центр c, половинные размеры e).
+// Static collider: sphere, vertical cylinder (x,z,r + base..top)
+// or axis-aligned box (center c, half sizes e).
 typedef struct {
-    int kind;                      // 0 сфера, 1 цилиндр, 2 box
+    int kind;                      // 0 sphere, 1 cylinder, 2 box
     float c[3];
-    float r;                       // сфера/цилиндр
-    float e[3];                    // box: половинные размеры
-    float base, top;               // цилиндр: нижняя/верхняя Y
+    float r;                       // sphere/cylinder
+    float e[3];                    // box: half sizes
+    float base, top;               // cylinder: bottom/top Y
 } PhysStatic;
 
-// Инициализация слоя (реестр пуст, настройки дефолтные). Идемпотентно.
+// Layer initialization (registry empty, default settings). Idempotent.
 void phys_body_init(void);
-// Выключатель слоя (cvar phys_bodies): 0 — тела не двигаются.
+// Layer switch (cvar phys_bodies): 0 — bodies don't move.
 void phys_body_enable(int on);
 int  phys_body_enabled(void);
 
-// Мир один зафиксированный шаг: интеграция+связи (physics_step) плюс
-// коллизии «частица-частица» и «частица-статика». Вызывать из main-цикла
-// вместо physics_step для глобального мира.
+// One fixed world step: integration+constraints (physics_step) plus
+// "particle-particle" and "particle-static" collisions. Call from the main
+// loop instead of physics_step for the global world.
 void phys_body_step(PhysWorld *w, float dt);
 
-// Создание тел (pos — центр; mass — кг; rest = покоится). -1 — лимит/ошибка.
+// Body creation (pos — center; mass — kg; rest = starts asleep). -1 — limit/error.
 int  phys_body_spawn_sphere(PhysWorld *w, const float pos[3], float radius,
                            float mass);
 int  phys_body_spawn_box(PhysWorld *w, const float pos[3], const float ext[3],
                         float mass);
-void phys_body_kill_all(PhysWorld *w);   // убрать только тела, верёвки целы
+void phys_body_kill_all(PhysWorld *w);   // remove only bodies, ropes stay intact
 
 const PhysBody *phys_body_get(int idx);
 int  phys_body_count(void);
 void phys_body_impulse(int idx, const float vel[3]);
-// Центр тела (среднее частиц) — для рендера/отладки.
+// Body center (average of particles) — for rendering/debugging.
 void phys_body_center(int idx, float out[3]);
 
-// --- Статические коллайдеры ---------------------------------------------------
-int  phys_static_add_sphere(const float c[3], float r);      // idx или -1
+// --- Static colliders ---------------------------------------------------
+int  phys_static_add_sphere(const float c[3], float r);      // idx or -1
 int  phys_static_add_cylinder(float x, float z, float r,
                               float base, float top);
 int  phys_static_add_box(const float c[3], const float e[3]);
@@ -86,24 +86,24 @@ void phys_static_clear(void);
 int  phys_static_count(void);
 const PhysStatic *phys_static_get(int i);
 
-// Толкнуть тела от точки (игрок): тела в радиусе pr+r получают импульс
-// вдоль (dir) * speed. dir — горизонтальная скорость игрока, м/с.
+// Push bodies away from a point (the player): bodies within pr+r receive
+// an impulse along (dir) * speed. dir — the player's horizontal velocity, m/s.
 void phys_body_push(const float pos[3], const float vel[3], float pr,
                     float speed_limit);
 
-// Отладочный вывод: номер тела, к которому принадлежит частица мира (или -1).
-// Частицы тел и так лежат в physics_world() и рисуются общим циклом точек в
-// renderer.c — этот запрос нужен, чтобы окрасить их отдельно от верёвок.
+// Debug query: the body number a world particle belongs to (or -1).
+// Body particles already live in physics_world() and are drawn by the shared
+// point loop in renderer.c — this query exists to color them apart from ropes.
 int  phys_body_index_of_part(int part_idx);
 
-// Консольные команды (регистрация — в cmdreg.c).
+// Console commands (registered in cmdreg.c).
 void cmd_phys_sphere(const char *args);
 void cmd_phys_box(const char *args);
 void cmd_phys_props(const char *args);
 void cmd_phys_bodies(const char *args);
 
-// Самопроверка слоя (FR_TEST 'u'): стопка покоится, импульс работает,
-// сквозь статику не проходит, переполнение = -1. Провалов.
+// Layer selftest (FR_TEST 'u'): the stack rests, impulse works,
+// no passing through statics, overflow = -1. Number of failures.
 int  phys_body_selftest(void);
 
 #endif

@@ -1,8 +1,8 @@
 // ============================================================================
-//  minimap.h — мини-карта (CanvasItem2D)
+//  minimap.h — minimap (CanvasItem2D)
 // ----------------------------------------------------------------------------
-//  Карта с точкой игрока и направлением взгляда + жёлтая линия направления
-//  на солнце. Текстура — цвет карты из мира (world tex_base).
+//  Map with the player dot and view direction + a yellow line pointing at
+//  the sun. The texture is the world's map color (world tex_base).
 // ============================================================================
 #ifndef MINIMAP_H
 #define MINIMAP_H
@@ -12,23 +12,23 @@
 #include "world.h"
 
 typedef struct {
-    GLuint prog, vao, vbo;         // программа и буфер (данные каждый кадр)
+    GLuint prog, vao, vbo;         // program and buffer (data rebuilt every frame)
     GLint u_basemap, u_color, u_usetex, u_usemarker;
-    GLuint tex_base;               // текстура карты
-    GLuint tex_marker;             // маркер игрока (img/player.png)
-    const WorldState *world;       // размеры мира (позиция игрока в uv)
-    const RendererContext *rc;     // позиция/взгляд игрока, солнце
-    int vw, vh;                    // размер окна в пикселях
-    int visible;                   // клавиша G: показать/скрыть карту
+    GLuint tex_base;               // map texture
+    GLuint tex_marker;             // player marker (img/player.png)
+    const WorldState *world;       // world sizes (player position in uv)
+    const RendererContext *rc;     // player position/view, sun
+    int vw, vh;                    // window size in pixels
+    int visible;                   // key G: show/hide the map
 } MinimapParams;
 
-// Создаёт узел Minimap (компилирует шейдер, строит VAO). NULL при ошибке.
+// Creates the Minimap node (compiles the shader, builds the VAO). NULL on error.
 SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
                              const RendererContext *rc);
 
 void minimap_node_render(SceneNode *n, float dt);
 
-// Освобождает GL-ресурсы узла (текстура карты — общая, её не удаляем).
+// Frees the node's GL resources (the map texture is shared — don't delete it).
 void minimap_cleanup(SceneNode *n);
 
 #endif

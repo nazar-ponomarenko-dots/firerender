@@ -1,20 +1,21 @@
 // ============================================================================
-//  snowmask.h — пометка вершин меша "открыто небу сверху" (для снега)
+//  snowmask.h — per-vertex mesh flag "open to the sky from above" (for snow)
 // ----------------------------------------------------------------------------
-//  Для GLB-моделей (машины и пр.) запечённая карта "видимость неба" не знает
-//  их геометрию и потому сыпала снег ВНУТРЬ закрытых полостей (салон). Здесь
-//  на этапе загрузки для каждой вершины модели считается: опускается ли на
-//  неё снег с ПРАВОГО направления — то есть есть ли над ней своя же
-//  геометрия (крыша). Вершина с вещами сверху (пол/сиденье под крышей)
-//  получает 0, открытая крыша/капот/багажник — 1. Результат кладётся в
-//  отдельный вершинный буфер aSnow и домножается на снег в mesh.fs.
+//  For GLB models (cars etc.) the baked "sky visibility" map doesn't know
+//  their geometry, so it used to dump snow INSIDE closed cavities (the cabin).
+//  Here, at load time, each model vertex is tested: does snow fall onto it
+//  from the RIGHT direction — i.e. is there its own geometry above it
+//  (a roof). A vertex with stuff above it (floor/seat under a roof) gets 0,
+//  an open roof/hood/trunk gets 1. The result goes into a separate vertex
+//  buffer aSnow and is multiplied into the snow in mesh.fs.
 // ============================================================================
 #ifndef SNOWMASK_H
 #define SNOWMASK_H
 
-// Вычисляет per-vertex фактор "сверху чисто" (0/1) для объединения примитивов.
-// verts[p] — вершины примитива p (по 3 float), indices[p] — индексы (триплеты).
-// Возвращает malloc-массив длиной out_total (= сумма vcounts) или NULL.
+// Computes the per-vertex "clearly exposed from above" factor (0/1) for the
+// merged primitives. verts[p] — vertices of primitive p (3 floats each),
+// indices[p] — indices (triplets).
+// Returns a malloc'd array of length out_total (= sum of vcounts) or NULL.
 float *snow_mask_compute(const float *const *verts, const int *vcounts,
                          const unsigned *const *indices, const int *idxcounts,
                          int nprims, int *out_total);

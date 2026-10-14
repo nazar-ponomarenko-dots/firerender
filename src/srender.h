@@ -1,71 +1,72 @@
 // ============================================================================
-//  srender.h — SIMPLE RENDER: рендерное API движка (драйверо-независимое)
+//  srender.h — SIMPLE RENDER: the engine's render API (driver-independent)
 // ----------------------------------------------------------------------------
-//  Единственная точка, через которую код движка должен работать с GPU.
-//  Драйвер (OpenGL / OpenGL ES сегодня, Vulkan / Metal в будущем) сидит за
-//  спиной и реализует этот интерфейс: сейчас — srender_gl.c. Прямые вызовы
-//  gl* в модулях движка — легаси, миграция на sr_* идёт поэтапно.
+//  The single point through which engine code must talk to the GPU.
+//  The driver (OpenGL / OpenGL ES today, Vulkan / Metal in the future) sits
+//  behind it and implements this interface: for now — srender_gl.c. Direct
+//  gl* calls in engine modules are legacy; migration to sr_* goes step by step.
 //
-//  Правила проектирования (чтобы Vulkan/Metal легли без переписывания API):
-//    1. Никаких типов/констант GL в этом заголовке — только свои енумы.
-//    2. Возможности контекста читаются из sr_caps(), а не через ifdef:
-//       драйвер сам решает, чем закрыть фичу (фолбэк внутри бэкенда).
-//    3. State-модель командная (cap on/off, bind, draw), как в GL/GLES —
-//       бэкенду с другой моделью (Vulkan) придётся кешировать состояние
-//       у себя; движку от этого не больно.
-//    4. Ресурсы — непрозрачные хэндлы (unsigned), а не GL-имена.
+//  Design rules (so that Vulkan/Metal can land without rewriting the API):
+//    1. No GL types/constants in this header — only our own enums.
+//    2. Context capabilities are read from sr_caps(), not through ifdef:
+//       the driver itself decides how to cover a feature (fallback inside the
+//       backend).
+//    3. The state model is command-based (cap on/off, bind, draw), as in
+//       GL/GLES — a backend with a different model (Vulkan) will have to cache
+//       state itself; the engine does not suffer from that.
+//    4. Resources are opaque handles (unsigned), not GL names.
 // ============================================================================
 #ifndef SRENDER_H
 #define SRENDER_H
 
-// --- Хэндлы ресурсов (непрозрачные; 0 = "нет ресурса") ----------------------
-typedef unsigned int SrTex;      // текстура (2D / 3D / кубомапа)
-typedef unsigned int SrFbo;      // фреймбуфер (таргет рендера)
-typedef unsigned int SrRb;       // рендербуфер (depth/MSAA)
-typedef unsigned int SrBuf;      // вершинный/индексный/SSBO-буфер
-typedef unsigned int SrVao;      // набор вершинных атрибутов
-typedef unsigned int SrProg;     // шейдерная программа
-typedef int          SrLoc;      // локация юниформа (-1 = нет)
-typedef unsigned int SrQuery;    // GPU-таймер
+// --- Resource handles (opaque; 0 = "no resource") ----------------------
+typedef unsigned int SrTex;      // texture (2D / 3D / cubemap)
+typedef unsigned int SrFbo;      // framebuffer (render target)
+typedef unsigned int SrRb;       // renderbuffer (depth/MSAA)
+typedef unsigned int SrBuf;      // vertex/index/SSBO buffer
+typedef unsigned int SrVao;      // vertex attribute set
+typedef unsigned int SrProg;     // shader program
+typedef int          SrLoc;      // uniform location (-1 = none)
+typedef unsigned int SrQuery;    // GPU timer
 
-// --- Девайс: один на процесс, создаётся после инициализации контекста -------
+// --- Device: one per process, created after context initialization -------
 typedef struct SrDevice SrDevice;
 
-// Возможности контекста: драйвер заполняет при sr_create().
+// Context capabilities: the driver fills this in at sr_create().
 typedef struct {
     int gles;            // 1 = OpenGL ES, 0 = desktop OpenGL
     int gl_major, gl_minor;
     int compute;         // dispatch + SSBO (GL 4.3 / GLES 3.1)
     int indirect;        // draw indirect (+ multi)
-    int base_instance;   // baseinstance в инстансных draw
-    int timer_query;     // GPU-таймеры (GL 3.3 / GLES с EXT_disjoint_timer_query)
-    int tex3d;           // 3D-текстуры
-    int color_half_float;// RGBA16F можно использовать как render target
-    int texture_norm16;  // нормализованные R16/RG16 текстуры
-    int msaa_max;        // максимум сэмплов MSAA (0 = нет)
-    int max_tex_size;    // максимум габарит текстуры, px
+    int base_instance;   // baseinstance in instanced draws
+    int timer_query;     // GPU timers (GL 3.3 / GLES with EXT_disjoint_timer_query)
+    int tex3d;           // 3D textures
+    int color_half_float;// RGBA16F can be used as a render target
+    int texture_norm16;  // normalized R16/RG16 textures
+    int msaa_max;        // max number of MSAA samples (0 = none)
+    int max_tex_size;    // max texture dimension, px
     const char *vendor, *renderer, *version;
 } SrCaps;
 
-// --- Цели текстур и форматы --------------------------------------------------
+// --- Texture targets and formats --------------------------------------------------
 typedef enum {
     SR_TEX_2D,
     SR_TEX_3D,
     SR_TEX_CUBE,
 } SrTexTarget;
 
-// Внутренний формат хранения (GL-маппинг — в бэкенде).
+// Internal storage format (the GL mapping lives in the backend).
 typedef enum {
-    SR_FMT_RGBA8,        // LDR-сцена, HUD-атласы, спрайты
+    SR_FMT_RGBA8,        // LDR scene, HUD atlases, sprites
     SR_FMT_RGB8,
-    SR_FMT_R8,           // маски (снег, декали)
-    SR_FMT_R16,          // высоты/поля (16 бит целых)
+    SR_FMT_R8,           // masks (snow, decals)
+    SR_FMT_R16,          // heights/fields (16-bit integers)
     SR_FMT_RG8,
-    SR_FMT_RGBA16F,      // HDR-сцена (bloom, GI, SSR)
-    SR_FMT_DEPTH24,      // теневые карты, depth-only проходы
+    SR_FMT_RGBA16F,      // HDR scene (bloom, GI, SSR)
+    SR_FMT_DEPTH24,      // shadow maps, depth-only passes
 } SrFormat;
 
-// Раскладка пикселей при загрузке с CPU (что лежит в data).
+// Pixel layout when loading from the CPU (what data contains).
 typedef enum {
     SR_PIX_RGBA,         // 4 x unsigned byte
     SR_PIX_RGB,          // 3 x unsigned byte
@@ -74,7 +75,7 @@ typedef enum {
     SR_PIX_DEPTH_UINT,   // unsigned int (depth)
 } SrPixFormat;
 
-// Фильтры и обёртка.
+// Filters and wrapping.
 typedef enum {
     SR_FILTER_NEAREST,
     SR_FILTER_LINEAR,
@@ -89,13 +90,13 @@ typedef enum {
     SR_WRAP_MIRROR,
 } SrWrap;
 
-// --- Буферы и рисование ------------------------------------------------------
+// --- Buffers and drawing ------------------------------------------------------
 typedef enum {
-    SR_BUF_ARRAY,        // вершинные данные
-    SR_BUF_ELEMENT,      // индексы
+    SR_BUF_ARRAY,        // vertex data
+    SR_BUF_ELEMENT,      // indices
     SR_BUF_UNIFORM,
     SR_BUF_SSBO,         // shader storage
-    SR_BUF_INDIRECT,     // команды indirect draw
+    SR_BUF_INDIRECT,     // indirect draw commands
 } SrBufTarget;
 
 typedef enum {
@@ -105,7 +106,7 @@ typedef enum {
     SR_PRIM_POINTS,
 } SrPrim;
 
-// Биты барьера памяти после compute-записей (комбинируются через |).
+// Memory barrier bits after compute writes (combined with |).
 enum {
     SR_BARRIER_SSBO      = 1 << 0,
     SR_BARRIER_VERTEX    = 1 << 1,
@@ -117,7 +118,7 @@ enum {
     SR_BARRIER_ALL       = 0x7F,
 };
 
-// --- Состояние ----------------------------------------------------------------
+// --- State -----------------------------------------------------------------
 typedef enum {
     SR_CAP_DEPTH_TEST,
     SR_CAP_CULL_FACE,
@@ -131,73 +132,74 @@ typedef enum {
     SR_BLEND_ONE_MINUS_SRC_ALPHA,
 } SrBlendFac;
 
-// --- Рендерные API (бэкенды) ---------------------------------------------------
-// Движок работает через sr_* — сами бэкенды подключаются за ним. Сегодня
-// реализован GL/GLES (srender_gl.c); Vulkan и Metal — зачатки: каркас выбора
-// и зонды есть, реализация — поэтапная миграция (см. ROADMAP в заголовке).
+// --- Render APIs (backends) ---------------------------------------------------
+// The engine works through sr_* — the backends themselves plug in behind it.
+// Today GL/GLES is implemented (srender_gl.c); Vulkan and Metal are stubs: the
+// selection scaffolding and probes exist, implementation is a staged migration
+// (see the ROADMAP in the header).
 //
-// План подключения нового API (например Vulkan):
-//   1. src/srender_vk.c реализует те же sr_* функции поверх VkInstance/
-//      VkDevice (или переиспользует диспетчер из srender_gl.c, если мы
-//      оставим GL-именование состояний).
-//   2. Шейдеры GLSL 330 компилируются в SPIR-V (glslc/glslangValidator,
-//      цель: --target-env=vulkan1.1); Metal — транслируется MSL-бэкендом
-//      SPIRV-Cross (или MoltenVK, который ест SPIR-V напрямую).
-//   3. Поверхность окна — SDL_Vulkan_CreateSurface / SDL_Metal_CreateView.
-//   4. main.c выбирает API через sr_api_available() + cvar r_backend.
+// Plan for hooking up a new API (e.g. Vulkan):
+//   1. src/srender_vk.c implements the same sr_* functions on top of
+//      VkInstance/VkDevice (or reuses the dispatcher from srender_gl.c if we
+//      keep the GL naming of states).
+//   2. GLSL 330 shaders get compiled to SPIR-V (glslc/glslangValidator,
+//      target: --target-env=vulkan1.1); Metal is translated by the MSL backend
+//      SPIRV-Cross (or MoltenVK, which consumes SPIR-V directly).
+//   3. The window surface — SDL_Vulkan_CreateSurface / SDL_Metal_CreateView.
+//   4. main.c picks the API via sr_api_available() + cvar r_backend.
 typedef enum {
-    SR_API_GL = 0,       // desktop OpenGL (сегодня: основной бэкенд)
-    SR_API_GLES,         // OpenGL ES 3.x (сегодня: low-end/Android профиль)
-    SR_API_VULKAN,       // Vulkan 1.1+ (заготовка)
-    SR_API_METAL,        // Metal 2 через MSL или MoltenVK (заготовка)
-    SR_API_NULL,         // no-op заглушка (headless-серверы, тесты логики)
+    SR_API_GL = 0,       // desktop OpenGL (today: the main backend)
+    SR_API_GLES,         // OpenGL ES 3.x (today: low-end/Android profile)
+    SR_API_VULKAN,       // Vulkan 1.1+ (work in progress)
+    SR_API_METAL,        // Metal 2 via MSL or MoltenVK (work in progress)
+    SR_API_NULL,         // no-op stub (headless servers, logic tests)
     SR_API_COUNT
 } SrApi;
 
-// Человекочитаемое имя ("OpenGL", "Vulkan", ...).
+// Human-readable name ("OpenGL", "Vulkan", ...).
 const char *sr_api_name(SrApi api);
-// 1 = API скомпилирован в движок и может быть выбран. Внутри также
-// учитывает платформу (Metal — только __APPLE__ и т.п.).
+// 1 = the API is compiled into the engine and can be selected. It also takes
+// the platform into account (Metal — __APPLE__ only, etc.).
 int  sr_api_available(SrApi api);
-// SDL_Log-отчёт по всем API (вызывает main.c при старте).
+// SDL_Log report on all APIs (main.c calls it at startup).
 void sr_api_report(void);
 
-// --- Жизненный цикл ----------------------------------------------------------
-// Создать девайс над ТЕКУЩИМ контекстом (GL-функции уже загружены).
-// Будущее: SrDevice *sr_create_api(SrApi api, void *native_surface) —
-// единая фабрика всех бэкендов; пока GL/GLES создаётся здесь.
+// --- Lifecycle ---------------------------------------------------------------
+// Create the device over the CURRENT context (GL functions already loaded).
+// Future: SrDevice *sr_create_api(SrApi api, void *native_surface) —
+// a single factory for all backends; for now GL/GLES is created here.
 SrDevice *sr_create(void);
 void      sr_destroy(SrDevice *d);
 const SrCaps *sr_caps(const SrDevice *d);
 
-// --- Кадр --------------------------------------------------------------------
-void sr_bind_fbo(SrDevice *d, SrFbo fbo);          // 0 = окно/экран
+// --- Frame -------------------------------------------------------------------
+void sr_bind_fbo(SrDevice *d, SrFbo fbo);          // 0 = window/screen
 void sr_viewport(SrDevice *d, int x, int y, int w, int h);
 void sr_clear(SrDevice *d, float r, float g, float b, float a,
               int clear_color, int clear_depth);
-int  sr_fbo_current(SrDevice *d);                  // текущий привязанный
-int  sr_fbo_complete(SrDevice *d);                 // валиден ли текущий FBO
+int  sr_fbo_current(SrDevice *d);                  // currently bound one
+int  sr_fbo_complete(SrDevice *d);                 // is the current FBO valid
 
-// --- Состояние пайплайна ------------------------------------------------------
+// --- Pipeline state ----------------------------------------------------------
 void sr_cap(SrDevice *d, SrStateCap cap, int on);
 void sr_depth_mask(SrDevice *d, int write_enabled);
 void sr_blend_func(SrDevice *d, SrBlendFac src, SrBlendFac dst);
-void sr_cull_front(SrDevice *d, int front_ccw_is_front); // ориентация фронтa
-void sr_wireframe(SrDevice *d, int on);            // может быть no-op (GLES)
+void sr_cull_front(SrDevice *d, int front_ccw_is_front); // front-face orientation
+void sr_wireframe(SrDevice *d, int on);            // may be a no-op (GLES)
 
-// --- Текстуры ------------------------------------------------------------------
+// --- Textures ----------------------------------------------------------------
 SrTex sr_tex_gen(SrDevice *d);
 void  sr_tex_delete(SrDevice *d, SrTex *t);
 void  sr_tex_active(SrDevice *d, int unit);
 void  sr_tex_bind(SrDevice *d, SrTexTarget target, SrTex t);
-// Выделить/загрузить уровень 0 (data == NULL — только выделить).
-// Для кубомапы face = 0..5 (+X..-Z), для обычных текстур face = -1.
+// Allocate/load level 0 (data == NULL — allocate only).
+// For a cubemap face = 0..5 (+X..-Z), for ordinary textures face = -1.
 void  sr_tex_image_2d(SrDevice *d, SrTex t, int face, SrFormat fmt,
                       int w, int h, SrPixFormat pix, const void *data);
 void  sr_tex_image_3d(SrDevice *d, SrTex t, SrFormat fmt,
                       int w, int h, int depth, SrPixFormat pix,
                       const void *data);
-// Обновить диапазон 3D-текстуры (слои z..z+depth).
+// Update a range of a 3D texture (layers z..z+depth).
 void  sr_tex_sub_image_3d(SrDevice *d, SrTex t, int x, int y, int z,
                           int w, int h, int depth, SrPixFormat pix,
                           const void *data);
@@ -206,33 +208,33 @@ void  sr_tex_params(SrDevice *d, SrTex t, SrTexTarget target,
                     SrWrap wrap_s, SrWrap wrap_t, SrWrap wrap_r);
 void  sr_tex_generate_mipmap(SrDevice *d, SrTex t, SrTexTarget target);
 
-// --- Рендербуферы и FBO ---------------------------------------------------------
+// --- Renderbuffers and FBO ---------------------------------------------------
 SrRb  sr_rb_gen(SrDevice *d);
 void  sr_rb_delete(SrDevice *d, SrRb *rb);
-// Хранилище рендербуфера; samples > 1 — MSAA (если бэкенд умеет).
+// Renderbuffer storage; samples > 1 — MSAA (if the backend supports it).
 void  sr_rb_storage(SrDevice *d, SrRb rb, SrFormat fmt, int samples,
                     int w, int h);
 SrFbo sr_fbo_gen(SrDevice *d);
 void  sr_fbo_delete(SrDevice *d, SrFbo *fbo);
-// Прицепить текстуру к точке: attachment 0 = color0, -1 = depth.
-// Для кубомапы face = 0..5 (конкретная грань), для остальных face = -1.
+// Attach a texture to a point: attachment 0 = color0, -1 = depth.
+// For a cubemap face = 0..5 (a specific side), for the rest face = -1.
 void  sr_fbo_attach_tex(SrDevice *d, SrFbo fbo, int attachment,
                         SrTexTarget target, SrTex t, int face);
 void  sr_fbo_attach_rb(SrDevice *d, SrFbo fbo, int attachment, SrRb rb);
-// Копировать прямоугольник src -> dst (размер в пикселях, фильтр для color).
+// Copy a rectangle src -> dst (size in pixels, filter for color).
 void  sr_blit(SrDevice *d, SrFbo src, SrFbo dst,
               int w, int h, int linear, int copy_depth);
 
-// --- Шейдерные программы ---------------------------------------------------------
-// vs/fs/cs — пути внутри shaders/ (компиляция с платформенным префиксом
-// версии GLSL делает драйвер; кеш программ — внутри).
+// --- Shader programs ------------------------------------------------------------
+// vs/fs/cs — paths inside shaders/ (compilation with the platform-specific
+// GLSL version prefix is done by the driver; the program cache is internal).
 SrProg sr_prog_new(SrDevice *d, const char *vs_path, const char *fs_path);
 SrProg sr_prog_compute_new(SrDevice *d, const char *cs_path);
 void   sr_prog_delete(SrDevice *d, SrProg *prog);
 void   sr_prog_use(SrDevice *d, SrProg prog);
 SrLoc  sr_prog_loc(SrDevice *d, SrProg prog, const char *name);
 
-// --- Юниформы ---------------------------------------------------------------------
+// --- Uniforms ----------------------------------------------------------------
 void sr_uniform_int(SrDevice *d, SrLoc loc, int v);
 void sr_uniform_float(SrDevice *d, SrLoc loc, float v);
 void sr_uniform_float2(SrDevice *d, SrLoc loc, float x, float y);
@@ -243,28 +245,28 @@ void sr_uniform_float3v(SrDevice *d, SrLoc loc, int n, const float *v);
 void sr_uniform_float4v(SrDevice *d, SrLoc loc, int n, const float *v);
 void sr_uniform_mat4(SrDevice *d, SrLoc loc, const float *m);   // column-major
 
-// --- Буферы и вершинные атрибуты ----------------------------------------------------
+// --- Buffers and vertex attributes ----------------------------------------------------
 SrBuf sr_buf_gen(SrDevice *d);
 void  sr_buf_delete(SrDevice *d, SrBuf *buf);
 void  sr_buf_bind(SrDevice *d, SrBufTarget target, SrBuf buf);
-// usage: 1 = static (гружим один раз), 0 = stream (перевыгружается каждый кадр).
+// usage: 1 = static (uploaded once), 0 = stream (re-uploaded every frame).
 void  sr_buf_upload(SrDevice *d, SrBufTarget target,
                     const void *data, unsigned int bytes, int static_use);
 void  sr_buf_sub_upload(SrDevice *d, SrBufTarget target, unsigned int offset,
                         const void *data, unsigned int bytes);
-// SSBO на точку привязки (нужен caps->compute).
+// SSBO to a binding point (requires caps->compute).
 void  sr_buf_bind_ssbo(SrDevice *d, SrBuf buf, int binding);
 
 SrVao sr_vao_gen(SrDevice *d);
 void  sr_vao_delete(SrDevice *d, SrVao *vao);
 void  sr_vao_bind(SrDevice *d, SrVao vao);
-// Атрибут из float-векторов comps (1..4); divisor > 0 — инстансный.
+// Attribute from float vectors of comps (1..4); divisor > 0 — instanced.
 void  sr_attrib_float(SrDevice *d, SrLoc loc, int comps, int stride_bytes,
                       unsigned int offset, int divisor);
 
 // --- Draw ----------------------------------------------------------------------------
 void sr_draw_arrays(SrDevice *d, SrPrim prim, int first, int count);
-// type: индексы — uint16 (0) или uint32 (1).
+// type: indices — uint16 (0) or uint32 (1).
 void sr_draw_elements(SrDevice *d, SrPrim prim, int count, int indices_u32,
                       unsigned int byte_offset);
 void sr_draw_arrays_instanced(SrDevice *d, SrPrim prim, int first, int count,
@@ -272,12 +274,12 @@ void sr_draw_arrays_instanced(SrDevice *d, SrPrim prim, int first, int count,
 void sr_draw_elements_instanced(SrDevice *d, SrPrim prim, int count,
                                 int indices_u32, unsigned int byte_offset,
                                 int instances);
-// baseinstance: если бэкенд не умеет (caps->base_instance == 0), работает
-// только с base == 0 — вызывающий обязан это учитывать.
+// baseinstance: if the backend cannot do it (caps->base_instance == 0), it
+// works only with base == 0 — the caller must take that into account.
 void sr_draw_elements_instanced_base(SrDevice *d, SrPrim prim, int count,
                                      int indices_u32, unsigned int byte_offset,
                                      int instances, unsigned int base);
-// Indirect: в буфере SR_BUF_INDIRECT лежит команда draw elements.
+// Indirect: the SR_BUF_INDIRECT buffer holds a draw elements command.
 void sr_draw_elements_indirect(SrDevice *d, SrPrim prim,
                                SrBuf cmd_buf, unsigned int byte_offset);
 
@@ -285,16 +287,16 @@ void sr_draw_elements_indirect(SrDevice *d, SrPrim prim,
 void sr_dispatch(SrDevice *d, int x, int y, int z);
 void sr_barrier(SrDevice *d, unsigned int barrier_bits);
 
-// --- GPU-таймеры (caps->timer_query) ----------------------------------------------------
+// --- GPU timers (caps->timer_query) ----------------------------------------------------
 SrQuery sr_query_gen(SrDevice *d);
 void    sr_query_delete(SrDevice *d, SrQuery *q);
 void    sr_query_begin(SrDevice *d, SrQuery q);
 void    sr_query_end(SrDevice *d);
-// Результат последнего завершённого запроса, миллисекунды.
+// Result of the last completed query, milliseconds.
 float   sr_query_result_ms(SrDevice *d, SrQuery q);
 
-// --- Чтение обратно -----------------------------------------------------------------------
-// Прямоугольник текущего FBO -> out (нижний-левый origin, как в GL).
+// --- Readback -----------------------------------------------------------------------
+// A rectangle of the current FBO -> out (bottom-left origin, like in GL).
 void sr_read_pixels(SrDevice *d, int x, int y, int w, int h,
                     SrPixFormat pix, void *out);
 

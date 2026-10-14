@@ -1,31 +1,32 @@
 // ============================================================================
-//  cmdreg.h — ЕДИНЫЙ реестр консольных команд (см. cmdreg.c)
+//  cmdreg.h — the SINGLE registry of console commands (see cmdreg.c)
 // ----------------------------------------------------------------------------
-//  Раньше команды раскидывались по 4 местам: boot_init в main.c (28 шт),
-//  actions.c (+/- команды движения), fx.c (команды эффектов) и динамически
-//  из Lua. Каждый новый модуль добавлял console_add_command в своём init —
-//  порядок и лимиты было трудно отследить, а промах порядка мог «терять»
-//  команду (таблица ограничена CON_MAX_COMMANDS, лишние тихо не добавляются).
+//  Commands used to be spread across 4 places: boot_init in main.c (28 of
+//  them), actions.c (+/- movement commands), fx.c (effect commands) and
+//  dynamically from Lua. Every new module called console_add_command in its
+//  own init — the order and the limits were hard to track, and an ordering
+//  slip could "lose" a command (the table is capped at CON_MAX_COMMANDS,
+//  extras are silently not added).
 //
-//  Теперь ВСЕ статические команды описываются ОДИН раз в таблице с_cmds в
-//  cmdreg.c (имя + справка + обработчик) и регистрируются одним вызовом
-//  cmdreg_register_all(). Динамические команды (engine.cmd из Lua) по-прежнему
-//  идут через console_add_command — они добавляются пользователем в рантайме.
+//  Now ALL static commands are described ONCE in the s_cmds table in
+//  cmdreg.c (name + help + handler) and registered by a single
+//  cmdreg_register_all() call. Dynamic commands (engine.cmd from Lua) still
+//  go through console_add_command — the user adds them at runtime.
 // ============================================================================
 #ifndef CMDREG_H
 #define CMDREG_H
 #include "console.h"   // ConsoleCmdFn
 
-// Описание команды в центральном реестре.
+// A command entry in the central registry.
 typedef struct {
-    const char *name;      // имя команды ("map", "+forward", ...)
-    const char *help;      // справка для `help`
-    ConsoleCmdFn fn;       // обработчик (const char *args)
+    const char *name;      // command name ("map", "+forward", ...)
+    const char *help;      // help text shown by `help`
+    ConsoleCmdFn fn;       // handler (const char *args)
 } ConCmdDesc;
 
-// Регистрирует ВСЕ статические команды из центральной таблицы с_cmds.
-// Вызывать один раз после console_init (в boot_init). Является ЕДИНСТВЕННОЙ
-// точкой регистрации статических команд всего движка.
+// Registers ALL static commands from the central s_cmds table.
+// Call once after console_init (in boot_init). This is the ONLY registration
+// point for static commands of the whole engine.
 void cmdreg_register_all(void);
 
 #endif

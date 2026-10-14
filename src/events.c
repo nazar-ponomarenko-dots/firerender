@@ -1,5 +1,5 @@
 // ============================================================================
-//  events.c — реализация событийной шины (см. events.h)
+//  events.c — event bus implementation (see events.h)
 // ============================================================================
 #include "events.h"
 
@@ -16,7 +16,7 @@ void events_listen(int type, EventListener fn, void *user)
     if (type < 0 || type >= EVENTS_MAX_TYPES || !fn) return;
     for (int i = 0; i < s_count[type]; i++)
         if (s_listeners[type][i].fn == fn && s_listeners[type][i].user == user)
-            return;                          // уже подписан
+            return;                          // already subscribed
     if (s_count[type] < EVENTS_MAX_LISTENERS) {
         s_listeners[type][s_count[type]].fn = fn;
         s_listeners[type][s_count[type]].user = user;
@@ -45,17 +45,17 @@ void events_emit(int type, const void *a, const void *b)
         s_listeners[type][i].fn(&e, s_listeners[type][i].user);
 }
 
-// --- Отложенная рассылка (ring буфер) ----------------------------------------
+// --- Deferred dispatch (ring buffer) ----------------------------------------
 #define EVENTS_DEFER_MAX 256
 static Event s_deferred[EVENTS_DEFER_MAX];
 static int s_defer_head = 0;
-static int s_defer_tail = 0;      // [head, tail) — занять, кольцо
+static int s_defer_tail = 0;      // [head, tail) — occupied, circular
 
 void events_emit_deferred(int type, const void *a, const void *b)
 {
     if (type < 0 || type >= EVENTS_MAX_TYPES) return;
     int n = (s_defer_tail - s_defer_head + EVENTS_DEFER_MAX) % EVENTS_DEFER_MAX;
-    if (n >= EVENTS_DEFER_MAX - 1) return;       // переполнено — молча теряем
+    if (n >= EVENTS_DEFER_MAX - 1) return;       // overflow — silently dropped
     s_deferred[s_defer_tail].type = type;
     s_deferred[s_defer_tail].a = a;
     s_deferred[s_defer_tail].b = b;
@@ -65,7 +65,7 @@ void events_emit_deferred(int type, const void *a, const void *b)
 void events_flush_deferred(void)
 {
     if (s_defer_head == s_defer_tail) return;
-    // Снимок: события, добавленные во время доставки, останутся на след. flush.
+    // Snapshot: events added during delivery stay for the next flush.
     int end = s_defer_tail;
     while (s_defer_head != end) {
         Event *ev = &s_deferred[s_defer_head];

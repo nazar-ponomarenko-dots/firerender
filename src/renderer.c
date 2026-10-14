@@ -1,9 +1,9 @@
 // ============================================================================
-//  renderer.c — оркестрация рендера кадра (см. renderer.h)
+//  renderer.c — frame render orchestration (see renderer.h)
 // ----------------------------------------------------------------------------
-//  Вынесено из main.c: обход дерева сцены с профилированием, каскад
-//  постобработки (сцена -> bloom -> воксельный туман) и 2D-оверлеи
-//  (миникарта, HUD, прицел, сообщение карты, панели отладки).
+//  Extracted from main.c: profiled scene-tree traversal, the post-processing
+//  cascade (scene -> bloom -> voxel fog) and 2D overlays
+//  (minimap, HUD, crosshair, map message, debug panels).
 // ============================================================================
 #include "renderer.h"
 
@@ -28,8 +28,8 @@
 #include "sky.h"
 #include "ssr.h"
 #include "physics.h"
-#include "phys_body.h"      // окраска частиц твёрдых тел на отладных точках
-#include "glb_anim.h"       // отладка частиц рэгдолла
+#include "phys_body.h"      // rigid-body particle coloring on debug points
+#include "glb_anim.h"       // ragdoll particle debug
 #include "terrain.h"
 #include "voxfog.h"
 #include "water.h"
@@ -43,33 +43,33 @@
 #include <time.h>
 #include <sys/stat.h>
 #ifdef _WIN32
-#include <direct.h>             // mingw: _mkdir объявлен только здесь
+#include <direct.h>             // mingw: _mkdir is declared only here
 #endif
 
 #include "png.h"
 #include "stb_image.h"
 
-// FBO сцены и тумана: создаются при загрузке мира (renderer_setup)
+// Scene and fog FBOs: created at world load (renderer_setup)
 static BloomParams s_bloom;
-// SSR — отражения экранного пространства (рельеф в дождь): сцена+отражение.
+// SSR — screen-space reflections (wet terrain in rain): scene + reflection.
 static SsrParams s_ssr;
-// GI — динамическое глобальное освещение (аналог Lumen): непрямой свет + AO.
+// GI — dynamic global illumination (Lumen analogue): indirect light + AO.
 static GiParams s_gi;
-// Кубомап отражений воды (6 граней, рендер от игрока — см. renderer_cubemap_pass)
+// Water reflection cubemap (6 faces, rendered from the player — see renderer_cubemap_pass)
 static GpuTex s_refl_cubemap = 0;
 static GpuFbo s_refl_cubemap_fbo[6] = {0};
 static GpuTex s_refl_cubemap_depth = 0;
-static int s_refl_cubemap_size = 256; // размер каждой грани
-static float s_cubemap_pos[3] = { 0, 0, 0 };  // центр последнего кубомапа
-static int s_cubemap_valid = 0;               // кубомап ещё не рендерился
-// Кубомап рендерится КАЖДЫЙ КАдр (реалтайм): отражения всегда свежие,
-// без запаздывания при движении. 6 рендеров сцены 256x256 за кадр.
-static int s_active = 0;       // мир загружен: FBO существуют
-static int s_wire = 0;         // каркасный режим (cvar r_wireframe)
-static GpuTex s_noise_tex = 0; // img/noise.png: неравномерность мокрости/дымки
-static int s_vw = 1280, s_vh = 720;   // размер окна в пикселях
-// Рендер-бэкенд (RHI): единственный девайс на процесс. Весь GL в этом файле
-// (пресет кадра, FBO граней, кубомап, состояние) — через gpu_*, не напрямую.
+static int s_refl_cubemap_size = 256; // size of each face
+static float s_cubemap_pos[3] = { 0, 0, 0 };  // center of the last cubemap
+static int s_cubemap_valid = 0;               // cubemap has not been rendered yet
+// The cubemap is rendered EVERY frame (real time): reflections are always
+// fresh, no lag while moving. 6 scene renders of 256x256 per frame.
+static int s_active = 0;       // world loaded: FBOs exist
+static int s_wire = 0;         // wireframe mode (cvar r_wireframe)
+static GpuTex s_noise_tex = 0; // img/noise.png: wetness/haze unevenness
+static int s_vw = 1280, s_vh = 720;   // window size in pixels
+// Render backend (RHI): one device per process. All GL in this file
+// (frame preset, face FBOs, cubemap, state) goes through gpu_*, not directly.
 static const GpuDevice *s_gpu = NULL;
 
 int renderer_vw(void) { return s_vw; }
@@ -80,13 +80,13 @@ void renderer_set_viewport(int vw, int vh)
     if (vw > 0 && vh > 0) { s_vw = vw; s_vh = vh; }
 }
 
-// --- Масштаб рендера (r_render_scale) ------------------------------------------
-// Сцена (вместе с MSAA/GI/SSR/вокс-туманом) рисуется в УМЕНЬШЕННОМ
-// разрешении, финальный композит (voxfog/bloom) и HUD — в нативе окна:
-// апскейл получается сам, текстуры сэмплятся по нормализованным UV.
-// Все фуллскрин-проходы стоят пропорционально пикселям — это главный
-// рычаг фпс на слабых iGPU (0.6 = ~2.8x меньше пикселей).
-static int s_rsw = 1280, s_rsh = 720;  // размер сцены с масштабом
+// --- Render scale (r_render_scale) ------------------------------------------
+// The scene (together with MSAA/GI/SSR/voxel fog) is drawn at a REDUCED
+// resolution, the final composite (voxfog/bloom) and the HUD at native
+// window size: upscaling happens for free, textures are sampled with
+// normalized UVs. Every fullscreen pass costs proportional to pixels —
+// this is the main fps lever on weak iGPUs (0.6 = ~2.8x fewer pixels).
+static int s_rsw = 1280, s_rsh = 720;  // scaled scene size
 static int s_scene_ldr = -1;
 
 static void scene_size_update(void)
@@ -129,17 +129,18 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
     int loaded = 0;
     int valid = 1;
 
-    // PNG хранит строки сверху вниз (в capture флип по Y), а glTexImage2D
-    // считает строку 0 низом — без обратного флипа отражения были бы
-    // перевёрнуты и ложились "криво". Флипаем при загрузке.
+    // PNG stores rows top-to-bottom (capture Y-flips them) while glTexImage2D
+    // treats row 0 as the bottom — without the reverse flip reflections would
+    // be upside down and lie "crooked". So flip on load.
     //
-    // ВАЖНО: флаг stb_image ГЛОБАЛЬНЫЙ и «липкий». Раньше его тут включали и
-    // не сбрасывали — а make_cubemap_fbo зовётся из renderer_setup в САМОМ
-    // КОНЦЕ сборки сцены. При выходе в меню cache_purge_pak выбрасывает из
-    // кеша все ресурсы, загруженные при открытом паке карты (в т.ч. движковые
-    // img/grass.png, img/tree.png), и на ПОВТОРНОЙ загрузке карты они читались
-    // уже с включённым флипом — вся трава/пшеница/деревья вверх ногами.
-    // Теперь флаг возвращается в 0 сразу после чтения граней (см. ниже).
+    // IMPORTANT: the stb_image flag is GLOBAL and "sticky". It used to be set
+    // here and never reset — yet make_cubemap_fbo is called from renderer_setup
+    // at the VERY END of scene setup. On return to the menu cache_purge_pak
+    // drops every resource loaded while the map pak was open (including engine
+    // img/grass.png, img/tree.png) from the cache, and on a REPEAT map load
+    // they were read with the flip still on — all grass/wheat/trees came
+    // upside down. Now the flag goes back to 0 right after the faces are read
+    // (see below).
     stbi_set_flip_vertically_on_load(1);
     for (int face = 0; face < 6; face++) {
         char pattern[256];
@@ -151,8 +152,8 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
             valid = 0;
             break;
         }
-        // SDL_GlobDirectory хранит строки внутри одного блока: копируем имя
-        // до освобождения списка.
+        // SDL_GlobDirectory stores its strings inside one block: copy the name
+        // before freeing the list.
         const char *latest = files[0];
         for (int i = 1; i < count; i++) {
             if (strcmp(files[i], latest) > 0) latest = files[i];
@@ -185,7 +186,7 @@ static GpuTex load_cubemap_from_files(const char *dir, int *out_size)
         loaded++;
         stbi_image_free(px);
     }
-    stbi_set_flip_vertically_on_load(0);   // глобальный флаг — вернуть как было
+    stbi_set_flip_vertically_on_load(0);   // global flag — restore as it was
 
     if (!valid || loaded != 6) {
         if (id) gpu_tex_delete(s_gpu, &id);
@@ -217,12 +218,12 @@ static void make_cubemap_fbo(int size)
     } else {
         SDL_Log("Using static cubemap from cubemaps/ (%dx%d)", size, size);
     }
-    // Глубина (общая для всех граней) - still needed for capture
+    // Depth (shared by all faces) - still needed for capture
     s_refl_cubemap_depth = gpu_tex_gen(s_gpu);
     for (int face = 0; face < 6; face++)
         gpu_cubemap_face_depth24(s_gpu, s_refl_cubemap_depth, face, size);
     gpu_tex_params_cubemap(s_gpu, s_refl_cubemap_depth, 0);   // NEAREST
-    // FBO для каждой грани (still needed for capture command)
+    // FBO per face (still needed for capture command)
     for (int face = 0; face < 6; face++) {
         s_refl_cubemap_fbo[face] = gpu_fbo_gen(s_gpu);
         gpu_fbo_attach_cubemap_color(s_gpu, s_refl_cubemap_fbo[face],
@@ -235,27 +236,27 @@ static void make_cubemap_fbo(int size)
     gpu_bind_framebuffer(s_gpu, 0);
 }
 
-// --- Рендер-контекст: единое кадровое состояние сцены --------------------------
+// --- Render context: unified per-frame scene state --------------------------
 static RendererContext s_rc;
 
-static void cubemap_center_pos(Game *g, float out[3]);   // fwd decl (ниже)
+static void cubemap_center_pos(Game *g, float out[3]);   // fwd decl (below)
 
 const RendererContext *renderer_context(void)
 {
     return &s_rc;
 }
 
-// Собирает кадровое состояние сцены (камера, свет, туман, тени) — ОДИН раз
-// за кадр, до рендера узлов. Матрицы каскадов обновляет shadow.c в конце
-// shadow_render (свежие для vegetation/objects в том же кадре).
+// Collects the per-frame scene state (camera, lights, fog, shadows) — ONCE
+// per frame, before node rendering. shadow.c refreshes the cascade matrices
+// at the end of shadow_render (fresh for vegetation/objects in the same frame).
 static void renderer_ctx_fill(Game *g)
 {
     RendererContext *rc = &s_rc;
     memset(rc, 0, sizeof *rc);
-    rc->vw = s_rsw;   // сцена в масштабе r_render_scale (HUD остаётся натив)
+    rc->vw = s_rsw;   // scene at r_render_scale (HUD stays native)
     rc->vh = s_rsh;
 
-    // Камера
+    // Camera
     if (g->cam) {
         const Camera *cam = &g->cam->cam;
         memcpy(rc->viewproj, g->cam->viewproj, sizeof rc->viewproj);
@@ -271,33 +272,33 @@ static void renderer_ctx_fill(Game *g)
         camera_dirs(cam, rc->cam_fwd, rc->cam_right);
         vec3_cross(rc->cam_right, rc->cam_fwd, rc->cam_up);
         vec3_normalize(rc->cam_up);
-        // Видовой базис — откуда РЕАЛЬНО рендерится кадр. Узел Camera
-        // пересчитывает его каждый кадр (в 3-м лице камера стоит сзади
-        // персонажа); скайбокс/биллборды/SSR/воксельный туман берут его.
+        // View basis — where the frame is REALLY rendered from. The Camera
+        // node recomputes it every frame (in third person the camera sits
+        // behind the character); skybox/billboards/SSR/voxel fog use it.
         if (g->cam->view_fwd[0] || g->cam->view_fwd[1] || g->cam->view_fwd[2]) {
             memcpy(rc->view_pos, g->cam->view_pos, sizeof rc->view_pos);
             memcpy(rc->view_fwd, g->cam->view_fwd, sizeof rc->view_fwd);
             memcpy(rc->view_right, g->cam->view_right, sizeof rc->view_right);
             memcpy(rc->view_up, g->cam->view_up, sizeof rc->view_up);
-        } else {                        // до первого camera_node_update
+        } else {                        // before the first camera_node_update
             memcpy(rc->view_pos, rc->cam_pos, sizeof rc->view_pos);
             memcpy(rc->view_fwd, rc->cam_fwd, sizeof rc->view_fwd);
             memcpy(rc->view_right, rc->cam_right, sizeof rc->view_right);
             memcpy(rc->view_up, rc->cam_up, sizeof rc->view_up);
         }
         rc->cam_duck = g_act[A_DUCK] ? 1 : 0;
-        frustum_build(&rc->frustum, rc->viewproj);   // culling цветного прохода
+        frustum_build(&rc->frustum, rc->viewproj);   // color pass culling
     }
-    // Мокрость (дождь) — плавный 0..1 из fx.c (нарастает/высыхает секундами).
-    // В дождь оригинальные источники света не выключаются, а гаснут до 20%
-    // яркости; сверху добавляется яркий рассеянный «свет от неба», который
-    // компенсирует потерянные 80% освещённости.
+    // Wetness (rain) — smooth 0..1 from fx.c (builds up/dries out over seconds).
+    // In rain the original light sources are not switched off, just dimmed to
+    // 20% brightness; on top a bright diffuse "sky light" is added to
+    // compensate for the lost 80% of illumination.
     rc->wetness = fx_wetness();
     rc->snowcover = fx_snowcover();
     rc->world_size[0] = g->world.world_w;
     rc->world_size[1] = g->world.world_d;
     float light_dim = 1.0f - 0.8f * rc->wetness;   // 1.0 -> 0.20
-    // Свет: направленные источники (0 = солнце)
+    // Lights: directional sources (0 = sun)
     float dir_sum = 0.0f;
     if (g->sun_node) {
         const SunParams *sun = g->sun_node->params;
@@ -310,8 +311,8 @@ static void renderer_ctx_fill(Game *g)
         }
         rc->light_count = n;
     }
-    // Свет от неба (только в дождь): светит ровно вниз, цвет пасмурного
-    // неба; яркость растёт с мокротой до 80% суммарной яркости солнца.
+    // Sky light (rain only): shines straight down, overcast sky color;
+    // brightness grows with wetness up to 80% of the sun's total intensity.
     if (rc->wetness > 0.001f && dir_sum > 0.0f && rc->light_count < SUN_MAX_LIGHTS) {
         int k = rc->light_count++;
         rc->light_dir[k][0] = 0.0f;
@@ -322,7 +323,7 @@ static void renderer_ctx_fill(Game *g)
         rc->light_color[k][2] = 0.80f;
         rc->light_intensity[k] = 0.8f * dir_sum * rc->wetness;
     }
-    // Точечные и прожекторные источники (map.json lights[]: point/spot)
+    // Point and spot lights (map.json lights[]: point/spot)
     rc->point_count = rc->spot_count = 0;
     for (int i = 0; i < mapdata_light_count(); i++) {
         const MapLight *l = mapdata_light(i);
@@ -343,7 +344,7 @@ static void renderer_ctx_fill(Game *g)
             rc->spot_angle[k] = l->angle > 0.01f ? l->angle : 0.6f;
         }
     }
-    // Окружение и туман — унифицированы для всех материалов сцены
+    // Environment and fog — unified for all scene materials
     rc->ambient[0] = 0.75f; rc->ambient[1] = 0.80f; rc->ambient[2] = 0.90f;
     rc->ground_color[0] = 0.22f; rc->ground_color[1] = 0.30f; rc->ground_color[2] = 0.18f;
     sky_fog_color(rc->sky_color);
@@ -355,19 +356,19 @@ static void renderer_ctx_fill(Game *g)
         rc->fog_end = g->world.world_w * tc.fog_end;
     }
     rc->fog_on = cvar_get("r_fog_mode") > 0.5f;
-    // Видимость солнца (в дождь диск скрыт облаками — гаснет вместе с мокротой).
-    // Мокрость уже посчитана выше (rc->wetness) — она же гасит источник света.
+    // Sun visibility (in rain the disk is hidden by clouds — fades with wetness).
+    // Wetness is already computed above (rc->wetness) — it dims the light source too.
     rc->sun_glow = 1.0f - rc->wetness;
     if (rc->sun_glow < 0.0f) rc->sun_glow = 0.0f;
     if (rc->sun_glow > 1.0f) rc->sun_glow = 1.0f;
-    // Вьюпорт текущего прохода (проходы кубомапа переопределяют его)
+    // Viewport of the current pass (cubemap passes override it)
     rc->view_vp[0] = 0;
     rc->view_vp[1] = 0;
     rc->view_vp[2] = s_rsw;
     rc->view_vp[3] = s_rsh;
-    // Кубомап отражений — статический: загружается из cubemaps/ при старте,
-    // переписывается только командой cubemap_capture.
-    // Каскадные тени: текстуры и производные (матрицы свежит shadow.c)
+    // Reflection cubemap — static: loaded from cubemaps/ at startup,
+    // rewritten only by the cubemap_capture command.
+    // Cascade shadows: textures and derived data (shadow.c refreshes the matrices)
     {
         const float boxes[SHADOW_CASCADES] = {
             SHADOW_BOX_0, SHADOW_BOX_1, SHADOW_BOX_2, SHADOW_BOX_3
@@ -384,23 +385,23 @@ static void renderer_ctx_fill(Game *g)
             rc->shadow_tex[c] = shadow_texture(c);
             memcpy(rc->shadow_matrix[c], shadow_matrix(c),
                    sizeof rc->shadow_matrix[c]);
-            // uShadowBox для шейдеров — это РАДИУС покрытия каскада, а не
-            // сторона бокса. Бокс центрирован на камере (shadow_matrix_for
-            // с center=cam_pos, ortho ±box/2), поэтому фрагмент гарантированно
-            // внутри карты каскада только при dist <= box/2. Отдаём половины
-            // {4,8,48,256}; за пределами sample_cascade вернёт «освещено».
+            // uShadowBox for shaders is the cascade coverage RADIUS, not the
+            // box side. The box is centered on the camera (shadow_matrix_for
+            // with center=cam_pos, ortho ±box/2), so a fragment is guaranteed
+            // inside the cascade map only at dist <= box/2. We pass halves of
+            // {4,8,48,256}; beyond that sample_cascade returns "lit".
             rc->shadow_box[c] = boxes[c] * 0.5f;
             rc->shadow_depth[c] = boxes[c] * SHADOW_DEPTH_MUL + 400.0f;
-            // bias рельефа: shadow_bias латеральных текселей (из map.json).
-            // РАНЬШЕ каскад 3 получал вдвое меньше — но у него тексель 50 см
-            // и квантование глубины максимум: при низком солнце на пологих
-            // склонах acne давал ровные полосы-контуры на земле (ширина
-            // полосы = шаг глубины на тексель). Bias в текселях теперь
-            // одинаков на всех каскадах — мировой масштаб растёт с текселем.
+            // Terrain bias: shadow_bias lateral texels (from map.json). It
+            // USED TO be that cascade 3 got half as much — but its texel is
+            // 50 cm and depth quantization is at maximum: with a low sun on
+            // gentle slopes acne produced even contour bands on the ground
+            // (band width = depth step per texel). Bias in texels is now the
+            // same on all cascades — the world-scale value grows with the texel.
             float bias_world = bias * boxes[c] / g_shadow_size[c];
             rc->shadow_bias[c] = bias_world / rc->shadow_depth[c];
             rc->shadow_grad[c] = 10.0f / rc->shadow_depth[c];
-            // bias растительности: shadow_bias_veg текселей (в 2 раза меньше)
+            // Vegetation bias: shadow_bias_veg texels (2x smaller)
             float bias_world_v = bias_veg * boxes[c] / g_shadow_size[c];
             rc->shadow_bias_veg[c] = bias_world_v / rc->shadow_depth[c];
             rc->shadow_grad_veg[c] = 4.5f / rc->shadow_depth[c];
@@ -409,9 +410,9 @@ static void renderer_ctx_fill(Game *g)
     }
 }
 
-// --- Общий uniform-набор сцены --------------------------------------------------
-// Локация по имени; теневые матрицы/bias/grad объявлены по-разному:
-// рельеф — uShadowMatrix0..3, растительность/объекты — массив uShadowMatrix[4].
+// --- Shared scene uniform set --------------------------------------------------
+// Located by name; shadow matrices/bias/grad are declared differently:
+// terrain uses uShadowMatrix0..3, vegetation/objects use array uShadowMatrix[4].
 static GLint su_loc2(GLuint prog, const char *a, const char *b)
 {
     GLint l = glGetUniformLocation(prog, a);
@@ -451,10 +452,10 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     su->u_fogend   = glGetUniformLocation(prog, "uFogEnd");
     su->u_fogon    = glGetUniformLocation(prog, "uFogOn");
     su->u_shadow_on = glGetUniformLocation(prog, "uShadowOn");
-    // Границы каскадов: шейдеры выбирают каскад по дистанции через
-    // uShadowBox[4]. Источник правды — SHADOW_BOX_* в shadow.h, но сюда
-    // отдаётся ПОЛОВИНА каждой стороны (радиус покрытия каскада — бокс
-    // центрирован на камере, см. renderer_ctx_fill), т.е. {4,8,48,256}.
+    // Cascade bounds: shaders pick a cascade by distance via uShadowBox[4].
+    // Source of truth is SHADOW_BOX_* in shadow.h, but HALF of each side is
+    // passed here (cascade coverage radius — the box is centered on the
+    // camera, see renderer_ctx_fill), i.e. {4,8,48,256}.
     su->u_shadowbox = glGetUniformLocation(prog, "uShadowBox");
     su->u_wetness = glGetUniformLocation(prog, "uWetness");
     su->u_snowcover = glGetUniformLocation(prog, "uSnowCover");
@@ -480,8 +481,8 @@ void scene_uniforms_init(SceneUniforms *su, GLuint prog)
     }
 }
 
-// Шлёт общий набор из контекста. bias/градиент — базовые (рельефные);
-// растительность/объекты переопределяют их своими значениями после вызова.
+// Pushes the shared set from the context. bias/gradient are the base (terrain)
+// ones; vegetation/objects override them with their own values after the call.
 void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
 {
     if (su->u_viewproj >= 0)
@@ -495,7 +496,7 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     if (su->u_lightint >= 0 && rc->light_count > 0)
         glUniform1fv(su->u_lightint, rc->light_count, rc->light_intensity);
     if (su->u_lightcount >= 0) glUniform1i(su->u_lightcount, rc->light_count);
-    // Точечные и прожекторные источники
+    // Point and spot lights
     if (su->u_pointpos >= 0 && rc->point_count > 0) glUniform3fv(su->u_pointpos, rc->point_count, &rc->point_pos[0][0]);
     if (su->u_pointcolor >= 0 && rc->point_count > 0) glUniform3fv(su->u_pointcolor, rc->point_count, &rc->point_color[0][0]);
     if (su->u_pointint >= 0 && rc->point_count > 0) glUniform1fv(su->u_pointint, rc->point_count, rc->point_intensity);
@@ -514,8 +515,8 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniform3f(su->u_skycolor, rc->sky_color[0], rc->sky_color[1], rc->sky_color[2]);
     if (su->u_groundcolor >= 0)
         glUniform3f(su->u_groundcolor, rc->ground_color[0], rc->ground_color[1], rc->ground_color[2]);
-    // Запечённый свет по умолчанию ВЫКЛ — включают точечно пути объектов/мешей,
-    // передавая ambient и видимость солнца из пробы terrain_baked_probe().
+    // Baked light is OFF by default — object/mesh paths enable it selectively,
+    // passing ambient and sun visibility from terrain_baked_probe().
     if (su->u_probe_on >= 0) glUniform1f(su->u_probe_on, 0.0f);
     if (su->u_fogcolor >= 0)
         glUniform3f(su->u_fogcolor, rc->fog_color[0], rc->fog_color[1], rc->fog_color[2]);
@@ -530,9 +531,9 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
         glUniform1f(su->u_wetness, rc->wetness);
     if (su->u_snowcover >= 0)
         glUniform1f(su->u_snowcover, rc->snowcover);
-    // Маска снега: запечённая "видимость неба" (та же, что мокрость, RG8).
-    // unit 8 делит юнит с картой мокрости у террейна — это ОДНА и та же
-    // текстура.
+    // Snow mask: baked "sky visibility" (same as wetness, RG8).
+    // Unit 8 is shared with the terrain wetness map — it is the SAME
+    // texture.
     if (su->u_snowmask >= 0 && terrain_snow_mask_have()) {
         gpu_active_texture(s_gpu, 8);
         gpu_bind_2d(s_gpu, terrain_snow_mask_tex());
@@ -540,23 +541,23 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
     }
     if (su->u_worldsize >= 0)
         glUniform2f(su->u_worldsize, rc->world_size[0], rc->world_size[1]);
-    // Кубомап отражений воды на юните 9 (для мокрой земли/деревьев; вода
-    // держит его на юните 7 отдельно — не конфликтует). Внутри прохода
-    // граней кубомапа его НЕ биндим: текстура прикреплена к текущему FBO —
-    // сэмплинг был бы фидбек-лупом (UB).
+    // Water reflection cubemap on unit 9 (for wet ground/trees; water keeps
+    // it on unit 7 separately — no conflict). Inside the cubemap face pass we
+    // do NOT bind it: the texture is attached to the current FBO — sampling
+    // it would be a feedback loop (UB).
     if (su->u_reflection >= 0 && s_refl_cubemap && rc->pass != RP_CUBEMAP_FACE) {
         gpu_active_texture(s_gpu, 9);
         gpu_bind_cubemap(s_gpu, s_refl_cubemap);
         glUniform1i(su->u_reflection, 9);
     }
-    // Шум мокрости/дымки (img/noise.png, REPEAT) — юнит 11
+    // Wetness/haze noise (img/noise.png, REPEAT) — unit 11
     if (su->u_noise >= 0 && s_noise_tex) {
         gpu_active_texture(s_gpu, 11);
         gpu_bind_2d(s_gpu, s_noise_tex);
         glUniform1i(su->u_noise, 11);
     }
     for (int c = 0; c < SHADOW_CASCADES; c++) {
-        // Каскады на текстурных юнитах 3..6 (семплеры назначены при init)
+        // Cascades on texture units 3..6 (samplers assigned at init)
         if (su->u_shadowmap[c] >= 0 && rc->shadow_tex[c]) {
             gpu_active_texture(s_gpu, 3 + c);
             gpu_bind_2d(s_gpu, rc->shadow_tex[c]);
@@ -575,10 +576,10 @@ void scene_uniforms_bind(const SceneUniforms *su, const RendererContext *rc)
 void scene_uniforms_probe(const SceneUniforms *su, float x, float y, float z)
 {
     if (su->u_probe_on < 0) return;
-    // Запечённые пробы объектов/мешей — тоже СТАТИЧНОЕ решение (uProbeSun =
-    // тень статичных преград из бейка). Как и лайтмап террейна, включаются
-    // только в режиме статических теней (r_shadows_mode==2). В режимах 0/1/3
-    // объекты идут динамическим путём: полусферный ambient + CSM.
+    // Baked object/mesh probes are also a STATIC solution (uProbeSun = shadow
+    // of static blockers from the bake). Like the terrain lightmap, they are
+    // enabled only in static shadow mode (r_shadows_mode==2). In modes 0/1/3
+    // objects take the dynamic path: hemispheric ambient + CSM.
     if (!(cvar_get("r_baked_light") > 0.5f) || !terrain_baked_probes_have()
         || cvar_get("r_shadows_mode") != 2.0f) {
         glUniform1f(su->u_probe_on, 0.0f);
@@ -593,7 +594,7 @@ void scene_uniforms_probe(const SceneUniforms *su, float x, float y, float z)
 
 void renderer_setup(const WorldState *w, int vw, int vh)
 {
-    if (!s_gpu) s_gpu = gpu_create();   // RHI-бэкенд (GL): один на процесс
+    if (!s_gpu) s_gpu = gpu_create();   // RHI backend (GL): one per process
     cvar_register_ex("r_render_scale", 1.0f, 0.4f, 1.0f, CVAR_ARCHIVE,
                      "масштаб рендера сцены (1 = полное разрешение окна)");
     cvar_register_ex("r_cheap_fog", 0.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
@@ -604,10 +605,10 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     lowend_profile_init();
     lowend_profile_apply();
 #ifdef USE_GLES_PATH
-    // GLES использует единый shader-present: blit default FBO ненадёжен на EGL.
+    // GLES uses a unified shader-present: blitting the default FBO is unreliable on EGL.
     cvar_set("r_present_blit", 0.0f);
 #endif
-    // Сцена сразу в масштабе: таргеты (MSAA/GI/SSR/туман) меньше окна
+    // Scene starts scaled right away: targets (MSAA/GI/SSR/fog) smaller than the window
     float sc = cvar_get("r_render_scale");
     if (sc < 0.4f) sc = 0.4f;
     if (sc > 1.0f) sc = 1.0f;
@@ -617,8 +618,8 @@ void renderer_setup(const WorldState *w, int vw, int vh)
     if (s_rsh < 1) s_rsh = 1;
     s_scene_ldr = cvar_get("r_scene_ldr") > 0.5f;
 #ifdef USE_GLES_PATH
-    // Не все GLES-устройства умеют RGBA16F как color attachment.
-    // В этом случае выбираем валидный LDR target вместо чёрного incomplete FBO.
+    // Not all GLES devices support RGBA16F as a color attachment.
+    // In that case pick a valid LDR target instead of a black incomplete FBO.
     {
         SrDevice *probe = sr_create();
         if (probe && !sr_caps(probe)->color_half_float) {
@@ -647,11 +648,11 @@ void renderer_setup(const WorldState *w, int vw, int vh)
 #else
     (void)w;
 #endif
-    make_cubemap_fbo(256); // кубомап фиксированного размера
+    make_cubemap_fbo(256); // fixed-size cubemap
     s_cubemap_valid = 0;
     s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
     s_active = 1;
-    // Каркасный режим из config.cfg: sync_cvars срабатывает на изменение.
+    // Wireframe mode from config.cfg: sync_cvars fires on change.
     s_wire = cvar_get("r_wireframe") > 0.5f;
 }
 
@@ -660,8 +661,8 @@ void renderer_resize(int vw, int vh)
     if (!s_active || vw <= 0 || vh <= 0) return;
     s_vw = vw;
     s_vh = vh;
-    // Принудить общий scaled-resize: реальные FBO должны соответствовать
-    // r_render_scale, а не нативному размеру окна.
+    // Force the common scaled resize: actual FBOs must match
+    // r_render_scale, not the native window size.
     s_rsw = s_rsh = 0;
     scene_size_update();
 }
@@ -698,10 +699,10 @@ GpuTex renderer_refl_cubemap(void)
     return s_refl_cubemap;
 }
 
-// --- Обход дерева сцены --------------------------------------------------------
-// Рендер части дерева: 0 = 3D-сцена (в FBO bloom'а), 1 = UI (миникарта и
-// HUD — поверх композита, в bloom не попадают). Каждый узел — с таймером
-// профилирования (profiler).
+// --- Scene tree traversal --------------------------------------------------------
+// Renders part of the tree: 0 = 3D scene (into the bloom FBO), 1 = UI
+// (minimap and HUD — over the composite, not included in bloom).
+// Every node is timed for profiling (profiler).
 static ProfSlot node_slot(const char *name)
 {
     if (strcmp(name, "Sky") == 0) return PROF_SKY;
@@ -713,7 +714,7 @@ static ProfSlot node_slot(const char *name)
     if (strcmp(name, "Selection") == 0) return PROF_SEL;
     if (strcmp(name, "Minimap") == 0) return PROF_MM;
     if (strcmp(name, "DebugHUD") == 0) return PROF_HUD;
-    return PROF_TERRAIN;   // неизвестный узел — в общий бюджет рельефа
+    return PROF_TERRAIN;   // unknown node — into the general terrain budget
 }
 
 static void render_part(SceneNode *world, float dt, int ui)
@@ -750,26 +751,26 @@ static void render_ui(SceneNode *world, float dt)
     render_part(world, dt, 1);
 }
 
-// --- Кадр -----------------------------------------------------------------------
+// --- Frame -----------------------------------------------------------------------
 void renderer_begin(void)
 {
-    // профайлер: обнулить тайминги и счётчики на кадр
+    // profiler: reset per-frame timings and counters
     prof_reset();
     float clear_rgb[3] = { 0.6f, 0.65f, 0.7f };
     if (s_active) sky_fog_color(clear_rgb);
-    // Смена r_render_scale/r_msaa вживую: пересоздать таргеты ДО привязки
+    // Live r_render_scale/r_msaa change: recreate targets BEFORE binding
     scene_size_update();
     bloom_msaa_sync(&s_bloom);
     gpu_bind_framebuffer(s_gpu, s_active ? bloom_scene_fbo(&s_bloom) : 0);
-    // Сцена — в масштабе; прямой рендер в экран (фон меню) — натив
+    // Scene — scaled; direct rendering to screen (menu background) — native
     if (s_active) gpu_viewport(s_gpu, 0, 0, s_rsw, s_rsh);
     else          gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
     gpu_clear(s_gpu, clear_rgb[0], clear_rgb[1], clear_rgb[2], 1.0f);
 }
 
 // --- Cubemap reflection pass ---------------------------------------------------
-// 6 направлений/вверх-векторов граней кубомапа (стандартная ориентация GL:
-// рендер каждой грани развёрнут, чтобы samplerCube читал её по спеке).
+// 6 direction/up vectors of the cubemap faces (standard GL orientation:
+// each face is rendered right-side-up so samplerCube reads it per spec).
 static const float s_face_dirs[6][3] = {
     { 1,  0,  0},   // +X
     {-1,  0,  0},   // -X
@@ -787,8 +788,8 @@ static const float s_face_ups[6][3] = {
     { 0, -1,  0},   // -Z
 };
 
-// Центр кубомапа отражений: x/z игрока, y — уровень воды под игроком
-// (если воды нет — высота камеры: куб описывает окружение игрока).
+// Reflection cubemap center: player x/z, y — water level under the player
+// (if there is no water — camera height: the cube captures the player's surroundings).
 __attribute__((unused))
 static void cubemap_center_pos(Game *g, float out[3])
 {
@@ -799,15 +800,15 @@ static void cubemap_center_pos(Game *g, float out[3])
     out[1] = (ws > -1e8f) ? ws : cam->pos[1];
 }
 
-// Рендер всех 6 граней кубомапа отражений из точки pos. Сохраняет/восстанавливает
-// камеру контекста: узлы сцены (небо, биллборды, фрустум) должны видеть
-// текущую грань, а не основную камеру. dt = 0 — время анимаций не крутим.
+// Renders all 6 reflection cubemap faces from point pos. Saves/restores the
+// context camera: scene nodes (sky, billboards, frustum) must see the current
+// face, not the main camera. dt = 0 — animation time must not advance.
 static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *pos)
 {
     if (!s_refl_cubemap || !g || !g->cam || !world) return;
 
     RendererContext *rc = &s_rc;
-    // Сохраняем текущее состояние контекста
+    // Save the current context state
     float orig_viewproj[16];
     memcpy(orig_viewproj, rc->viewproj, sizeof orig_viewproj);
     int orig_pass = rc->pass;
@@ -826,8 +827,8 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
     float proj[16];
     mat4_perspective(proj, 90.0f * 3.14159f / 180.0f, 1.0f, rc->znear, rc->zfar);
 
-    // Проход грани: камера в центре куба; клип отрезает всё ниже центра
-    // (подводный/подземный мусор в отражениях не нужен).
+    // Face pass: camera at the cube center; the clip plane cuts everything
+    // below the center (underwater/underground garbage is not wanted in reflections).
     rc->pass = RP_CUBEMAP_FACE;
     memcpy(rc->cam_pos, pos, sizeof rc->cam_pos);
     rc->cam_fov_deg = 90.0f;
@@ -846,8 +847,8 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
         mat4_mul(viewproj, proj, view);
 
         memcpy(rc->viewproj, viewproj, sizeof rc->viewproj);
-        // Базис взгляда грани: небо (sky.fs) и биллборды (particle.vs)
-        // восстанавливают направление луча из cam_fwd/right/up.
+        // Face view basis: sky (sky.fs) and billboards (particle.vs)
+        // reconstruct the ray direction from cam_fwd/right/up.
         memcpy(rc->cam_fwd, s_face_dirs[face], sizeof rc->cam_fwd);
         memcpy(rc->cam_up, s_face_ups[face], sizeof rc->cam_up);
         vec3_cross(rc->cam_fwd, rc->cam_up, rc->cam_right);
@@ -861,10 +862,10 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
         gpu_clear(s_gpu, 0.10f, 0.10f, 0.15f, 1.0f);
         gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 1);
         gpu_cap(s_gpu, GPU_CAP_CULL_FACE, 1);
-        render_part(world, 0.0f, 0);   // dt = 0: время сцены не двигать
+        render_part(world, 0.0f, 0);   // dt = 0: do not advance scene time
     }
 
-    // Восстанавливаем контекст
+    // Restore the context
     memcpy(rc->viewproj, orig_viewproj, sizeof rc->viewproj);
     rc->pass = orig_pass;
     memcpy(rc->cam_pos, orig_pos, sizeof rc->cam_pos);
@@ -884,13 +885,14 @@ static void renderer_cubemap_render_at(Game *g, SceneNode *world, const float *p
 
 void renderer_frame(Game *g, float dt, int draw_3d)
 {
-    renderer_ctx_fill(g);        // единый контекст сцены на этот кадр
+    renderer_ctx_fill(g);        // single scene context for this frame
     SceneNode *world = g->root;
     int did_3d = 0;
 
-    // Подводные эффекты: следим за тем, под водой ли глаза игрока, и плавно
-    // вводим/выводим постобработку (тонирование, искажение, виньетка). Тон
-    // берём из водоёма (water_underwater); время копится для анимации волн.
+    // Underwater effects: track whether the player's eyes are submerged and
+    // smoothly fade post-processing in/out (tint, distortion, vignette). The
+    // tint comes from the water body (water_underwater); time accumulates for
+    // the wave animation.
     if (world && draw_3d) {
         static float s_under = 0.0f;
         static float s_undtime = 0.0f;
@@ -898,25 +900,25 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         int inw = g->world_loaded &&
                   water_underwater(&g->world, s_rc.cam_pos, tint);
         float target = inw ? 1.0f : 0.0f;
-        float rate = 1.6f;                 // ~0.6 с до полного входа/выхода
+        float rate = 1.6f;                 // ~0.6 s to full in/out
         if (s_under < target) {
             s_under += rate * dt; if (s_under > target) s_under = target;
         } else if (s_under > target) {
             s_under -= rate * dt; if (s_under < 0.0f) s_under = 0.0f;
         }
-        if (s_under > 0.0f) s_undtime += dt;   // волны идут, пока эффект виден
+        if (s_under > 0.0f) s_undtime += dt;   // waves keep going while the effect is visible
         bloom_set_underwater(s_under, tint, s_undtime);
     }
 
-    // Кубомап отражений — статический (загружен из cubemaps/ при старте).
-    // Рендер в реальном времени отключён для производительности.
-    // Для обновления используйте консольную команду cubemap_capture.
+    // Reflection cubemap — static (loaded from cubemaps/ at startup).
+    // Real-time rendering is disabled for performance.
+    // Use the cubemap_capture console command to refresh it.
 
-    // В игре и в паузе — рисуем сцену (пауза затемняет её меню).
-    // В главном меню с фоткой-фоном сцену не рисуем вовсе (draw_3d = 0).
+    // In game and on pause — draw the scene (pause darkens it with the menu).
+    // In the main menu with a photo background the scene is not drawn at all (draw_3d = 0).
     if (world && draw_3d) {
-        // Каскадные тени: узлы рисуют глубину (pass = RP_SHADOW). Всегда
-        // заполненными — до включения каркасного режима.
+        // Cascade shadows: nodes draw depth (pass = RP_SHADOW). Always filled
+        // — until wireframe mode turns on.
         if (s_rc.shadow_on) {
             int profiling = cvar_get("profiler") > 0.5f;
             Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
@@ -936,10 +938,10 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         did_3d = 1;
     }
     if (did_3d) {
-        // Развернуть MSAA-сцену в текстуры (цвет+глубина) для пост-проходов.
-        // Глубину разворачиваем только если её реально прочтут ниже — те же
-        // условия, что и у потребителей (GI/SSR/voxfog). В КАРТОШКЕ все три
-        // выключены → полноэкранный blit глубины пропускается.
+        // Resolve the MSAA scene into textures (color+depth) for post-passes.
+        // Depth is resolved only if it will actually be read below — same
+        // conditions as for its consumers (GI/SSR/voxfog). In the POTATO preset
+        // all three are off → the fullscreen depth blit is skipped.
         int need_depth =
             gi_is_on() ||
             (cvar_get("r_ssr") >= 0.5f &&
@@ -952,9 +954,9 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         int profiling = cvar_get("profiler") > 0.5f;
         Uint64 pf = profiling ? SDL_GetPerformanceFrequency() : 0;
         GLuint scene_for_post = bloom_scene_tex(&s_bloom);
-        // GI (аналог Lumen): непрямой свет + ambient occlusion. Идёт ПЕРВЫМ
-        // из пост-проходов — SSR и bloom должны видеть уже подсвеченную
-        // сцену (иначе отражения и свечение считаются от «недосвеченной»).
+        // GI (Lumen analogue): indirect light + ambient occlusion. Runs FIRST
+        // among post-passes — SSR and bloom must see the already-lit scene
+        // (otherwise reflections and glow would be computed from an under-lit one).
         if (gi_is_on()) {
             Uint64 tg = profiling ? SDL_GetPerformanceCounter() : 0;
             if (profiling) prof_gpu_begin(PROF_GI);
@@ -966,8 +968,8 @@ void renderer_frame(Game *g, float dt, int draw_3d)
                 prof_add_ms(PROF_GI, (float)(te - tg) * 1000.0f / (float)pf);
             }
         }
-        // SSR: сцена+отражение (мокрый рельеф в дождь). SSR выключен/сухо
-        // или сила 0 — проходим мимо (FBO SSR мог устареть с прошлых кадров).
+        // SSR: scene+reflection (wet terrain in rain). SSR off/dry or strength
+        // 0 — skip entirely (the SSR FBO may be stale from earlier frames).
         if (cvar_get("r_ssr") >= 0.5f &&
             (s_rc.wetness > 0.001f || cvar_get("r_ssr_wet") > 0.001f) &&
             cvar_get("r_ssr_strength") > 0.0f) {
@@ -982,9 +984,9 @@ void renderer_frame(Game *g, float dt, int draw_3d)
             }
             scene_for_post = ssr_tex(&s_ssr);
         }
-        // r_cheap_fog: туман ТОЛЬКО шейдерный (в terrain.fs/wheat.fs —
-        // дистанционный mix + ранний выход дальней травы), без voxfog-марша
-        // и композита. Для КАРТОШКИ: горизонт смягчён, ноль доп. проходов.
+        // r_cheap_fog: fog ONLY in shaders (terrain.fs/wheat.fs — distance mix
+        // + early exit for far grass), no voxfog march or composite. For the
+        // POTATO preset: horizon softened, zero extra passes.
         if (voxfog_is_on() && cvar_get("r_cheap_fog") < 0.5f) {
             Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
             if (profiling) prof_gpu_begin(PROF_BLOOM);
@@ -1007,12 +1009,12 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         } else {
             Uint64 t0 = profiling ? SDL_GetPerformanceCounter() : 0;
             if (profiling) prof_gpu_begin(PROF_BLOOM);
-            // r_present_blit=1 — grade в масштабе сцены + аппаратный blit
-            // (быстрее на слабых iGPU); 0 — шейдерный композит на экран.
+            // r_present_blit=1 — grading at scene scale + hardware blit
+            // (faster on weak iGPUs); 0 — shader composite to the screen.
 #ifdef USE_GLES_PATH
-            // ES/EGL backbuffer: fullscreen shader present. Реальные Android
-            // surface сохраняют кадр до SDL_GL_SwapWindow; desktop offscreen
-            // EGL может не поддерживать readback default framebuffer корректно.
+            // ES/EGL backbuffer: fullscreen shader present. Real Android
+            // surfaces keep the frame until SDL_GL_SwapWindow; desktop offscreen
+            // EGL may not support default framebuffer readback correctly.
             bloom_render(&s_bloom, scene_for_post, 0, s_vw, s_vh);
 #else
             if (cvar_get("r_present_blit") > 0.5f)
@@ -1029,20 +1031,20 @@ void renderer_frame(Game *g, float dt, int draw_3d)
         }
     }
 
-    // HUD/миникарта — только в игре; меню — поверх
+    // HUD/minimap — in game only; the menu draws over it
     if (world && app_state() == APP_PLAY)
         render_ui(world, dt);
 }
 
-// Чтение кадра для скриншотов. На GLES/EGL драйверы отдают default
-// framebuffer чёрным (на экран после swap картинка при этом идёт) — читаем
-// scene-target: валидный FBO того же размера (при r_render_scale 1.0),
-// HUD-оверлеи в кадр не входят.
+// Frame readback for screenshots. On GLES/EGL drivers hand back the default
+// framebuffer as black (even though the image does reach the screen after
+// swap) — so read the scene target: a valid FBO of the same size (at
+// r_render_scale 1.0), HUD overlays are not included in the frame.
 void renderer_read_pixels(unsigned char *px, int vw, int vh)
 {
     int rw = vw, rh = vh;
 #ifdef USE_GLES_PATH
-    GLuint prev = 0;   // обратно восстанавливаем binding только на GLES-пути
+    GLuint prev = 0;   // binding is restored only on the GLES path
     rw = s_rsw < vw ? s_rsw : vw;
     rh = s_rsh < vh ? s_rsh : vh;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, (GLint *)&prev);
@@ -1053,8 +1055,8 @@ void renderer_read_pixels(unsigned char *px, int vw, int vh)
                 glCheckFramebufferStatus(GL_FRAMEBUFFER), glGetError());
     }
 #endif
-    // GLES-драйверы (NVIDIA EGL) дают GL_INVALID_OPERATION на чтение GL_RGB
-    // из RGBA8-attachment — читаем GL_RGBA и выкидываем альфу.
+    // GLES drivers (NVIDIA EGL) return GL_INVALID_OPERATION when reading GL_RGB
+    // from an RGBA8 attachment — read GL_RGBA and drop the alpha.
 #ifdef USE_GLES_PATH
     memset(px, 0, (size_t)vw * vh * 3);
     {
@@ -1086,12 +1088,12 @@ void renderer_read_pixels(unsigned char *px, int vw, int vh)
 void renderer_end(Game *g, float dt)
 {
     lowend_profile_frame(dt * 1000.0f);
-    // Все оверлеи и screenshot читают default framebuffer. Некоторые ES/EGL
-    // драйверы не сохраняют раздельные READ/DRAW bindings после пост-проходов.
+    // All overlays and screenshot read the default framebuffer. Some ES/EGL
+    // drivers do not keep separate READ/DRAW bindings after post-passes.
     gpu_bind_framebuffer(s_gpu, 0);
     gpu_viewport(s_gpu, 0, 0, s_vw, s_vh);
-    // Прицел — простая белая точка в центре (в игре, без консоли,
-    // cvar r_crosshair; консоль: toggle_crosshair)
+    // Crosshair — a simple white dot in the center (in game, console inactive,
+    // cvar r_crosshair; console: toggle_crosshair)
     if (g->world_loaded && app_state() == APP_PLAY && !console_active()
         && cvar_get("r_crosshair") > 0.5f) {
         const float cx = s_vw * 0.5f, cy = s_vh * 0.5f;
@@ -1099,12 +1101,12 @@ void renderer_end(Game *g, float dt)
         gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
         gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
         gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
-        // точка 3x3 px в центре
+        // 3x3 px dot in the center
         hud_rect_draw(s_vw, s_vh, cx - 1.5f, cy - 1.5f, 3.0f, 3.0f, white);
     }
 
-    // Отладка мини-физики (Verlet): частицы проецируются на экран и рисуются
-    // точками. Приближается к рэгдоллу: потом вместо точек будут кости.
+    // Mini-physics (Verlet) debug: particles are projected to screen space and
+    // drawn as dots. Ragdoll is close: later bones will replace the dots.
     {
         PhysWorld *w = physics_world();
         float dbg[512 * 3];
@@ -1123,19 +1125,19 @@ void renderer_end(Game *g, float dt)
                     vp[2]*p[0] + vp[6]*p[1] + vp[10]*p[2] + vp[14],
                     vp[3]*p[0] + vp[7]*p[1] + vp[11]*p[2] + vp[15],
                 };
-                if (clip[3] <= 0.01f) continue;      // за камерой
+                if (clip[3] <= 0.01f) continue;      // behind the camera
                 float sx = (clip[0] / clip[3] * 0.5f + 0.5f) * (float)s_vw;
                 float sy = (0.5f - clip[1] / clip[3] * 0.5f) * (float)s_vh;
-                float col[4] = { 0.3f, 0.9f, 1.0f, 0.9f };   // свободная
+                float col[4] = { 0.3f, 0.9f, 1.0f, 0.9f };   // free particle
                 if (w->part[i].inv_mass <= 0.0f) {
-                    col[0] = 1.0f; col[1] = 0.6f; col[2] = 0.2f;   // прибитая
+                    col[0] = 1.0f; col[1] = 0.6f; col[2] = 0.2f;   // pinned particle
                 } else if (phys_body_index_of_part(i) >= 0) {
-                    // частица твёрдого тела: иначе ящик неотличим от верёвки
+                    // rigid-body particle: otherwise a box is indistinguishable from a rope
                     col[0] = 0.9f; col[1] = 0.3f; col[2] = 0.9f;
                 }
                 hud_rect_draw(s_vw, s_vh, sx - 3.0f, sy - 3.0f, 6.0f, 6.0f, col);
             }
-            // Частицы рэгдоллов — жёлтые
+            // Ragdoll particles — yellow
             for (int i = 0; i < ndbg; i++) {
                 const float *p = &dbg[i * 3];
                 float clip[4] = {
@@ -1153,16 +1155,16 @@ void renderer_end(Game *g, float dt)
         }
     }
 
-    // Сообщение карты (message из триггеров/use) — по центру экрана.
-    // Таймер (g_ui_msg_t) считает game.c в game_update.
+    // Map message (from triggers/use) — screen center.
+    // The timer (g_ui_msg_t) is driven by game.c in game_update.
     if (g->ui_msg_t > 0.0f && g->world_loaded && app_state() == APP_PLAY) {
         float mw = hud_text_width(g->ui_msg);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.55f };
         const float fg[4] = { 0.9f, 0.95f, 1.0f, 1.0f };
-        // Блендинг включаем САМИ: hud_text_draw/hud_rect_draw по контракту
-        // GL-состояние не ставят (hud.h). Раньше состояние «утекало» из блока
-        // прицела, и при r_crosshair 0 сообщение рисовалось без альфы —
-        // непрозрачный фон и залитые «дырки» в буквах.
+        // We enable blending OURSELVES: hud_text_draw/hud_rect_draw do not set
+        // GL state by contract (hud.h). The state used to "leak" from the crosshair
+        // block, so with r_crosshair 0 the message drew without alpha —
+        // opaque background and filled-in "holes" in the letters.
         gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
         gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
         gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
@@ -1174,28 +1176,28 @@ void renderer_end(Game *g, float dt)
         gpu_cap(s_gpu, GPU_CAP_BLEND, 0);
     }
 
-    // --- HP: полоска здоровья (всегда в игре), вспышка урона, экран смерти ---
+    // --- HP: health bar (always in game), damage flash, death screen ---
     if (g->world_loaded && app_state() == APP_PLAY) {
         const Health *h = &g->player.hp;
         gpu_cap(s_gpu, GPU_CAP_DEPTH_TEST, 0);
         gpu_cap(s_gpu, GPU_CAP_BLEND, 1);
         gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
 
-        // Красная вспышка урона на весь экран (гаснет со временем).
-        // Живому: полоска HP и вспышка урона. Мёртвому — только экран смерти.
+        // Full-screen red damage flash (fades over time).
+        // Living: HP bar and damage flash. Dead — death screen only.
         if (!h->dead) {
         if (h->hurt_flash > 0.001f) {
             const float fl[4] = { 0.75f, 0.05f, 0.05f, h->hurt_flash * 0.38f };
             hud_rect_draw(s_vw, s_vh, 0.0f, 0.0f, (float)s_vw, (float)s_vh, fl);
         }
 
-        // Полоска HP слева снизу.
+        // HP bar at the bottom left.
         float frac = health_frac(h);
         float bx = 24.0f, bh = 20.0f, bw = 240.0f;
         float by = (float)s_vh - 46.0f;
         const float border[4] = { 0.0f, 0.0f, 0.0f, 0.55f };
         const float back[4]   = { 0.12f, 0.12f, 0.14f, 0.62f };
-        // Цвет заливки: красный (мало) -> жёлтый -> зелёный (много).
+        // Fill color: red (low) -> yellow -> green (high).
         float fr, fg2, fb = 0.10f;
         if (frac > 0.5f) { fr = (1.0f - frac) * 2.0f; fg2 = 0.85f; }
         else             { fr = 0.90f;                fg2 = frac * 2.0f * 0.85f; }
@@ -1212,16 +1214,16 @@ void renderer_end(Game *g, float dt)
                               + hud_text_ascent_small(), hpbuf, hptext);
         }
 
-        // Экран смерти: плавное затемнение (гасим не мгновенно, а за ~0.5 с
-        // после удара) с красным подтоном, надпись и отсчёт возрождения.
+        // Death screen: gradual fade to black (~0.5 s after the killing blow,
+        // not instant) with a red tint, caption and respawn countdown.
         if (h->dead) {
-            // Время с момента смерти растёт от 0; вход затемнения за ~0.4 с
-            // (не зависит от длины respawn_delay). dp — доля до возрождения.
+            // Time since death grows from 0; the fade-in takes ~0.4 s
+            // (independent of respawn_delay length). dp — fraction of the way to respawn.
             float dl = h->respawn_delay > 0.001f ? h->respawn_delay : 1.0f;
             float td = dl - h->respawn_t; if (td < 0.0f) td = 0.0f;
             float fade = td / 0.4f; if (fade > 1.0f) fade = 1.0f;
             float dp = td / dl; if (dp > 1.0f) dp = 1.0f;
-            // Затемнение с красным подтоном (кровь -> черно к концу).
+            // Darkening with a red tint (blood -> black towards the end).
             const float dim[4] = { 0.18f * (1.0f - dp), 0.0f, 0.0f,
                                    0.66f * fade };
             hud_rect_draw(s_vw, s_vh, 0.0f, 0.0f, (float)s_vw, (float)s_vh, dim);
@@ -1230,7 +1232,7 @@ void renderer_end(Game *g, float dt)
             const float dc[4] = { 0.92f, 0.18f, 0.18f, fade };
             hud_text_draw_big(s_vw, s_vh, (s_vw - mw2) * 0.5f,
                               s_vh * 0.40f + hud_text_ascent_big(), msg, dc);
-            // Подпись: обратный отсчёт до возрождения.
+            // Subtitle: countdown to respawn.
             char sub[48];
             float secs = h->respawn_t; if (secs < 0.0f) secs = 0.0f;
             snprintf(sub, sizeof sub, "Возрождение через %.0f...", secs + 0.99f);
@@ -1243,10 +1245,10 @@ void renderer_end(Game *g, float dt)
         gpu_cap(s_gpu, GPU_CAP_BLEND, 0);
     }
 
-    // snd_debug: панелька справа сверху — какие звуки играют сейчас
-    // и счётчик шагов (для отладки звука). Работает в меню и в игре.
+    // snd_debug: panel at the top right — which sounds are playing now
+    // plus a step counter (audio debug). Works in the menu and in game.
     if (cvar_get("snd_debug") > 0.5f) {
-        extern int g_step_calls;    // счётчик шагов (camera.c)
+        extern int g_step_calls;    // step counter (camera.c)
         char sndbuf[128], line[192];
         audio_active_names(sndbuf, sizeof sndbuf);
         snprintf(line, sizeof line, "SND: %s | steps: %d",
@@ -1256,13 +1258,13 @@ void renderer_end(Game *g, float dt)
         gpu_blend_func(s_gpu, GPU_BLEND_SRC_ALPHA, GPU_BLEND_ONE_MINUS_SRC_ALPHA);
         const float bg[4] = { 0.05f, 0.06f, 0.10f, 0.75f };
         hud_rect_draw(s_vw, s_vh, (float)s_vw - 470.0f, 8.0f, 462.0f, 26.0f, bg);
-        // Текст по центру окошка: базовая линия = top + ascent
+        // Text centered in the box: baseline = top + ascent
         const float fg[4] = { 0.85f, 0.95f, 1.0f, 1.0f };
         hud_text_draw_small(s_vw, s_vh, (float)s_vw - 458.0f,
                             8.0f + hud_text_ascent_small(), line, fg);
     }
-    // profiler: панель справа снизу — полигоны, вершины, draw calls и
-    // время по модулям (команда profiler). Что жрёт больше всего.
+    // profiler: panel at the bottom right — polygons, vertices, draw calls and
+    // per-module time (profiler command). Shows what eats the most.
     if (cvar_get("profiler") > 0.5f && g->world_loaded) {
         char line[256];
         float total = prof_total_ms();
@@ -1295,7 +1297,7 @@ void renderer_end(Game *g, float dt)
                  g_prof_tris, g_prof_verts, g_prof_draws, g_prof_state_skipped);
         hud_text_draw_small(s_vw, s_vh, x, y + hud_text_ascent_small(), line, fg);
         y += fh;
-        // строки по модулям (только ненулевые, в порядке убывания GPU-времени)
+        // per-module rows (nonzero only, in descending GPU-time order)
         int order[PROF_N];
         for (int i = 0; i < PROF_N; i++) order[i] = i;
         for (int a = 0; a < PROF_N; a++)
@@ -1320,27 +1322,27 @@ void renderer_end(Game *g, float dt)
     }
 }
 
-// --- Cubemap capture: рендер 6 граней в позиции и сохранение PNG --------------
-// Рендерит кубомап отражений из точки pos (размер size, лимит 512) той же
-// корректной логикой, что и живой прохождение отражений (renderer_cubemap_render_at),
-// и тут же читает каждую грань обратно, сохраняя 6 PNG в cubemaps/ (px..nz).
-// Заодно этот кубомап становится живым (вода начнёт отражать его).
+// --- Cubemap capture: render 6 faces at a position and save PNGs --------------
+// Renders the reflection cubemap from point pos (size, capped at 512) with the
+// same correct logic as the live reflection pass (renderer_cubemap_render_at),
+// then reads each face straight back, saving 6 PNGs into cubemaps/ (px..nz).
+// The captured cubemap also becomes the live one (water starts reflecting it).
 void renderer_cubemap_capture_at(Game *g, const float *pos, int size)
 {
     if (!s_refl_cubemap || size <= 0 || !g || !pos) return;
-    if (size > 512) size = 512;   // лимит
+    if (size > 512) size = 512;   // cap
     if (size < 16) size = 16;
 
-    // Если размер отличается от текущего живого кубомапа — пересоздать под него
+    // If the size differs from the current live cubemap — recreate for it
     if (size != s_refl_cubemap_size)
         make_cubemap_fbo(size);
 
-    // Рендер 6 граней из точки pos (корректная ориентация/клип/без солнца-в-дождь)
+    // Render 6 faces from point pos (correct orientation/clip/no sun in rain)
     renderer_cubemap_render_at(g, g->root, pos);
 
     static const char *face_names[6] = { "px", "nx", "py", "ny", "pz", "nz" };
 
-    // Читаем каждую грань обратно из её FBO и сохраняем PNG
+    // Read each face back from its FBO and save a PNG
     int orig_fbo = gpu_fbo_current(s_gpu);
     for (int face = 0; face < 6; face++) {
         gpu_bind_framebuffer(s_gpu, s_refl_cubemap_fbo[face]);
@@ -1349,7 +1351,7 @@ void renderer_cubemap_capture_at(Game *g, const float *pos, int size)
         unsigned char *flip = malloc((size_t)size * size * 3);
         if (px && flip) {
             gpu_read_rgb(s_gpu, 0, 0, size, size, px);
-            // PNG хранит строки сверху вниз, GL возвращает снизу вверх — флип по Y
+            // PNG stores rows top-to-bottom, GL returns them bottom-to-top — Y flip
             size_t row = (size_t)size * 3;
             for (int y = 0; y < size; y++)
                 memcpy(flip + (size_t)y * row, px + (size_t)(size - 1 - y) * row, row);

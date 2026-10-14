@@ -1,9 +1,9 @@
 // ============================================================================
-//  commands.c — консольные команды-действия (см. commands.h)
+//  commands.c — console action commands (see commands.h)
 // ----------------------------------------------------------------------------
-//  Вынесено из main.c (строки 215–660): тумблеры HUD/карты/теней/тумана,
-//  демо, пауза, выбор карты, save/load/setpos, сущности, скриншот, звук.
-//  Регистрация всех статических команд — в ЕДИНОМ реестре (cmdreg.c).
+//  Extracted from main.c (lines 215-660): HUD/map/shadow/fog toggles,
+//  demo, pause, map selection, save/load/setpos, entities, screenshot, sound.
+//  Registration of all static commands lives in the SINGLE registry (cmdreg.c).
 // ============================================================================
 #include "commands.h"
 #include <stdlib.h>
@@ -45,7 +45,7 @@
 #  include <direct.h>
 #endif
 
-// --- Тумблеры и режимы ----------------------------------------------------------
+// --- Toggles and modes ------------------------------------------------------------
 void cmd_noclip(const char *args)
 {
     (void)args;
@@ -55,9 +55,9 @@ void cmd_noclip(const char *args)
         return;
     }
     if (!g->cam) return;
-    // Noclip — вкл/выкл коллизии персонажа БЕЗ телепортации: персонаж
-    // остаётся на месте, просто проходит сквозь рельеф и объекты (и перестанет,
-    // когда noclip выключен). Полёт (fly) — отдельный режим.
+    // Noclip — toggles character collision WITHOUT teleporting: the character
+    // stays in place, it just passes through terrain and objects (and stops
+    // doing so once noclip is turned off). Flying (fly) is a separate mode.
     g->cam->cam.noclip = !g->cam->cam.noclip;
     SDL_Log("Noclip: %s", g->cam->cam.noclip ? "ON" : "OFF");
 }
@@ -92,7 +92,7 @@ void cmd_toggle_crosshair(const char *args)
 void cmd_toggle_shadows(const char *args)
 {
     (void)args;
-    // быстрый тумблер: динамические <-> выкл
+    // quick toggle: dynamic <-> off
     float m = cvar_get("r_shadows_mode");
     cvar_set("r_shadows_mode", m == 1.0f ? 0.0f : 1.0f);
     SDL_Log("Shadows: %s",
@@ -102,7 +102,7 @@ void cmd_toggle_shadows(const char *args)
 void cmd_toggle_fog(const char *args)
 {
     (void)args;
-    // быстрый тумблер: объёмный <-> выкл (простой режим — только через меню)
+    // quick toggle: volumetric <-> off (simple mode is menu-only)
     float m = cvar_get("r_fog_mode");
     cvar_set("r_fog_mode", m == 1.0f ? 0.0f : 1.0f);
     SDL_Log("Fog mode: %d", (int)cvar_get("r_fog_mode"));
@@ -117,13 +117,13 @@ void cmd_demo(const char *args)
 void cmd_pause(const char *args)
 {
     (void)args;
-    app_escape();   // игра <-> пауза, в меню — назад по экранам
+    app_escape();   // game <-> pause, in menus goes back through screens
 }
 
-// --- Карты ----------------------------------------------------------------------
-// Выбор карты: map <имя> — "map" (папка) или имя из maps/*.zip.
-// Если мир загружен — перезапускает игру на новой карте прямо сейчас.
-static int s_map_switching = 0;   // рекурсия: скрипт/команда грузит карту внутри game_load_world
+// --- Maps -------------------------------------------------------------------------
+// Map selection: map <name> — "map" (folder) or a name from maps/*.zip.
+// If a world is loaded — restarts the game on the new map right away.
+static int s_map_switching = 0;   // recursion: a script/command loads a map inside game_load_world
 static int map_reload(Game *g, const char *name, int force)
 {
     if (!g || !name || g->world_loading || s_map_switching) {
@@ -138,8 +138,8 @@ static int map_reload(Game *g, const char *name, int force)
         console_print("map \"%s\" уже загружена", target_name);
         return 0;
     }
-    // Проверяем пакет до разрушения текущего мира. Полноценная загрузка всё ещё
-    // может упасть позднее, но простая опечатка больше не выбрасывает игрока.
+    // Check the package before tearing down the current world. A full load may
+    // still fail later, but a plain typo no longer kicks the player out.
     if (strcmp(target_name, "map") != 0) {
         char path[160], resolved[512];
         snprintf(path, sizeof path, "maps/%s.zip", target_name);
@@ -199,7 +199,7 @@ void cmd_map_select(const char *args)
     map_reload(g, name, 0);
 }
 
-// Список доступных карт (команда maps)
+// List of available maps (maps command)
 void cmd_maps_list(const char *args)
 {
     (void)args;
@@ -207,7 +207,7 @@ void cmd_maps_list(const char *args)
     app_maps_print();
 }
 
-// HL-стиль: команды, адаптированные под наши системы
+// HL-style: commands adapted to our systems
 void cmd_restart(const char *args)
 {
     (void)args;
@@ -217,7 +217,7 @@ void cmd_restart(const char *args)
 
 void cmd_changelevel(const char *args)
 {
-    cmd_map_select(args);   // смена карты (у нас без сохранения состояния)
+    cmd_map_select(args);   // map change (we do not preserve state)
 }
 
 void cmd_r_drawdebug(const char *args)
@@ -256,8 +256,8 @@ void cmd_firstperson(const char *args)
     console_print("camera: firstperson");
 }
 
-// --- Сущности -------------------------------------------------------------------
-// ent_create <класс> [x y z] — спавн сущности (классы из реестра)
+// --- Entities ------------------------------------------------------------------
+// ent_create <class> [x y z] — spawns an entity (classes come from the registry)
 void cmd_ent_create(const char *args)
 {
     Game *g = game_instance();
@@ -277,7 +277,7 @@ void cmd_ent_create(const char *args)
         return;
     }
     float pos[3] = { x, y, z };
-    if (n == 1) {   // перед камерой, на высоте взгляда
+    if (n == 1) {   // in front of the camera, at eye height
         float fwd[3];
         camera_dirs(&g->cam->cam, fwd, NULL);
         pos[0] = g->cam->cam.pos[0] + fwd[0] * 5.0f;
@@ -290,7 +290,7 @@ void cmd_ent_create(const char *args)
                       cls, pos[0], pos[1], pos[2]);
 }
 
-// ent_list — список сущностей
+// ent_list — entity list
 void cmd_ent_list(const char *args)
 {
     (void)args;
@@ -302,7 +302,7 @@ void cmd_ent_list(const char *args)
     }
 }
 
-// --- Скриншот: сохранить кадр в PNG в папке screenshots/ ------------------------
+// --- Screenshot: save the frame as a PNG into the screenshots/ folder --------------
 static int g_shot_req = 0;
 
 void cmd_screenshot(const char *args)
@@ -312,7 +312,7 @@ void cmd_screenshot(const char *args)
     console_print("screenshot: кадр будет сохранён в screenshots/");
 }
 
-// Создаёт папку (утилита, кросс-платформенно)
+// Creates a directory (utility, cross-platform)
 static void make_dir(const char *path)
 {
 #ifdef _WIN32
@@ -322,13 +322,13 @@ static void make_dir(const char *path)
 #endif
 }
 
-// Читает кадр и пишет PNG (перевёрнутый по Y, как смотрит игрок)
+// Reads the frame and writes a PNG (flipped in Y, as the player sees it)
 static void take_shot_png(const char *path, int vw, int vh)
 {
     unsigned char *px = malloc((size_t)vw * vh * 3);
     if (!px) return;
     renderer_read_pixels(px, vw, vh);
-    // Строки GL идут снизу вверх — переворачиваем для PNG
+    // GL rows go bottom-up — flip them for PNG
     size_t row = (size_t)vw * 3;
     unsigned char *flip = malloc(row * (size_t)vh);
     if (flip) {
@@ -343,7 +343,7 @@ static void take_shot_png(const char *path, int vw, int vh)
     free(px);
 }
 
-// Вызывается из главного цикла каждый кадр (команда screenshot / F12)
+// Called from the main loop every frame (screenshot command / F12)
 void commands_shot_take(int vw, int vh)
 {
     if (!g_shot_req) return;
@@ -351,7 +351,7 @@ void commands_shot_take(int vw, int vh)
     char path[320];
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
-    if (!tm) {   // localtime может вернуть NULL — не пишем в tm->*
+    if (!tm) {   // localtime may return NULL — do not dereference tm->*
         SDL_Log("screenshot: localtime failed");
         return;
     }
@@ -362,8 +362,8 @@ void commands_shot_take(int vw, int vh)
     take_shot_png(path, vw, vh);
 }
 
-// --- Звук ------------------------------------------------------------------------
-// Проверка звука: проигрывает все движковые звуки подряд
+// --- Sound --------------------------------------------------------------------------
+// Sound check: plays all engine sounds one after another
 void cmd_snd_test(const char *args)
 {
     (void)args;
@@ -384,7 +384,7 @@ void cmd_snd_test(const char *args)
     }
 }
 
-// --- Hot-reload шейдеров ----------------------------------------------------------
+// --- Shader hot-reload ----------------------------------------------------------------
 void cmd_reload_shaders(const char *args)
 {
     (void)args;
@@ -393,13 +393,13 @@ void cmd_reload_shaders(const char *args)
     console_print("reload_shaders: %d", n);
 }
 
-// --- Save/Load (F5/F9): позиция игрока + карта + состояние мира -------------
-// Помимо позиции сохраняет, какие триггеры уже сработали и какие use-объекты
-// использованы, чтобы при загрузке мир «продолжался», а не сбрасывался.
+// --- Save/Load (F5/F9): player position + map + world state -------------------
+// Besides the position it stores which triggers have already fired and which
+// use-objects were used, so that on load the world "continues" instead of resetting.
 #define SAVE_MAX_TRIGGER 64
 #define SAVE_MAX_OBJUSED 128
 static int s_save_triggers[SAVE_MAX_TRIGGER];    // trigger: 0/1
-static int s_save_objects_used_n = 0;            // объекты: имя уже использован
+static int s_save_objects_used_n = 0;            // objects: name already used
 static char s_save_objects_used[SAVE_MAX_OBJUSED][64];
 
 void cmd_save(const char *args)
@@ -414,7 +414,7 @@ void cmd_save(const char *args)
     fprintf(f, "setpos %.2f %.2f %.2f %.4f %.4f\n",
             g->player.save_pos[0], g->player.save_pos[1], g->player.save_pos[2],
             g->player.save_yaw, g->player.save_pitch);
-    // Состояние мира: сработавшие триггеры + использованные use-объекты
+    // World state: fired triggers + used use-objects
     int tn = mapdata_trigger_count();
     if (tn > SAVE_MAX_TRIGGER) tn = SAVE_MAX_TRIGGER;
     for (int i = 0; i < tn; i++)
@@ -430,13 +430,13 @@ void cmd_save(const char *args)
                   g->player.save_pos[2]);
 }
 
-// Применяет сохранённое состояние мира к текущей карте (если совпадает).
+// Applies the saved world state to the current map (if it matches).
 void commands_apply_saved_world_state(void)
 {
     Game *g = game_instance();
     if (!g) return;
     if (!g->world_loaded || !g->map_name[0]) return;
-    // только если сохранение относится к текущей карте
+    // only if the save belongs to the current map
     if (strcmp(g->player.save_map, g->map_name) != 0) return;
     for (int i = 0; i < SAVE_MAX_TRIGGER; i++)
         mapdata_trigger_set_fired(i, s_save_triggers[i]);
@@ -444,8 +444,8 @@ void commands_apply_saved_world_state(void)
         mapdata_object_set_used(s_save_objects_used[i], 1);
 }
 
-// --- Эффекты на точке попадения взгляда (raycast) -------------------------------
-// m — искры (add), comma — дым (alpha), period — кровь (bounce)
+// --- Effects at the gaze raycast hit point ------------------------------------
+// m - sparks (add), comma - smoke (alpha), period - blood (bounce)
 static void cmd_fx_raycast(const char *args, const char *preset, int count)
 {
     (void)args;
@@ -475,7 +475,7 @@ void cmd_load(const char *args)
     if (!f) { console_print("load: нет save.cfg (F5 — сохранить)"); return; }
     char line[256], map[64] = "";
     float x = 0, y = 0, z = 0, ya = 0, pi = 0;
-    // Сброс буфера состояния мира
+    // Reset the world-state buffer
     for (int i = 0; i < SAVE_MAX_TRIGGER; i++) s_save_triggers[i] = 0;
     s_save_objects_used_n = 0;
     while (fgets(line, sizeof line, f)) {
@@ -502,12 +502,12 @@ void cmd_load(const char *args)
     if (g->world_loaded && strcmp(g->player.save_map, g->map_name) == 0) {
         game_apply_spawn(g, g->player.save_pos, g->player.save_yaw,
                          g->player.save_pitch);
-        commands_apply_saved_world_state();   // восстановить триггеры/use
+        commands_apply_saved_world_state();   // restore triggers/use
         console_print("load: загружено (%.0f,%.0f,%.0f)", x, y, z);
         return;
     }
-    // Другая карта (или мир ещё не загружен): загрузить и телепортироваться.
-    // Состояние применится автоматически в game_load_world.
+    // Different map (or world not loaded yet): load it and teleport.
+    // The state gets applied automatically inside game_load_world.
     g->player.pending_spawn = 1;
     if (g->world_loaded) {
         cmd_map_select(g->player.save_map);
@@ -518,7 +518,7 @@ void cmd_load(const char *args)
     console_print("load: карта %s, телепорт при загрузке", g->player.save_map);
 }
 
-// Телепорт игрока: setpos x y z [yaw] [pitch]
+// Player teleport: setpos x y z [yaw] [pitch]
 void cmd_setpos(const char *args)
 {
     Game *g = game_instance();
@@ -535,7 +535,7 @@ void cmd_setpos(const char *args)
     game_apply_spawn(g, p, ya, pi);
 }
 
-// Поставить статичный меш (.obj): mesh <путь> [x y z] [scale] [tex]
+// Place a static mesh (.obj): mesh <path> [x y z] [scale] [tex]
 void cmd_mesh(const char *args)
 {
     Game *g = game_instance();
@@ -552,17 +552,17 @@ void cmd_mesh(const char *args)
                                    renderer_context());
     if (!nd) { console_print("mesh: не удалось загрузить %s", path); return; }
     node_add(g->root, nd);
-    // Занятость: трава не растёт внутри поставленного меша (splat.c)
+    // Occupancy: grass does not grow inside a placed mesh (splat.c)
     splat_occupy_circle(x, z, 1.0f * (scale > 0.01f ? scale : 1.0f), 1.0f);
     console_print("mesh: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
 }
 
-// Поставить бинарный glTF (.glb): glb <путь> [x y z] [scale]
-static SceneNode *s_last_anim;   // последний поставленный AnimInstance3D
+// Place a binary glTF (.glb): glb <path> [x y z] [scale]
+static SceneNode *s_last_anim;   // last placed AnimInstance3D
 
-// Узел-анимик, на который указывает s_last_anim, может быть убит/удалён
-// (entity_kill, выгрузка мира) — указатель станет висячим. Чистим его по
-// EV_NODE_EXIT, пока node_free_tree ещё не освободил сам узел.
+// The anim node pointed to by s_last_anim may be killed/removed
+// (entity_kill, world unload) — the pointer would become dangling. Clear it on
+// EV_NODE_EXIT while node_free_tree has not yet freed the node itself.
 static void anim_last_exit(const Event *e, void *user)
 {
     (void)user;
@@ -575,7 +575,7 @@ static void anim_last_hook(void)
     if (!s_hooked) { events_listen(EV_NODE_EXIT, anim_last_exit, NULL); s_hooked = 1; }
 }
 
-// Узел-анимик: по имени (если задано) или последний поставленный.
+// Anim node: by name (if given) or the last placed one.
 static SceneNode *anim_find(const char *name)
 {
     Game *g = game_instance();
@@ -593,14 +593,14 @@ void cmd_glb(const char *args)
     float x = 0, y = 0, z = 0, scale = 1.0f;
     int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
     if (n < 1) { console_print("usage: glb <glb> [x y z] [scale]"); return; }
-    // Автопостановка НА ЗЕМЛЮ: без координат — в 6 м впереди игрока по
-    // взгляду («glb model 12» — в 12 м), при y <= 0 — в точку XZ с высотой
-    // рельефа. Спавн машин/пропсов без ручного подбора высоты.
+    // Auto-placement ON THE GROUND: without coordinates — 6 m in front of the
+    // player along the view ("glb model 12" — 12 m); with y <= 0 — at the XZ point
+    // with terrain height. Spawning cars/props without manual height tuning.
     if (n < 4 && g->cam) {
         const float *cp = g->cam->cam.pos;
         float fwd[3] = { 0, 0, 1 };
         camera_dirs(&g->cam->cam, fwd, NULL);
-        float d = (n >= 2) ? x : 6.0f;         // «glb model 12» — в 12 м
+        float d = (n >= 2) ? x : 6.0f;         // "glb model 12" — 12 m away
         x = cp[0] + fwd[0] * d;
         z = cp[2] + fwd[2] * d;
         y = sample_height(&g->world, x, z) + 0.3f;
@@ -609,7 +609,7 @@ void cmd_glb(const char *args)
     }
     float pos[3] = { x, y, z };
     SceneNode *nd = NULL;
-    // авто-выбор: есть скин+анимация -> скелетный путь (skinning)
+    // auto-select: skin + animation present -> skeletal path (skinning)
     int is_anim = glb_anim_has_anim(path);
     if (is_anim)
         nd = glb_anim_make_node(path, pos, scale, renderer_context());
@@ -618,17 +618,17 @@ void cmd_glb(const char *args)
     if (!nd) { console_print("glb: не удалось загрузить %s", path); return; }
     anim_last_hook();
     node_add(g->root, nd);
-    // Занятость: трава не растёт внутри поставленной модели (splat.c).
-    // Радиус берём от масштаба — точную сферу считать не нужно, важно, чтобы
-    // травинки не торчали сквозь кузов/корпус.
+    // Occupancy: grass does not grow inside a placed model (splat.c).
+    // The radius is derived from the scale — no need to compute an exact
+    // sphere, what matters is that blades do not stick through the body/hull.
     splat_occupy_circle(x, z, 1.2f * (scale > 0.01f ? scale : 1.0f), 1.0f);
-    // glb_anim_clip_count/… работают ТОЛЬКО с AnimInstance3D (AnimParams).
-    // Для статичного GlbInstance у него нет поля data — читать нельзя (SEGV).
+    // glb_anim_clip_count/... work ONLY with AnimInstance3D (AnimParams).
+    // A static GlbInstance has no data field — reading it would SEGV.
     if (is_anim && glb_anim_clip_count(nd) > 0) s_last_anim = nd;
     console_print("glb: %s в (%.0f,%.0f,%.0f)", path, x, y, z);
 }
 
-// Поставить анимированный glTF (.glb): glbanim <путь> [x y z] [scale]
+// Place an animated glTF (.glb): glbanim <path> [x y z] [scale]
 void cmd_glbanim(const char *args)
 {
     Game *g = game_instance();
@@ -637,8 +637,8 @@ void cmd_glbanim(const char *args)
     float x = 0, y = 0, z = 0, scale = 1.0f;
     int n = sscanf(args, "%255s %f %f %f %f", path, &x, &y, &z, &scale);
     if (n < 1) { console_print("usage: glbanim <glb> [x y z] [scale]"); return; }
-    // Автопостановка НА ЗЕМЛЮ — как у cmd_glb: без координат — в 6 м
-    // впереди игрока по взгляду, при y <= 0 — высота рельефа в точке XZ.
+    // Auto-placement ON THE GROUND — same as cmd_glb: without coordinates —
+    // 6 m in front of the player along the view; with y <= 0 — terrain height at XZ.
     if (n < 4 && g->cam) {
         const float *cp = g->cam->cam.pos;
         float fwd[3] = { 0, 0, 1 };
@@ -667,7 +667,7 @@ void cmd_glbanim(const char *args)
     }
 }
 
-// --- Мини-физика (Verlet): демо-верёвка перед камерой ---------------------------
+// --- Mini-physics (Verlet): demo rope in front of the camera ------------------
 void cmd_phys_rope(const char *args)
 {
     Game *g = game_instance();
@@ -693,7 +693,7 @@ void cmd_phys_rope(const char *args)
         physics_add_part(w, p, 1.0f, 0.08f);
         if (i > 0) physics_add_link(w, i - 1, i);
     }
-    physics_pin(w, 0, 1);                    // первый узел прибит к воздуху
+    physics_pin(w, 0, 1);                    // first node pinned in mid-air
     console_print("phys: верёвка из %d звеньев в (%.0f,%.0f)", n, ax, az);
 }
 
@@ -718,10 +718,10 @@ void cmd_phys_clear(const char *args)
     console_print("phys: очищено");
 }
 
-// phys_ragdoll [hang] [kick] — рэгдолл на последней анимированной модели:
-// кости становятся Verlet-частицами, анимация вытесняется физикой.
-// hang=1 (по умолчанию) — origin прибит, модель обвисает в воздухе;
-// kick — импульс всем частицам (м/с) — толчок, модель падает.
+// phys_ragdoll [hang] [kick] — ragdoll on the last animated model:
+// bones become Verlet particles, animation gives way to physics.
+// hang=1 (default) — origin pinned, the model sags in mid-air;
+// kick — impulse to all particles (m/s) — a shove, the model falls over.
 void cmd_phys_ragdoll(const char *args)
 {
     int hang = 1, kick = 0;
@@ -745,7 +745,7 @@ void cmd_phys_ragdoll(const char *args)
                   kick > 0 ? " + толчок" : "");
 }
 
-// Список клипов анимации узла: glbclips [имя-узла]
+// List of the node's animation clips: glbclips [node-name]
 void cmd_glbclips(const char *args)
 {
     char name[128] = "";
@@ -760,7 +760,7 @@ void cmd_glbclips(const char *args)
         console_print("  [%d] %s", i, glb_anim_clip_name(nd, i) ? glb_anim_clip_name(nd, i) : "?");
 }
 
-// Переключить клип: glbclip <индекс|имя> [имя-узла]
+// Switch clip: glbclip <index|name> [node-name]
 void cmd_glbclip(const char *args)
 {
     char sel[64] = "", name[128] = "";
@@ -776,7 +776,7 @@ void cmd_glbclip(const char *args)
                   glb_anim_clip_name(nd, idx) ? glb_anim_clip_name(nd, idx) : "?");
 }
 
-// Пауза/продолжить: glbanim_pause [имя-узла]
+// Pause/resume: glbanim_pause [node-name]
 void cmd_glbanim_pause(const char *args)
 {
     char name[128] = "";
@@ -786,7 +786,7 @@ void cmd_glbanim_pause(const char *args)
     glb_anim_set_paused(nd, 1);
     console_print("glbanim_pause: %s", nd->name ? nd->name : "?");
 }
-// Продолжить: glbanim_play [имя-узла]
+// Resume: glbanim_play [node-name]
 void cmd_glbanim_play(const char *args)
 {
     char name[128] = "";
@@ -796,7 +796,7 @@ void cmd_glbanim_play(const char *args)
     glb_anim_set_paused(nd, 0);
     console_print("glbanim_play: %s", nd->name ? nd->name : "?");
 }
-// Скорость времени: glbanim_speed <x> [имя-узла]
+// Time speed: glbanim_speed <x> [node-name]
 void cmd_glbanim_speed(const char *args)
 {
     float s = 1.0f; char name[128] = "";
@@ -806,7 +806,7 @@ void cmd_glbanim_speed(const char *args)
     glb_anim_set_speed(nd, s);
     console_print("glbanim_speed: %s = %g", nd->name ? nd->name : "?", s);
 }
-// Зацикливание: glbanim_loop <0|1> [имя-узла]
+// Looping: glbanim_loop <0|1> [node-name]
 void cmd_glbanim_loop(const char *args)
 {
     int v = 1; char name[128] = "";
@@ -816,7 +816,7 @@ void cmd_glbanim_loop(const char *args)
     glb_anim_set_loop(nd, v);
     console_print("glbanim_loop: %s = %d", nd->name ? nd->name : "?", v?1:0);
 }
-// Поставить время клипа в секундах: glbanim_seek <сек> [имя-узла]
+// Set clip time in seconds: glbanim_seek <sec> [node-name]
 void cmd_glbanim_seek(const char *args)
 {
     float t = 0; char name[128] = "";
@@ -826,7 +826,7 @@ void cmd_glbanim_seek(const char *args)
     glb_anim_set_time(nd, t);
     console_print("glbanim_seek: %s = %.3f с", nd->name ? nd->name : "?", t);
 }
-// Поставить кадр: glbanim_frame <кадр> [fps] [имя-узла] (fps по умолч. 24)
+// Set a frame: glbanim_frame <frame> [fps] [node-name] (fps defaults to 24)
 void cmd_glbanim_frame(const char *args)
 {
     int frame = 0; float fps = 24.0f; char name[128] = "";
@@ -839,22 +839,22 @@ void cmd_glbanim_frame(const char *args)
                   nd->name ? nd->name : "?", frame, fps, glb_anim_time(nd));
 }
 
-// ---- Инструмент anim: реестр всех анимик-моделей, обращение по индексу ---------
-//   anim                    — список всех загруженных моделей
-//   anim <N>                — инфо о модели с индексом N
-//   anim <N> pos x y z      — телепорт
-//   anim <N> move x y z [spd] — плавное движение к точке (spd=ед/с, по умолч. 5)
-//   anim <N> stop           — остановить плавное движение
-//   anim <N> clip <имя|№>   — переключить анимацию
-//   anim <N> play | pause   — играть / пауза
-//   anim <N> loop <0|1>     — зациклить / отключить цикл
-//   anim <N> speed <x>      — скорость воспроизведения
-//   anim <N> seek <сек>     — поставить время клипа
-//   anim <N> frame <n> [fps]— поставить кадр
-//   anim <N> on | off       — показать / скрыть (заморозить)
-//   anim <N> scale <s>      — масштаб модели
-//   anim <N> clips          — список клипов модели
-//   anim <N> remove         — выгрузить модель
+// ---- anim tool: registry of all anim nodes, addressed by index ----------------
+//   anim                    — list of all loaded models
+//   anim <N>                — info about the model with index N
+//   anim <N> pos x y z      — teleport
+//   anim <N> move x y z [spd] — smooth move toward a point (spd=units/s, default 5)
+//   anim <N> stop           — stop the smooth movement
+//   anim <N> clip <name|#>  — switch animation
+//   anim <N> play | pause   — play / pause
+//   anim <N> loop <0|1>     — loop on / loop off
+//   anim <N> speed <x>      — playback speed
+//   anim <N> seek <sec>     — set clip time
+//   anim <N> frame <n> [fps]— set a frame
+//   anim <N> on | off       — show / hide (freeze)
+//   anim <N> scale <s>      — model scale
+//   anim <N> clips          — list of the model's clips
+//   anim <N> remove         — unload the model
 static void anim_show_state(SceneNode *nd)
 {
     console_print("  pos(%.2f,%.2f,%.2f) scale=%.2g enabled=%d paused=%d loop=%d speed=%.2g time=%.3f клип=%s",
@@ -962,7 +962,7 @@ void cmd_anim(const char *args)
         return;
     }
     if (strcmp(sub, "rot") == 0) {
-        // Поворот в ГРАДУСАХ (yaw pitch roll) — узел хранит радианы.
+        // Rotation in DEGREES (yaw pitch roll) — the node stores radians.
         if (sscanf(args, "%*s %*s %f %f %f", &p[0], &p[1], &p[2]) >= 1) {
             nd->rot[1] = p[0] * 0.0174532925f;
             nd->rot[0] = p[1] * 0.0174532925f;
@@ -984,12 +984,12 @@ void cmd_anim(const char *args)
     console_print("anim %d: неизвестная команда '%s' (см. anim help)", idx, sub);
 }
 
-// ---- attach: прицепить узел к модели/кости ------------------------------------
-//   attach sprite <N> <кость> <png> [w h] [up]  — спрайт на кость модели N
-//   attach glb    <N> <кость> <файл.glb> [scale] — модель на кость модели N
-//   attach mesh   <N> <кость> <файл.obj> [scale] [tex]
-//   attach list   <N>                            — что прицеплено
-//   attach bones  <N>                            — список костей
+// ---- attach: hook a node to a model/bone --------------------------------------
+//   attach sprite <N> <bone> <png> [w h] [up]  — sprite on a bone of model N
+//   attach glb    <N> <bone> <file.glb> [scale] — model on a bone of model N
+//   attach mesh   <N> <bone> <file.obj> [scale] [tex]
+//   attach list   <N>                            — what is attached
+//   attach bones  <N>                            — bone list
 void cmd_attach(const char *args)
 {
     Game *g = game_instance();
@@ -1071,7 +1071,7 @@ void cmd_attach(const char *args)
                   rc == 0 ? "" : " (кость не найдена, прицеплено к origin)");
 }
 
-// ---- sprite: поставить свободный спрайт в мир ---------------------------------
+// ---- sprite: place a free sprite into the world --------------------------------
 //   sprite <png> [x y z] [w h] [flat]
 void cmd_sprite(const char *args)
 {
@@ -1094,9 +1094,9 @@ void cmd_sprite(const char *args)
                   w, h, billboard ? " (биллборд)" : " (плоский)");
 }
 
-// cubemap_capture [x y z] [size] — захватить кубомап отражений в позиции
-// игрока (или в точке x y z) и сохранить 6 PNG в cubemaps/. По умолчанию
-// размер 256; захваченный кубомап тут же используется водой.
+// cubemap_capture [x y z] [size] — capture the reflection cubemap at the
+// player position (or at point x y z) and save 6 PNGs into cubemaps/. Default
+// size is 256; the captured cubemap is immediately used by the water.
 void cmd_cubemap_capture(const char *args)
 {
     Game *g = game_instance();
@@ -1108,7 +1108,7 @@ void cmd_cubemap_capture(const char *args)
         console_print("cubemap_capture: кубомап недоступен");
         return;
     }
-    // Позиция: игрок по умолчанию, либо из аргументов "x y z [size]"
+    // Position: the player by default, or from the arguments "x y z [size]"
     float pos[3] = {
         g->cam->cam.pos[0], g->cam->cam.pos[1], g->cam->cam.pos[2]
     };
@@ -1116,7 +1116,7 @@ void cmd_cubemap_capture(const char *args)
     if (args && args[0]) {
         float x, y, z;
         int n = sscanf(args, "%f %f %f %d", &x, &y, &z, &size);
-        if (n == 1) size = (int)x;       // "cubemap_capture 128" — только размер
+        if (n == 1) size = (int)x;       // "cubemap_capture 128" — size only
         else if (n >= 3) { pos[0] = x; pos[1] = y; pos[2] = z; }
     }
     renderer_cubemap_capture_at(g, pos, size);
@@ -1124,7 +1124,7 @@ void cmd_cubemap_capture(const char *args)
                   pos[0], pos[1], pos[2], size);
 }
 
-// Список зарегистрированных материалов по имени (matlist).
+// List of registered materials by name (matlist).
 void cmd_matlist(const char *args)
 {
     (void)args;
@@ -1141,7 +1141,7 @@ void cmd_matlist(const char *args)
     }
 }
 
-// --- Здоровье (HP) -------------------------------------------------------------
+// --- Health (HP) ----------------------------------------------------------------
 void cmd_hp(const char *args)
 {
     (void)args;
@@ -1167,7 +1167,7 @@ void cmd_heal(const char *args)
 {
     Game *g = game_instance();
     if (!g) return;
-    float amt = g->player.hp.max;   // без аргумента — до полного
+    float amt = g->player.hp.max;   // no argument — heal to full
     if (args && args[0]) sscanf(args, "%f", &amt);
     health_heal(&g->player.hp, amt);
     console_print("heal -> HP %.0f", g->player.hp.hp);

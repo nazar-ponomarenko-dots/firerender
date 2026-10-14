@@ -1,5 +1,5 @@
 // ============================================================================
-//  mesh.c — статичные меши (prop_static): .obj загрузчик + рендер-узел
+//  mesh.c — static meshes (prop_static): .obj loader + render node
 // ============================================================================
 #include "mesh.h"
 
@@ -14,7 +14,7 @@
 
 #include <SDL3/SDL.h>
 
-// --- Мини-dynarray (realloc-наращивание) -------------------------------------
+// --- Mini dynarray (realloc growth) -------------------------------------
 typedef struct { float *d; int n; int cap; int failed; } FArr;
 static int farr_push(FArr *a, float v)
 {
@@ -30,7 +30,7 @@ static int farr_push(FArr *a, float v)
     return 1;
 }
 
-// Итдекс 1-based; расширяем по корнеру (данные грани копируются в выход).
+// Index is 1-based; we expand per corner (face data is copied into the output).
 static void push_corner(FArr *pos, FArr *nrm, FArr *uv,
                         const float *verts, int nv,
                         const float *vns, int nvn,
@@ -46,15 +46,15 @@ static void push_corner(FArr *pos, FArr *nrm, FArr *uv,
         farr_push(nrm, vns[3 * (ni - 1) + 0]);
         farr_push(nrm, vns[3 * (ni - 1) + 1]);
         farr_push(nrm, vns[3 * (ni - 1) + 2]);
-    } else { farr_push(nrm, 0); farr_push(nrm, 1); farr_push(nrm, 0); } // вверх
+    } else { farr_push(nrm, 0); farr_push(nrm, 1); farr_push(nrm, 0); } // up
     if (ti > 0 && ti <= nvt) {
         farr_push(uv, vts[2 * (ti - 1) + 0]);
         farr_push(uv, vts[2 * (ti - 1) + 1]);
     } else { farr_push(uv, 0); farr_push(uv, 0); }
 }
 
-// Разбирает индекс гранёвого корнера "v" / "v/vt" / "v//vn" / "v/vt/vn".
-// Все части 1-based, отсутствующие = 0.
+// Parses a face-corner index "v" / "v/vt" / "v//vn" / "v/vt/vn".
+// All parts are 1-based, missing ones = 0.
 static int parse_corner(const char *tok, int *vi, int *ti, int *ni)
 {
     *vi = *ti = *ni = 0;
@@ -71,8 +71,8 @@ static int parse_corner(const char *tok, int *vi, int *ti, int *ni)
 
 Mesh *mesh_load_obj_mem(const char *name, const char *src)
 {
-    FArr verts = {0}, vns = {0}, vts = {0};       // исходные
-    FArr pos = {0}, nrm = {0}, uv = {0};          // выход (по корнеру)
+    FArr verts = {0}, vns = {0}, vts = {0};       // sources
+    FArr pos = {0}, nrm = {0}, uv = {0};          // output (per corner)
 
     char *buf = strdup(src);
     if (!buf) return NULL;
@@ -208,8 +208,8 @@ void mesh_gpu_upload(Mesh *m)
     m->ready = 1;
 }
 
-// Теневая программа .obj-мешей: одна на модуль (mesh_shadow.vs/fs),
-// hot-reload через reshade-хук.
+// Shadow program for .obj meshes: one per module (mesh_shadow.vs/fs),
+// hot-reload via the reshade hook.
 static GLuint s_mesh_shadow_prog = 0;
 static GLint s_mesh_sh_model = -1, s_mesh_sh_vp = -1;
 static void mesh_shadow_reshade(void)
@@ -228,8 +228,8 @@ void mesh_node_render(SceneNode *n, float dt)
     MeshLocs *p = n->params;
     if (!p->mesh) return;
     if (p->rc->pass == RP_SHADOW) {
-        // Тень .obj-меша: позиция (атрибут 0 VAO) x модель x VP от солнца.
-        // Alpha-test не нужен: obj-материалы непрозрачные (uAlphaTest = 0).
+        // .obj mesh shadow: position (VAO attribute 0) x model x sun VP.
+        // No alpha-test needed: obj materials are opaque (uAlphaTest = 0).
         if (!s_mesh_shadow_prog) {
             s_mesh_shadow_prog = resources_program_replace(
                 0, "shaders/mesh_shadow.vs", "shaders/mesh_shadow.fs");
@@ -247,14 +247,14 @@ void mesh_node_render(SceneNode *n, float dt)
     }
     mesh_gpu_upload(p->mesh);
 
-    // Модельная матрица = мировая матрица узла (позиция + поворот + масштаб +
-    // цепочка родителей/костей). См. scene.c: node_update_transforms.
+    // Model matrix = the node's world matrix (position + rotation + scale +
+    // parent/bone chain). See scene.c: node_update_transforms.
     const float *model = n->world;
 
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, p->rc);
-    // Запечённый свет: проба в позиции узла (перевод из мировой матрицы).
+    // Baked light: probe at the node position (extracted from the world matrix).
     scene_uniforms_probe(&p->su, model[12], model[13], model[14]);
     glUniformMatrix4fv(p->u_model, 1, GL_FALSE, model);
     material_bind(&p->mat, &p->ml, 0);
@@ -267,9 +267,9 @@ void mesh_node_render(SceneNode *n, float dt)
     glBindVertexArray(0);
 }
 
-// Освобождение ресурсов узла MeshInstance3D (по EV_NODE_EXIT из node_free_tree).
-// node_free_tree освобождает только структуру MeshLocs; меш (CPU + GPU),
-// refcount-текстуру и refcount-программу отдаём здесь.
+// Release of MeshInstance3D node resources (EV_NODE_EXIT from node_free_tree).
+// node_free_tree frees only the MeshLocs struct; the mesh (CPU + GPU), the
+// refcounted texture and the refcounted program are returned here.
 static void mesh_node_exit(const Event *e, void *user)
 {
     (void)user;
@@ -287,10 +287,10 @@ SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
                           float scale, const char *tex_path,
                           const RendererContext *rc)
 {
-    // Один раз: узел MeshInstance3D при выходе из дерева (node_free_tree шлёт
-    // EV_NODE_EXIT ДО free(params)) освобождает меш, текстуру и ref программы.
-    // node_free_tree освобождает ТОЛЬКО структуру MeshLocs — без этого всё
-    // GPU-содержимое утекало бы навсегда (mesh_free ни разу не вызывался).
+    // Once: when a MeshInstance3D node exits the tree (node_free_tree sends
+    // EV_NODE_EXIT BEFORE free(params)) the mesh, texture and program refs are
+    // released. node_free_tree frees ONLY the MeshLocs struct — without this,
+    // all GPU contents would leak forever (mesh_free was never called).
     static int s_registered = 0;
     if (!s_registered) { events_listen(EV_NODE_EXIT, mesh_node_exit, NULL); s_registered = 1; }
 
@@ -336,7 +336,7 @@ SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
         free(p);
         return NULL;
     }
-    // Масштаб — в трансформ узла (scene.c): меш можно вращать и прицеплять.
+    // Scale goes into the node transform (scene.c): the mesh can be rotated and attached.
     n->scl[0] = n->scl[1] = n->scl[2] = p->scale;
     node_update_transforms(n);
     return n;

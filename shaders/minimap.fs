@@ -1,20 +1,20 @@
 // ============================================================================
-//  Minimap — фрагментный шейдер мини-карты
+//  Minimap — fragment shader of the minimap
 // ----------------------------------------------------------------------------
-//  Один шейдер на всё, что рисует мини-карта:
-//    uUseTex    = 1 -> карта (uBasemap);
-//    uUseTex    = 0 -> сплошной цвет uColor (линии);
-//    uUseMarker = 1 -> маркер игрока (uMarker — текстура со своей альфой,
-//                      повёрнутая на yaw в minimap.c).
+//  One shader for everything the minimap draws:
+//    uUseTex    = 1 -> the map (uBasemap);
+//    uUseTex    = 0 -> solid color uColor (lines);
+//    uUseMarker = 1 -> the player marker (uMarker — texture with its own alpha,
+//                      rotated by yaw in minimap.c).
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uBasemap;   // текстура карты (базовый цвет рельефа)
-uniform sampler2D uMarker;    // маркер игрока (img/player.png)
-uniform vec3 uColor;          // сплошной цвет для линий
-uniform float uUseTex;        // 1 = карта, 0 = цвет
-uniform float uUseMarker;     // 1 = маркер игрока (текстура + альфа)
+uniform sampler2D uBasemap;   // map texture (terrain base color)
+uniform sampler2D uMarker;    // player marker (img/player.png)
+uniform vec3 uColor;          // solid color for lines
+uniform float uUseTex;        // 1 = map, 0 = color
+uniform float uUseMarker;     // 1 = player marker (texture + alpha)
 
 out vec4 FragColor;
 

@@ -1,55 +1,56 @@
 // ============================================================================
-//  health.h — здоровье (HP): переиспользуемый компонент здоровья
+//  health.h — health (HP): a reusable health component
 // ----------------------------------------------------------------------------
-//  Небольшой самостоятельный модуль игрового слоя: текущее/максимальное HP,
-//  урон/лечение, авто-регенерация после паузы, смерть и отсчёт до респавна,
-//  экранная «вспышка» урона. Движок (камера/физика/рендер) о нём не знает —
-//  им владеет игровой слой (Player в player.h, логика в game.c).
+//  A small standalone gameplay-layer module: current/max HP, damage/healing,
+//  auto-regeneration after a pause, death and the respawn countdown,
+//  on-screen damage "flash". The engine (camera/physics/renderer) knows
+//  nothing about it — the gameplay layer owns it (Player in player.h,
+//  logic in game.c).
 //
-//  Одна структура Health переиспользуема: сейчас её держит игрок, но тот же
-//  компонент подойдёт сущностям (npc/breakable) через Entity.data.
+//  One Health struct is reusable: the player holds it now, but the same
+//  component suits entities (npc/breakable) via Entity.data.
 // ============================================================================
 #ifndef HEALTH_H
 #define HEALTH_H
 
 typedef struct {
-    float hp;           // текущее здоровье
-    float max;          // максимум
-    float regen;        // восстановление, ед/с (0 — реген выключен)
-    float regen_delay;  // задержка регена после урона, с
-    float since_hurt;   // таймер с последнего урона, с
-    int   god;          // неуязвимость (чит)
-    int   dead;         // 0/1 — мёртв
-    float respawn_t;    // отсчёт до респавна после смерти, с
-    float respawn_delay;// сколько ждать перед респавном, с
-    float hurt_flash;   // 0..1 — экранная вспышка урона (плавно гаснет)
+    float hp;           // current health
+    float max;          // maximum
+    float regen;        // recovery rate, units/s (0 — regen off)
+    float regen_delay;  // regen delay after damage, s
+    float since_hurt;   // timer since the last damage, s
+    int   god;          // invulnerability (cheat)
+    int   dead;         // 0/1 — dead
+    float respawn_t;    // countdown to respawn after death, s
+    float respawn_delay;// how long to wait before respawning, s
+    float hurt_flash;   // 0..1 — on-screen damage flash (fades smoothly)
 } Health;
 
-// Инициализация: полный HP = max, дефолтные реген/задержка/респавн.
+// Initialization: full HP = max, default regen/delay/respawn.
 void  health_init(Health *h, float max);
 
-// Сменить максимум. refill!=0 — долить текущее до нового максимума.
+// Change the maximum. refill!=0 — top current HP up to the new maximum.
 void  health_set_max(Health *h, float max, int refill);
 
-float health_frac(const Health *h);   // 0..1 (для полоски HUD)
+float health_frac(const Health *h);   // 0..1 (for the HUD bar)
 int   health_is_dead(const Health *h);
 
-// Нанести урон (amount>0). Игнорируется при god/dead. Возвращает фактически
-// снятое HP. При переходе через 0 помечает dead и запускает отсчёт респавна.
+// Deal damage (amount>0). Ignored while god/dead. Returns the HP actually
+// removed. Crossing 0 marks dead and starts the respawn countdown.
 float health_damage(Health *h, float amount);
 
-// Вылечить на amount (не выше max). Мёртвого не лечит (нужен respawn/revive).
+// Heal by amount (never above max). Does not heal the dead (needs respawn/revive).
 void  health_heal(Health *h, float amount);
 
-// Мгновенная смерть (для команды kill/скриптов).
+// Instant death (for the kill command/scripts).
 void  health_kill(Health *h);
 
-// Кадровый тик: реген (после задержки), затухание вспышки, отсчёт респавна.
-// Если пора респавнить — *respawn_ready выставляется в 1 (иначе 0); game.c
-// телепортирует игрока на спавн и зовёт health_revive.
+// Per-frame tick: regen (after the delay), flash decay, respawn countdown.
+// If it is time to respawn — *respawn_ready is set to 1 (otherwise 0); game.c
+// teleports the player to the spawn point and calls health_revive.
 void  health_update(Health *h, float dt, int *respawn_ready);
 
-// После респавна: полный HP, снять флаг смерти.
+// After respawn: full HP, clear the death flag.
 void  health_revive(Health *h);
 
 #endif

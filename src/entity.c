@@ -1,5 +1,5 @@
 // ============================================================================
-//  entity.c — реализация сущностей (см. entity.h)
+//  entity.c — entity implementation (see entity.h)
 // ============================================================================
 #include "entity.h"
 
@@ -13,15 +13,14 @@
 #define ENTITY_MAX 256
 #define CLASS_MAX  32
 
-// Слоты СТАБИЛЬНЫ: entindex = индекс в s_entities[] и НЕ меняется во время
-// жизни сущности (раньше swap-with-last переставлял хвост на место убитой —
-// любой сохранённый указатель тихо указывал на другую сущность). Свободные
-// слоты ищутся линейно, у каждого слота есть номер серии serial, который
-// растёт при каждом освобождении. Слот занят, пока s_entities[i].classname
-// != NULL.
+// Slots are STABLE: entindex = index into s_entities[] and does NOT change for
+// the entity's lifetime (previously swap-with-last moved the tail over the dead
+// entry — any saved pointer silently pointed at a different entity). Free slots
+// are found linearly; each slot has a serial number that grows on every
+// release. A slot is occupied while s_entities[i].classname != NULL.
 static Entity s_entities[ENTITY_MAX];
-static int     s_serial[ENTITY_MAX];   // серия слота: растёт при kill
-static int     s_count = 0;            // живых сущностей (любой порядок слотов)
+static int     s_serial[ENTITY_MAX];   // slot serial: grows on kill
+static int     s_count = 0;            // live entities (slots in any order)
 static EntityClass s_classes[CLASS_MAX];
 static int  s_cls_n = 0;
 static SceneNode *s_root = NULL;
@@ -66,11 +65,12 @@ static Entity *entity_new(const char *classname, SceneNode *node, void *data,
     e->cls = class_find(classname);
     e->node = node;
     e->data = data;
-    e->owns_node = owns_node;    // только свои узлы освобождаем при kill
+    e->owns_node = owns_node;    // only our own nodes are freed on kill
     s_count++;
     events_emit(EV_ENTITY_SPAWN, e, NULL);
     if (e->cls && e->cls->spawn) e->cls->spawn(e);
-    // Колбэк spawn мог (редко) убить самою сущность — тогда слот уже свободен.
+    // The spawn callback could (rarely) have killed the entity itself —
+    // then the slot is already free.
     return e->classname ? e : NULL;
 }
 
@@ -81,21 +81,21 @@ int entity_handle(Entity *e)
     if (idx < 0 || idx >= ENTITY_MAX) return 0;
     if (!s_entities[idx].classname) return 0;
     int serial = s_serial[idx] & 0xFFFF;
-    // Собираем беззнаковым сдвигом: serial >= 32768 дал бы отрицательный
-    // int, а ниже такой хэндл считался бы негодным — живая сущность
-    // «протухала» бы для Lua/консоли после 32768 переиспользований слота.
+    // Pack via an unsigned shift: serial >= 32768 would yield a negative int,
+    // and below such a handle would count as invalid — a live entity would go
+    // "stale" for Lua/console after 32768 slot reuses.
     return (int)(((unsigned)serial << 16) | (unsigned)(idx + 1));
 }
 
 Entity *entity_get(int handle)
 {
-    if (handle == 0) return NULL;            // num >= 1, поэтому 0 — только «нет»
+    if (handle == 0) return NULL;            // num >= 1, so 0 means only "none"
     int num  = handle & 0xFFFF;              // 1..ENTITY_MAX
     int serial = (unsigned)handle >> 16;
     if (num < 1 || num > ENTITY_MAX) return NULL;
     int idx = num - 1;
-    if (s_serial[idx] != serial) return NULL;        // слот переиспользован
-    if (!s_entities[idx].classname) return NULL;     // слот свободен
+    if (s_serial[idx] != serial) return NULL;        // slot was reused
+    if (!s_entities[idx].classname) return NULL;     // slot is free
     return &s_entities[idx];
 }
 
@@ -129,14 +129,14 @@ void entity_kill(Entity *e)
     long idx = e - s_entities;
     if (idx < 0 || idx >= ENTITY_MAX) return;
     Entity *l = &s_entities[idx];
-    if (!l->classname) return;                  // уже убит
+    if (!l->classname) return;                  // already killed
     if (l->cls && l->cls->kill) l->cls->kill(l);
     events_emit(EV_ENTITY_KILL, l, NULL);
     if (l->owns_node && l->node) {
-        node_remove(l->node);                  // из дерева — иначе двойной free
-        node_free_tree(l->node);                 // узел создавал entity_spawn
+        node_remove(l->node);                  // from the tree — otherwise double free
+        node_free_tree(l->node);                 // the node was created by entity_spawn
     }
-    s_serial[idx] = (s_serial[idx] + 1) & 0xFFFF;   // серия: пометить слот переиспользованным
+    s_serial[idx] = (s_serial[idx] + 1) & 0xFFFF;   // serial: mark the slot as reused
     l->classname = NULL;
     l->node = NULL;
     s_count--;
@@ -144,9 +144,9 @@ void entity_kill(Entity *e)
 
 void entity_update_all(float dt)
 {
-    // Проход по ВСЕМ слотам: kill больше НЕ переставляет элементы (слоты
-    // стабильны), поэтому сущность, убившая себя или другую в think, не ломает
-    // индексы. Свободные слоты просто пропускаются.
+    // Iterate over ALL slots: kill no longer rearranges elements (slots are
+    // stable), so an entity that kills itself or another one in think does not
+    // break indices. Free slots are simply skipped.
     for (int i = 0; i < ENTITY_MAX; i++) {
         Entity *e = &s_entities[i];
         if (e->classname && e->cls && e->cls->think) e->cls->think(e, dt);
@@ -166,7 +166,7 @@ int entity_count(void)
 
 Entity *entity_at(int i)
 {
-    // i-я (с нуля) ЖИВАЯ сущность в порядке номеров слотов; NULL — нет такой.
+    // The i-th (zero-based) LIVE entity in slot-number order; NULL — no such entity.
     if (i < 0) return NULL;
     for (int j = 0; j < ENTITY_MAX; j++)
         if (s_entities[j].classname && i-- == 0) return &s_entities[j];
@@ -175,7 +175,7 @@ Entity *entity_at(int i)
 
 Entity *entity_find_class(const char *classname, int n)
 {
-    // n-я (с нуля) сущность данного класса; NULL — такой нет.
+    // The n-th (zero-based) entity of this class; NULL — none exists.
     int found = 0;
     for (int i = 0; i < ENTITY_MAX; i++) {
         if (!s_entities[i].classname) continue;

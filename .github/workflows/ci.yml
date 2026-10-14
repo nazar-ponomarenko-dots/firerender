@@ -31,7 +31,7 @@ jobs:
           make clean
           make EXTRA_CFLAGS="-fsanitize=address,undefined -O1 -g -fno-omit-frame-pointer"
         env:
-          # detect_leaks=0: SDL3 утекает 256 байт при выходе (внутренние потоки)
+          # detect_leaks=0: SDL3 leaks 256 bytes at exit (internal threads)
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
 
@@ -40,7 +40,7 @@ jobs:
           timeout 5 ./build/firerender || true
         env:
           SDL_VIDEODRIVER: dummy
-          # detect_leaks=0: SDL3 сам утекает 256 байт при выходе (внутренние
-          # потоки) — это не наш код. Проверяем corruption/UB, не утечки.
+          # detect_leaks=0: SDL3 itself leaks 256 bytes at exit (internal
+          # threads) — that is not our code. We check corruption/UB, not leaks.
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1

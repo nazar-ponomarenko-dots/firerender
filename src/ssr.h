@@ -4,27 +4,27 @@
 #include "render_ctx.h"
 
 typedef struct {
-    GLuint fbo[2], tex[2];     // ping-pong: сцена+отражение + прошлый кадр (антимерцание)
-    int cur, last, frames;     // cur — куда пишем, last — откуда читают, frames — счётчик
-    GLuint vao, vbo;           // полноэкранный треугольник
+    GLuint fbo[2], tex[2];     // ping-pong: scene+reflection + previous frame (anti-flicker)
+    int cur, last, frames;     // cur — where we write, last — where they read from, frames — counter
+    GLuint vao, vbo;           // full-screen triangle
     GLuint prog;
     GLint u_scene, u_depth, u_cube, u_wetmask, u_prev;
     GLint u_viewproj, u_invviewproj, u_prevviewproj, u_campos, u_texel, u_worldsize;
     GLint u_params, u_misc, u_debug, u_wetness, u_strength, u_blend;
     int vw, vh;
-    float prev_vp[16];        // viewproj прошлого кадра (репроекция антимерцания)
-    int have_prev;            // prev_vp валиден
+    float prev_vp[16];        // previous frame's viewproj (anti-flicker reprojection)
+    int have_prev;            // prev_vp is valid
 } SsrParams;
 
-// Создаёт FBO/шейдер. vw/vh — размер окна.
+// Creates the FBO/shader. vw/vh — window size.
 void ssr_init(SsrParams *s, int vw, int vh);
-// Пересоздаёт текстуру при изменении размера окна.
+// Recreates the texture when the window size changes.
 void ssr_resize(SsrParams *s, int vw, int vh);
-// Сцена+отражение. Читает scene_tex+scene_depth (единицы 0/1),
-// пишет в свой FBO (ssr_tex). Вызывать ПОСЛЕ рендера сцены, ДО bloom.
+// Scene+reflection. Reads scene_tex+scene_depth (units 0/1),
+// writes into its own FBO (ssr_tex). Call AFTER the scene render, BEFORE bloom.
 void ssr_render(SsrParams *s, GLuint scene_tex, GLuint scene_depth,
                 const RendererContext *rc);
-// Текстура сцены+отражения (вместо scene_tex для bloom/тумана).
+// Scene+reflection texture (instead of scene_tex for bloom/fog).
 GLuint ssr_tex(const SsrParams *s);
 void ssr_cleanup(SsrParams *s);
 

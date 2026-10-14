@@ -1,18 +1,18 @@
 // ============================================================================
-//  game.c — игровое состояние, загрузка/выгрузка мира и обновление (см. game.h)
+//  game.c — game state, world load/unload and update (see game.h)
 // ----------------------------------------------------------------------------
-//  Всё состояние мира — в одной структуре Game (узлы сцены, камера/HUD,
-//  карта, спавн/сохранение, демо, данные мира WorldState). Модули получают
-//  Game* параметром; game_instance() — для функций без параметра
-//  (консольные команды).
+//  All world state lives in a single Game struct (scene nodes, camera/HUD,
+//  map, spawn/save, demo, WorldState data). Modules receive Game* as a
+//  parameter; game_instance() serves functions that take no parameter
+//  (console commands).
 //
-//  Загрузка мира разбита на ЯВНЫЕ ФАЗЫ (порядок зафиксирован):
-//     1. world_load_geometry — пак карты, map.json, высоты/нормали, поле;
-//     2. scene_build          — тени, дерево узлов, сущности, FBO, первый кадр;
-//     3. map_apply            — cvar'ы и команды карты;
-//     4. audio_load_map       — музыка, ambient/ветер, позиционные звуки.
-//  Выгрузка — СТРОГИЙ ИНВЕРС: audio_stop_map -> scene_teardown ->
-//  world_unload_geometry (каждый шаг освобождает то, что создан последним).
+//  World loading is split into EXPLICIT PHASES (the order is fixed):
+//     1. world_load_geometry — map pak, map.json, heights/normals, field;
+//     2. scene_build          — shadows, node tree, entities, FBO, first frame;
+//     3. map_apply            — the map's cvars and commands;
+//     4. audio_load_map       — music, ambient/wind, positional sounds.
+//  Unloading is a STRICT INVERSE: audio_stop_map -> scene_teardown ->
+//  world_unload_geometry (each step frees what was created last).
 // ============================================================================
 #include "game.h"
 
@@ -54,12 +54,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Единственный экземпляр: main.c создаёт Game на стеке и регистрирует
-// через game_init; game_instance() отдаёт его командам и прочим.
+// Single instance: main.c creates the Game on the stack and registers it via
+// game_init; game_instance() hands it out to commands and the like.
 static Game *s_game = NULL;
 
-// Функции фаз определены ниже в этом же файле; forward-объявления для
-// вызовов из scene_build (частичный rollback) и game_load_world.
+// Phase functions are defined further down in this same file; forward
+// declarations for calls from scene_build (partial rollback) and game_load_world.
 static void scene_teardown(Game *g);
 static void world_unload_geometry(Game *g);
 
@@ -81,23 +81,23 @@ static int map_is_zip(const Game *g)
     return strcmp(g->map_name, "map") != 0;
 }
 
-// --- Демо-сцена (клавиша Q): автополёт с замером FPS -------------------------
+// --- Demo scene (key Q): automatic flythrough with FPS measurement ------------
 #define DEMO_DUR 116.0f
 
-// Дерево для круга (tree1 из map.json) и эллипс вокруг поля
+// The tree for the orbit (tree1 from map.json) and the ellipse around the field
 static const float DEMO_TREE[2] = { 880.0f, 380.0f };
 #define DEMO_FCX 1000.0f
 #define DEMO_FCZ 562.0f
-#define DEMO_A 280.0f     // полуоси эллипса вокруг поля (за его краем)
+#define DEMO_A 280.0f     // semi-axes of the ellipse around the field (outside its edge)
 #define DEMO_B 190.0f
 
 #define DEMO_H(w, x, z) sample_height(w, (x), (z))
 
-// Шаг демо: время t от начала, ведём камеру по фазам на уровне игрока
+// Demo step: time t from the start, drive the camera through phases at player height
 static void demo_step(const WorldState *w, float t, CameraParams *cam)
 {
-    float hx = 0, hz = 0;                    // позиция
-    float gx, gy, gz;                        // точка взгляда (на высоте земли)
+    float hx = 0, hz = 0;                    // position
+    float gx, gy, gz;                        // gaze point (at ground height)
 
     if (t < 8.0f) {
         hx = 1000.0f;
@@ -180,14 +180,14 @@ static void demo_step(const WorldState *w, float t, CameraParams *cam)
     cam->cam.pitch = atan2f(dy, hl);
 }
 
-// --- Телепорт игрока (спавн, setpos, load, телепорт-триггеры) ------------------
+// --- Player teleport (spawn, setpos, load, teleport triggers) ------------------
 void game_apply_spawn(Game *g, const float pos[3], float yaw, float pitch)
 {
     if (!g->cam) return;
     player_teleport(&g->player, &g->cam->cam, pos, yaw, pitch);
 }
 
-// --- Демо-сцена (клавиша Q) ----------------------------------------------------
+// --- Demo scene (key Q) --------------------------------------------------------
 void game_demo_toggle(Game *g)
 {
     if (!g->world_loaded || app_state() != APP_PLAY || !g->cam || !g->hud) return;
@@ -215,7 +215,7 @@ void game_demo_stop(Game *g)
     if (g->hud) hud_demo_stop(g->hud);
 }
 
-// Шаг демо-сцены: ведём камеру по маршруту и меряем FPS.
+// Demo scene step: drive the camera along the route and measure FPS.
 void game_demo_tick(Game *g, float dt, float inst_fps)
 {
     if (!g->demo_on || !g->world_loaded || app_state() != APP_PLAY) return;
@@ -241,18 +241,18 @@ void game_demo_tick(Game *g, float dt, float inst_fps)
     }
 }
 
-// --- Интерактив и триггеры карты -----------------------------------------------
-// Выполняет действие карты: команды, сообщение, звук (позиционно из pos),
-// телепорт. ВАЖНО: console_exec может выгрузить мир (команда "map X") — после
-// него НЕЛЬЗЯ трогать g->cam (он освобождён в scene_teardown). Поэтому позицию
-// передаём копией, а доступ к камере — только при живом мире.
+// --- Map interaction and triggers ---------------------------------------------
+// Runs a map action: commands, message, sound (positional from pos), teleport.
+// IMPORTANT: console_exec may unload the world (the "map X" command) — after it
+// you MUST NOT touch g->cam (it was freed in scene_teardown). Therefore the
+// position is passed by copy, and camera access happens only while the world is alive.
 static void map_action_run(Game *g, const char commands[MAP_ACTIONS_MAX][MAP_CMD_LEN],
                            int cmd_n, const char *message, const char *sound,
                            const float pos[3], const float *tp, int has_tp)
 {
     for (int i = 0; i < cmd_n; i++) {
         console_exec(commands[i]);
-        if (!g->world_loaded) return;   // команда выгрузила мир — действие прервано
+        if (!g->world_loaded) return;   // the command unloaded the world — action aborted
     }
     if (message && message[0]) {
         snprintf(g->ui_msg, sizeof g->ui_msg, "%s", message);
@@ -267,7 +267,7 @@ static void map_action_run(Game *g, const char commands[MAP_ACTIONS_MAX][MAP_CMD
         game_apply_spawn(g, tp, g->cam->cam.yaw, g->cam->cam.pitch);
 }
 
-// Проверка триггеров и взаимодействия (E) — каждый кадр в игре
+// Trigger and interaction (E) checks — every frame while in game
 static void map_actions_update(Game *g)
 {
     static int s_use_prev = 0;
@@ -276,12 +276,13 @@ static void map_actions_update(Game *g)
     s_use_prev = use_now;
 
     if (!g->cam) return;
-    // Позиция — КОПИЕЙ: консольная команда триггера может выгрузить мир
-    // (команда "map ..."), и указатель на камеру повиснет (use-after-free).
+    // Position is passed BY COPY: a trigger's console command may unload the
+    // world (the "map ..." command), leaving the camera pointer dangling
+    // (use-after-free).
     float px = g->cam->cam.pos[0];
     float pz = g->cam->cam.pos[2];
 
-    // --- Триггеры: вошёл в область -> действие ---
+    // --- Triggers: entered the area -> action ---
     for (int i = 0; i < mapdata_trigger_count(); i++) {
         const MapTrigger *t = mapdata_trigger(i);
         if (!t) continue;
@@ -296,11 +297,11 @@ static void map_actions_update(Game *g)
         SDL_Log("Trigger: %s", t->name[0] ? t->name : "(без имени)");
         map_action_run(g, t->commands, t->cmd_n, t->message, t->sound,
                        t->pos, t->teleport, t->has_tp);
-        if (!g->world_loaded) return;   // мир сменился — триггеры новой карты
-                                        // обработает следующий кадр
+        if (!g->world_loaded) return;   // the world changed — the new map's
+                                        // triggers are handled next frame
     }
 
-    // --- Взаимодействие E: ближайший объект с use в радиусе 4.5 м ---
+    // --- E interaction: nearest object with use within a 4.5 m radius ---
     if (!use_press) return;
     const MapObject *best = NULL;
     float best_d = 4.5f * 4.5f;
@@ -320,39 +321,39 @@ static void map_actions_update(Game *g)
                    best->use.message, best->use.sound, best->pos, NULL, 0);
 }
 
-// --- Фазы загрузки мира ---------------------------------------------------------
-// Порядок зафиксирован: world_load_geometry -> scene_build -> map_apply ->
-// audio_load_map. Выгрузка — строгий инверс (см. game_unload_world).
+// --- World load phases ---------------------------------------------------------
+// Fixed order: world_load_geometry -> scene_build -> map_apply ->
+// audio_load_map. Unloading is the strict inverse (see game_unload_world).
 
-//  Фаза 1. Геометрия мира: карта-пак, map.json, высоты/нормали, поле пшеницы.
+//  Phase 1. World geometry: the map pak, map.json, heights/normals, wheat field.
 static int world_load_geometry(Game *g, WorldTextures *wt)
 {
     WorldState *w = &g->world;
 
-    // Карта: zip из maps/ (рабочая папка или на уровень выше) или папка map/
+    // Map: a zip from maps/ (working folder or one level up) or the map/ folder
     if (map_is_zip(g)) {
         char path[128];
         snprintf(path, sizeof path, "maps/%s.zip", g->map_name);
         if (!resources_pak_open(path)) {
             snprintf(path, sizeof path, "../maps/%s.zip", g->map_name);
-            if (!resources_pak_open(path)) return -1;   // пак не открыт — чистить нечего
+            if (!resources_pak_open(path)) return -1;   // pak not opened — nothing to clean
         }
     }
-    // Всё про карту — в её корне: map/map.json или map.json (внутри zip)
+    // Everything about the map sits at its root: map/map.json or map.json (inside the zip)
     if (mapdata_load(map_is_zip(g) ? "map.json" : "map/map.json") != 0) {
-        mapdata_free();            // частично загруженный json — убрать
+        mapdata_free();            // partially loaded json — remove it
         resources_pak_close();     // ~ resources_pak_open
         return -1;
     }
     if (world_load(w, wt) != 0) {
-        mapdata_free();            // фаза 1 откатывается целиком
-        world_free(w);             // частичные высоты/текстуры
+        mapdata_free();            // phase 1 rolls back entirely
+        world_free(w);             // partial heights/textures
         resources_pak_close();
         return -1;
     }
 
-    // Поле пшеницы: прямоугольник мира, общий для рельефа, растительности
-    // и узла FieldArea (рамка). Координаты — из map/map.json.
+    // Wheat field: a world rectangle shared by terrain, vegetation
+    // and the FieldArea node (frame). Coordinates come from map/map.json.
     g->field_pos[0]  = w->world_w / 2;
     g->field_pos[1]  = 0;
     g->field_pos[2]  = w->world_d / 2;
@@ -378,14 +379,14 @@ static int world_load_geometry(Game *g, WorldTextures *wt)
         w->field_w = w->world_w;
         w->field_d = w->world_d;
     }
-    // Поверхности рельефа: splat-маска материалов (грунт/песок/щебень/асфальт),
-    // дороги и карта занятости (где не растёт трава). Высоты под дороги уже
-    // выровнены внутри world_load (splat_flatten_roads).
+    // Terrain surfaces: splat mask of materials (soil/sand/gravel/asphalt),
+    // roads and the occupancy map (where grass does not grow). Heights under
+    // roads are already flattened inside world_load (splat_flatten_roads).
     splat_build(w);
     return 0;
 }
 
-// Подключает к корню все созданные узлы сцены (не-созданные — пропускает).
+// Attaches all created scene nodes to the root (skips the not-yet-created ones).
 static void scene_attach_nodes(Game *g)
 {
     if (!g->root) return;
@@ -408,19 +409,19 @@ static void scene_attach_nodes(Game *g)
 #undef FR_ATTACH
 }
 
-// Фаза 2. Сцена: тени, дерево узлов, сущности, FBO рендера, первый кадр.
+// Phase 2. Scene: shadows, node tree, entities, render FBO, first frame.
 static int scene_build(Game *g, const WorldTextures *wt)
 {
     WorldState *w = &g->world;
 
-    shadow_init();                     // каскадные карты теней
+    shadow_init();                     // cascaded shadow maps
 
     g->root = node_new("World", "Node3D", NULL, NULL, NULL, NULL, NULL);
 
     g->sun_node = sun_make_node();
     SceneNode *sun_node = g->sun_node;
 
-    // Камера: старт игрока из map.json (player/pos, yaw, pitch, fov)
+    // Camera: player start from map.json (player/pos, yaw, pitch, fov)
     float start_pos[3] = {
         w->world_w / 2,
         height_curve(w, 1.0f - world_avg_lum()) + 6.0f,
@@ -443,23 +444,23 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->cam_node = camera_make_node(w, start_pos, start_yaw, start_pitch,
                                    start_fov, 0.1f, w->world_w * 1.5f);
     if (!sun_node || !g->cam_node) {
-        // Чистим за собой: созданные узлы + корень + тени (сцена не собрана).
+        // Clean up after ourselves: created nodes + root + shadows (scene not built).
         scene_attach_nodes(g);
         scene_teardown(g);
         return -1;
     }
     g->cam = g->cam_node->params;
 
-    // fov из map.json — как значение по умолчанию, затем config.cfg поверх
+    // fov from map.json acts as the default value, then config.cfg overrides it
     cvar_set("fov", g->cam->fov_deg);
     console_autoload();
 
-        // Спавн: стартовая точка/взгляд игрока (для «Новой игры»)
+        // Spawn: the player's start point/gaze (for "New game")
     player_set_spawn(&g->player, g->cam->cam.pos, g->cam->cam.yaw,
                      g->cam->cam.pitch);
-    health_revive(&g->player.hp);   // новый/перезагруженный мир — полный HP
+    health_revive(&g->player.hp);   // new/reloaded world — full HP
 
-    // Узлы сцены получают единый рендер-контекст (renderer.c) вместо cam/sun
+    // Scene nodes receive the unified render context (renderer.c) instead of cam/sun
     const RendererContext *rc = renderer_context();
     g->sky_node = sky_make_node(rc);
     g->terr_node = terrain_make_node(w, wt, rc);
@@ -477,18 +478,18 @@ static int scene_build(Game *g, const WorldTextures *wt)
     if (!g->sky_node || !g->terr_node || !g->wheat_node || !g->field_node ||
         !g->sel_node || !g->mm_node || !g->hud_node) {
         SDL_Log("Failed to create a scene node (missing texture/shader?)");
-        // Сцена не собрана начисто: освобождаем созданные узлы и тени.
+        // The scene was not fully built: free the created nodes and shadows.
         scene_attach_nodes(g);
         scene_teardown(g);
         return -1;
     }
     g->mm = g->mm_node->params;
     g->hud = g->hud_node->params;
-    selection_set_on(0);             // рамки выделения — только по H (дебаг)
+    selection_set_on(0);             // selection outlines — only via H (debug)
 
     scene_attach_nodes(g);
 
-    // Сущности: классы, мир, игрок, объекты карты
+    // Entities: classes, world, player, map objects
     {
         static const EntityClass cls_world = { "world", NULL, NULL, NULL };
         static const EntityClass cls_player = { "player", NULL, NULL, NULL };
@@ -506,7 +507,7 @@ static int scene_build(Game *g, const WorldTextures *wt)
         }
     }
 
-    // Размер окна в пикселях — его видит OpenGL (glViewport)
+    // Window size in pixels — what OpenGL sees (glViewport)
     int vw = renderer_vw(), vh = renderer_vh();
     g->cam->aspect = (float)vw / vh;
     g->mm->vw = vw;
@@ -514,12 +515,12 @@ static int scene_build(Game *g, const WorldTextures *wt)
     g->hud->vw = vw;
     g->hud->vh = vh;
 
-    // Bloom и воксельный туман — FBO размера окна (рендер)
+    // Bloom and voxel fog — window-sized FBOs (renderer)
     renderer_setup(w, vw, vh);
 
-    // Первый кадр сцены (фон готов, камера посчитана)
+    // First scene frame (background ready, camera computed)
     node_update_tree(g->root, 1.0f / 60.0f);
-    node_update_transforms(g->root);   // мировые матрицы до первого рендера
+    node_update_transforms(g->root);   // world matrices before the first render
     entity_update_all(1.0f / 60.0f);
     voxfog_update(g->cam->cam.pos);
 
@@ -527,17 +528,17 @@ static int scene_build(Game *g, const WorldTextures *wt)
     return 0;
 }
 
-// Фаза 3. Применение карты: cvar'ы и команды (после построения сцены).
+// Phase 3. Map application: cvars and commands (after the scene is built).
 static void map_apply(void)
 {
-    // cvar'ы карты (cvars: { имя: значение }) — поверх config.cfg
+    // map cvars (cvars: { name: value }) — override config.cfg
     for (int i = 0; i < mapdata_cvar_count(); i++) {
         const char *name = mapdata_cvar_name(i);
         if (!name) continue;
         cvar_set(name, mapdata_cvar_value(i));
         SDL_Log("Map cvar: %s = %g", name, mapdata_cvar_value(i));
     }
-    // команды карты (commands: [ ... ]) — консольные команды
+    // map commands (commands: [ ... ]) — console commands
     for (int i = 0; i < mapdata_command_count(); i++) {
         const char *cmd = mapdata_command(i);
         if (!cmd) continue;
@@ -546,8 +547,8 @@ static void map_apply(void)
     }
 }
 
-// Фаза 4. Звук карты: музыка, ambient/ветер, позиционные источники.
-// (карта может положить свои wav в zip — ресурс-менеджер подтянет их)
+// Phase 4. Map audio: music, ambient/wind, positional sources.
+// (a map may ship its own wav files in the zip — the resource manager pulls them in)
 static void audio_load_map(Game *g)
 {
     MapSound ms;
@@ -566,7 +567,7 @@ static void audio_load_map(Game *g)
         if (!g->wind) g->wind = audio_load("audio/wind.wav");
         if (g->wind) audio_loop_start(g->wind, 0.22f);
     }
-    // Позиционные звуки карты (sounds[]): громкость от дистанции до игрока
+    // Map positional sounds (sounds[]): volume depends on distance to the player
     for (int i = 0; i < mapdata_sound_count(); i++) {
         const MapSound3D *m3 = mapdata_sound(i);
         if (!m3) continue;
@@ -581,9 +582,10 @@ static void audio_load_map(Game *g)
     }
 }
 
-// Грузит карту и строит сцену. Вызывается по "НОВАЯ ИГРА"/"ПРОДОЛЖИТЬ".
-// Пока грузится мир — экран загрузки: фон img/loading.png + полоса
-// прогресса справа снизу с подписью фазы (loading.c предъявляет кадры).
+// Loads the map and builds the scene. Called from "New game"/"Continue".
+// While the world loads there is a loading screen: img/loading.png background
+// plus a progress bar at the bottom right labeled with the phase (loading.c
+// presents the frames).
 int game_load_world(Game *g)
 {
     if (!g || g->world_loading) {
@@ -591,7 +593,7 @@ int game_load_world(Game *g)
         return -1;
     }
     g->world_loading = 1;
-    // FR_STAGES: тайминг фаз загрузки мира (поиск тяжёлых мест загрузки)
+    // FR_STAGES: timing of world-load phases (hunting heavy spots in loading)
     const int st = getenv("FR_STAGES") != NULL;
     double st_f = (double)SDL_GetPerformanceFrequency();
     Uint64 st_t = SDL_GetPerformanceCounter(), st_p = st_t;
@@ -605,41 +607,41 @@ int game_load_world(Game *g)
         loading_end();
         g->world_loading = 0;
         return -1;
-    } // фаза 1
+    } // phase 1
     STLOG("geometry+textures");
     loading_progress(0.30f, "Собираем сцену");
     if (scene_build(g, &wt) != 0) {
-        // scene_build уже освободила частичную сцену (scene_teardown внутри);
-        // здесь — откат данных фазы 1, иначе они утекают.
+        // scene_build already freed the partial scene (scene_teardown inside);
+        // here — roll back the phase 1 data, otherwise it leaks.
         world_unload_geometry(g);
         SDL_Log("World load failed: scene_build");
         loading_end();
         g->world_loading = 0;
-        return -1;                                       // фаза 2: сцена
+        return -1;                                       // phase 2: scene
     }
     STLOG("scene_build");
     loading_progress(0.60f, "Настройки карты");
-    map_apply();                                       // фаза 3: cvar'ы/команды
+    map_apply();                                       // phase 3: cvars/commands
     loading_progress(0.75f, "Звук карты");
-    audio_load_map(g);                                 // фаза 4: звук карты
+    audio_load_map(g);                                 // phase 4: map audio
 
     loading_progress(0.85f, "Тени и маски");
-    // Запечённый свет карты (map/baked): движок только ЧИТАЕТ. Нет файла —
-    // terrain_baked_light_have() = 0, рельеф идёт прежним расчётным путём.
-    // Грузим ПЕРВЫМ — от его наличия зависит, нужен ли CPU-пересчёт статики.
+    // The map's baked light (map/baked): the engine only READS it. No file —
+    // terrain_baked_light_have() = 0, terrain keeps using the old computed path.
+    // Loaded FIRST — whether the CPU static rebake is needed depends on it.
     terrain_baked_light_load(&g->world);
-    // Статические тени (режим 2): офлайн-лайтмап уже содержит статические тени
-    // (+AO+переотражения), и в режиме 2 шейдер берёт именно его. CPU-пересчёт
-    // (terrain_shadows_bake) нужен ТОЛЬКО как fallback для карт БЕЗ запечённого
-    // света — иначе это секунды впустую на результат, который никто не читает.
+    // Static shadows (mode 2): the offline lightmap already contains static
+    // shadows (+AO+bounces), and in mode 2 the shader uses exactly that. The
+    // CPU rebake (terrain_shadows_bake) is needed ONLY as a fallback for maps
+    // WITHOUT baked light — otherwise it is seconds wasted on a result nobody reads.
     if (cvar_get("r_shadows_mode") == 2.0f && !terrain_baked_light_have())
         terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
-    // Мокрость: запечённая маска "под крышей" (всегда, полезна для мокрости)
+    // Wetness: baked "under roof" mask (always, useful for wetness)
     terrain_wetness_mask_bake(&g->world);
     STLOG("bakes");
     SDL_Log("World loaded (%.0fx%.0f m)", g->world.world_w, g->world.world_d);
 
-    // Скрипт карты (lua/maps/<карта>.lua): после сцены и сущностей
+    // Map script (lua/maps/<map>.lua): after the scene and entities
     loading_progress(0.95f, "Скрипт карты");
     lua_engine_map(g->map_name);
     loading_progress(1.0f, "Готово");
@@ -648,23 +650,23 @@ int game_load_world(Game *g)
     return 0;
 }
 
-// --- Фазы выгрузки мира (СТРОГИЙ ИНВЕРС порядка создания) ----------------------
-//  Инверс фазы 4 (audio_load_map)
+// --- World unload phases (STRICT INVERSE of the creation order) ----------------
+//  Inverse of phase 4 (audio_load_map)
 static void audio_stop_map(void)
 {
-    audio_loop_stop();           // ветер/ambient — только в игре
-    audio_music_stop();          // музыка карты — тоже
-    audio_3d_stop_all();         // и позиционные источники
+    audio_loop_stop();           // wind/ambient — in game only
+    audio_music_stop();          // map music — likewise
+    audio_3d_stop_all();         // and positional sources
 }
 
-//  Инверс фазы 2 (scene_build): FBO рендера -> сущности -> узлы в обратном
-//  порядке создания -> корень -> тени.
+//  Inverse of phase 2 (scene_build): render FBO -> entities -> nodes in the
+//  reverse creation order -> root -> shadows.
 static void scene_teardown(Game *g)
 {
-    renderer_teardown();         // ~ renderer_setup (создавался последним)
-    ecs_scene_shutdown();        // ~ ecs-пары узлов (до освобождения дерева)
-    entity_shutdown();           // ~ entity_* (kill освобождает свои узлы)
-    hud_cleanup(g->hud_node);    // ~ hud_make_node (последний из узлов)
+    renderer_teardown();         // ~ renderer_setup (created last)
+    ecs_scene_shutdown();        // ~ node ecs pairs (before freeing the tree)
+    entity_shutdown();           // ~ entity_* (kill frees its own nodes)
+    hud_cleanup(g->hud_node);    // ~ hud_make_node (last of the nodes)
     minimap_cleanup(g->mm_node); // ~ minimap_make_node
     playerbox_cleanup(g->playerbox_node); // ~ playerbox_make_node
     selection_cleanup(g->sel_node);
@@ -676,9 +678,9 @@ static void scene_teardown(Game *g)
     if (g->obj_node) objects_cleanup(g->obj_node);
     veg_cleanup(g->wheat_node);
     terrain_cleanup(g->terr_node);
-    sky_cleanup(g->sky_node);    // ~ sky_make_node (первый из узлов)
-    node_free_tree(g->root);     // ~ корень и все узлы (камера, солнце)
-    shadow_cleanup();            // ~ shadow_init (создавался первым)
+    sky_cleanup(g->sky_node);    // ~ sky_make_node (first of the nodes)
+    node_free_tree(g->root);     // ~ root and all nodes (camera, sun)
+    shadow_cleanup();            // ~ shadow_init (created first)
     g->root = NULL;
     g->cam_node = g->sun_node = g->sky_node = g->terr_node = g->wheat_node = NULL;
     g->obj_node = g->field_node = g->sel_node = g->mm_node = g->hud_node = NULL;
@@ -690,28 +692,28 @@ static void scene_teardown(Game *g)
     g->world_loaded = 0;
 }
 
-//  Инверс фазы 1 (world_load_geometry)
+//  Inverse of phase 1 (world_load_geometry)
 static void world_unload_geometry(Game *g)
 {
-    splat_free();                // ~ splat_build (маска материалов/занятости)
+    splat_free();                // ~ splat_build (material/occupancy mask)
     mapdata_free();              // ~ mapdata_load
     world_free(&g->world);       // ~ world_load
     resources_pak_close();       // ~ resources_pak_open
 }
 
-// Выгружает мир при выходе в главное меню
+// Unloads the world when returning to the main menu
 void game_unload_world(Game *g)
 {
     if (!g->world_loaded) return;
-    lua_engine_clear();          // сбросить таймеры/update скрипта карты
-    audio_stop_map();            // фаза 4: звук карты
-    scene_teardown(g);           // фаза 2: сцена
-    world_unload_geometry(g);    // фаза 1: данные карты
-    material_clear_all();        // материалы карты не перетекают в следующую
+    lua_engine_clear();          // reset the map script's timers/update
+    audio_stop_map();            // phase 4: map audio
+    scene_teardown(g);           // phase 2: scene
+    world_unload_geometry(g);    // phase 1: map data
+    material_clear_all();        // map materials do not carry over to the next one
     SDL_Log("World unloaded");
 }
 
-// --- Выбор карты: сохранение в config.cfg (строка map_name <имя>) --------------
+// --- Map choice: saved into config.cfg (map_name <name> line) ------------------
 void game_map_config_load(Game *g)
 {
     FILE *f = fopen("config.cfg", "r");
@@ -722,17 +724,17 @@ void game_map_config_load(Game *g)
         }
         fclose(f);
     }
-    // FR_MAP — принудительный выбор карты (для запекания всех карт: make bake-maps).
-    // Перебивает и дефолт, и config.cfg, не трогая пользовательский конфиг.
+    // FR_MAP — forced map selection (for baking all maps: make bake-maps).
+    // Overrides both the default and config.cfg without touching the user config.
     const char *em = getenv("FR_MAP");
     if (em && em[0]) snprintf(g->map_name, sizeof g->map_name, "%s", em);
 }
 
 void game_map_config_save(Game *g)
 {
-    // Раньше map_name дописывался в конец (append) — при каждом выходе строка
-    // копилась, файл рос. Теперь: читаем config.cfg (его до этого обновил
-    // console_save_config), выкидываем все старые map_name и пишем ровно одну.
+    // map_name used to be appended at the end — each exit added another line
+    // and the file grew. Now: read config.cfg (console_save_config just
+    // updated it beforehand), drop all old map_name lines and write exactly one.
     char keep[4096] = { 0 };
     int n = 0;
     FILE *r = fopen("config.cfg", "r");
@@ -740,7 +742,7 @@ void game_map_config_save(Game *g)
         char line[128];
         while (fgets(line, sizeof line, r)) {
             char mname[64];
-            if (sscanf(line, "map_name %63s", mname) == 1) continue;  // старую — вон
+            if (sscanf(line, "map_name %63s", mname) == 1) continue;  // toss the old one
             size_t l = strlen(line);
             if (n + (int)l < (int)sizeof keep - 1) {
                 memcpy(keep + n, line, l);
@@ -758,32 +760,32 @@ void game_map_config_save(Game *g)
     }
 }
 
-// --- Обновление мира (каждый кадр из главного цикла) ---------------------------
+// --- World update (every frame from the main loop) -----------------------------
 void game_update(Game *g, float dt)
 {
     if (!g->world_loaded) return;
-    // Логика: мир живёт только в игре; в меню/паузе — заморожен
+    // Logic: the world only lives while playing; frozen in menus/pause
     if (app_state() == APP_PLAY) {
         node_update_tree(g->root, dt);
-        fx_update(dt);              // эмиттеры эффектов (дождь/огонь/...)
+        fx_update(dt);              // effect emitters (rain/fire/...)
         entity_update_all(dt);
 
-        // --- Здоровье игрока: урон от падения, реген, смерть/респавн ---
-        // Урон от падения: безопасно до ~12 м/с (высокие прыжки/мелкие уступы),
-        // выше — растёт линейно. movement.c отдаёт скорость касания земли.
+        // --- Player health: fall damage, regen, death/respawn ---
+        // Fall damage: safe up to ~12 m/s (high jumps/small ledges),
+        // above that it grows linearly. movement.c reports the ground-impact speed.
         float fall = movement_take_fall_impact();
         const float FALL_SAFE = 12.0f, FALL_DMG_K = 6.5f;
         if (fall > FALL_SAFE && !g->cam->cam.noclip && !g->cam->cam.fly)
             health_damage(&g->player.hp, (fall - FALL_SAFE) * FALL_DMG_K);
         int respawn = 0;
         health_update(&g->player.hp, dt, &respawn);
-        // Мёртв: замораживаем ввод/движение (нельзя ходить и вертеть головой),
-        // а камеру плавно «роняем» — взгляд оседает вниз, будто игрок упал.
-        // Возрождение снимает заморозку и телепортирует на спавн.
+        // Dead: freeze input/movement (no walking, no looking around) and
+        // gently "drop" the camera — the gaze settles downward as if the player
+        // fell. Respawn lifts the freeze and teleports to the spawn point.
         int dead = health_is_dead(&g->player.hp);
         camera_set_frozen(dead);
         if (dead) {
-            const float DEATH_PITCH = 0.62f;   // pitch+ = вниз (см. движение)
+            const float DEATH_PITCH = 0.62f;   // pitch+ = looking down (see movement)
             float k = dt * 3.5f; if (k > 1.0f) k = 1.0f;
             g->cam->cam.pitch += (DEATH_PITCH - g->cam->cam.pitch) * k;
             g->cam->cam.vx = g->cam->cam.vy = g->cam->cam.vz = 0.0f;
@@ -799,34 +801,34 @@ void game_update(Game *g, float dt)
             g->field_node->pos[0] = g->cam->cam.pos[0];
             g->field_node->pos[2] = g->cam->cam.pos[2];
         }
-        map_actions_update(g);      // триггеры + взаимодействие (E)
+        map_actions_update(g);      // triggers + interaction (E)
 
-        // ECS-слой: pull трансформов узлов -> системы -> push в изменённые
-        // узлы. ПОСЛЕ всей логики и ДО node_update_transforms — мировые
-        // матрицы рендеру считаются уже от финальных позиций.
+        // ECS layer: pull node transforms -> systems -> push into changed
+        // nodes. AFTER all logic and BEFORE node_update_transforms — the world
+        // matrices for the renderer are computed from final positions.
         {
             static int s_ecs_was_on = -1;
             int on = cvar_get("ecs_enable") != 0.0f;
             if (on && s_ecs_was_on == 0) ecs_scene_new_generation();
-            // Без нового gen включение «на лету» плодило бы дубли: пул
-            // помнит пары прошлого прогона, а pull создал бы новые.
+            // Without a new gen, toggling "on the fly" would spawn duplicates:
+            // the pool remembers last run's pairs while pull would create new ones.
             s_ecs_was_on = on;
             ecs_scene_enable(on);
             if (on) ecs_scene_frame(g->root, dt);
         }
     } else {
-        // Камера пересчитывает матрицы и в меню/паузе (ввод заблокирован):
-        // FOV из меню применяется сразу, а не только при входе в игру.
+        // The camera recomputes its matrices even in menus/pause (input blocked):
+        // FOV from the menu applies immediately, not only when entering the game.
         camera_node_update(g->cam_node, dt);
     }
-    // Мировые матрицы узлов: ПОСЛЕ всей логики (позиции/повороты уже
-    // окончательные) и ДО рендера. Дети, прицепленные к костям моделей,
-    // получают свежие матрицы точек крепления в этом же кадре.
+    // Node world matrices: AFTER all logic (positions/rotations are final) and
+    // BEFORE rendering. Children attached to model bones get fresh attachment
+    // point matrices in this same frame.
     node_update_transforms(g->root);
     voxfog_update(g->cam->cam.pos);
     audio_set_listener(g->cam->cam.pos);
-    audio_set_world(&g->world);   // окклюзия звука рельефом (heights==NULL — ок)
-    // Таймер сообщения карты (message из триггеров/use)
+    audio_set_world(&g->world);   // audio occlusion by terrain (heights==NULL is fine)
+    // Map message timer (message from triggers/use)
     if (g->ui_msg_t > 0.0f && app_state() == APP_PLAY)
         g->ui_msg_t -= dt;
 }

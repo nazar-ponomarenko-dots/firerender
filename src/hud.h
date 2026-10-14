@@ -1,10 +1,11 @@
 // ============================================================================
-//  hud.h — дебаг-HUD (CanvasItem2D): позиция игрока и инфа слева
+//  hud.h — debug HUD (CanvasItem2D): player position and info on the left
 // ----------------------------------------------------------------------------
-//  Текст — TTF-шрифт img/Inter_18pt-Black.ttf: атлас растеризуется один раз
-//  через stb_truetype (third_party/stb_truetype.h), глифы ставятся по
-//  метрикам шрифта (advance/беринг). Панель и буквы рисует один шейдер
-//  shaders/text.* (uUseTex: 0 = панель, 1 = глиф; покрытие глифа в R-канале).
+//  Text uses the TTF font img/Inter_18pt-Black.ttf: the atlas is rasterized
+//  once via stb_truetype (third_party/stb_truetype.h), glyphs positioned by the
+//  font metrics (advance/bearing). The panel and letters are drawn by a single
+//  shader shaders/text.* (uUseTex: 0 = panel, 1 = glyph; glyph coverage in the
+//  R channel).
 // ============================================================================
 #ifndef HUD_H
 #define HUD_H
@@ -14,60 +15,60 @@
 #include "world.h"
 
 typedef struct {
-    GLuint prog, vao, vbo;         // программа и буфер вершин (каждый кадр)
-    GLuint tex_font;               // атлас шрифта
+    GLuint prog, vao, vbo;         // program and vertex buffer (every frame)
+    GLuint tex_font;               // font atlas
     GLint u_font, u_color, u_usetex;
-    const RendererContext *rc;     // позиция/взгляд игрока, солнце (renderer.c)
-    const WorldState *world;       // данные мира (GRND/ALT, размеры, сетка)
-    int vw, vh;                    // окно в пикселях
-    float fps;                     // обновляет главный цикл (EMA)
-    float last_x, last_y, last_z;  // предыдущая позиция (для скорости)
-    int visible;                   // панель показана? (клавиша H)
+    const RendererContext *rc;     // player position/view, sun (renderer.c)
+    const WorldState *world;       // world data (GRND/ALT, sizes, grid)
+    int vw, vh;                    // window in pixels
+    float fps;                     // updated by the main loop (EMA)
+    float last_x, last_y, last_z;  // previous position (for speed)
+    int visible;                   // panel shown? (key H)
     char lines[16][96];
-    int count;                     // сколько строк заполнено
+    int count;                     // how many lines are filled
 
-    // Режим демо (клавиша Q): левая панель скрывается, справа — панель
-    // с текущим FPS, avg/min/max и живым графиком FPS.
+    // Demo mode (key Q): the left panel is hidden, on the right — a panel
+    // with current FPS, avg/min/max and a live FPS graph.
 #define HUD_DEMO_MAX 180
-    int demo;                      // 1 = демо-режим
-    float demo_fps[HUD_DEMO_MAX];  // кольцо последних FPS (для графика)
-    int demo_n;                    // сколько значений накоплено
+    int demo;                      // 1 = demo mode
+    float demo_fps[HUD_DEMO_MAX];  // ring of recent FPS values (for the graph)
+    int demo_n;                    // how many values collected
     float demo_avg, demo_min, demo_max, demo_time;
 } HudParams;
 
-// Создаёт узел DebugHUD (компилирует шейдер, строит атлас шрифта и VAO).
+// Creates the DebugHUD node (compiles the shader, builds the font atlas and VAO).
 SceneNode *hud_make_node(const WorldState *w, const RendererContext *rc);
 
 void hud_node_update(SceneNode *n, float dt);
 void hud_node_render(SceneNode *n, float dt);
 
-// Демо-режим: включить (сброс статистики) и добавить кадр (fps за кадр).
+// Demo mode: start (resets statistics) and add a frame (fps per frame).
 void hud_demo_start(HudParams *p);
 void hud_demo_frame(HudParams *p, float fps, float dt);
 void hud_demo_stop(HudParams *p);
 
-// --- Общий рендер текста/прямоугольников (для консоли и будущего UI) ---------
-// Рисуют тем же шейдером, атласом и буфером, что и сам HUD. Состояние
-// GL (блендинг вкл, depth test выкл) — ответственность вызывающего.
-// Координаты — в пикселях окна, y от верха; color — rgba 0..1.
-// Обычные функции — шрифт HUD (26px), *_small — консольный (15px).
+// --- Shared text/rectangle rendering (for the console and future UI) ---------
+// Drawn with the same shader, atlas and buffer as the HUD itself. GL state
+// (blending on, depth test off) is the caller's responsibility.
+// Coordinates are window pixels, y from the top; color is rgba 0..1.
+// Plain functions — HUD font (26px), *_small — console font (15px).
 float hud_text_width(const char *s);
-float hud_char_width(int ch);       // шаг одного символа (ASCII-байт)
-float hud_cp_width(int cp);         // шаг codepoint'а ('?' если нет глифа)
-int hud_cp_supported(int cp);       // есть ли глиф в атласе (кириллица — да)
+float hud_char_width(int ch);       // advance of one character (ASCII byte)
+float hud_cp_width(int cp);         // advance of a codepoint ('?' if no glyph)
+int hud_cp_supported(int cp);       // is the glyph in the atlas (Cyrillic — yes)
 float hud_text_line_height(void);
 float hud_cp_width_small(int cp);
 float hud_text_width_small(const char *s);
 float hud_text_line_height_small(void);
-float hud_text_ascent_small(void);  // высота над базовой линией (курсор)
-float hud_text_descent_small(void); // высота под базовой линией
-float hud_text_ascent(void);        // то же для шрифта 26px (меню)
+float hud_text_ascent_small(void);  // height above the baseline (cursor)
+float hud_text_descent_small(void); // height below the baseline
+float hud_text_ascent(void);        // same for the 26px font (menu)
 float hud_text_descent(void);
 void hud_text_draw(int vw, int vh, float x, float y, const char *s,
                    const float color[4]);
 void hud_text_draw_small(int vw, int vh, float x, float y, const char *s,
                          const float color[4]);
-// Крупный шрифт (56px) — заголовки меню
+// Large font (56px) — menu headings
 float hud_text_width_big(const char *s);
 float hud_text_line_height_big(void);
 float hud_text_ascent_big(void);
@@ -77,24 +78,24 @@ void hud_text_draw_big(int vw, int vh, float x, float y, const char *s,
 void hud_rect_draw(int vw, int vh, float x, float y, float w, float h,
                    const float color[4]);
 
-// Игровая кнопка-иконка: RGBA-текстура из img/*.png на кваде (x,y,w,h).
-// Отсутствующий файл движок подменяет img/notfound.png (Source style,
-// см. resources_texture); tint — тонировка + прозрачность.
+// Game icon button: an RGBA texture from img/*.png on a quad (x,y,w,h).
+// A missing file is substituted by the engine with img/notfound.png (Source style,
+// see resources_texture); tint — colorization + transparency.
 void hud_button_draw(int vw, int vh, const char *img_path,
                      float x, float y, float w, float h,
                      const float tint[4]);
 
-// Квад с уже загруженной GL-текстурой (UV 0..1), тем же шейдером.
+// A quad with an already loaded GL texture (UV 0..1), same shader.
 void hud_tex_quad_draw(int vw, int vh, GLuint tex,
                        float x, float y, float w, float h,
                        const float color[4]);
 
-// Освобождает GL-ресурсы узла.
+// Frees the node's GL resources.
 void hud_cleanup(SceneNode *n);
 
-// --- Общий шрифт и рендер текста (живут ВСЮ сессию, не зависят от мира) ------
-// Вызывать при старте (до меню) и при выходе. Нужны консоли и меню даже
-// до загрузки карты.
+// --- Shared font and text rendering (live for the WHOLE session, independent of the world) ------
+// Call at startup (before the menu) and on exit. The console and menu need it
+// even before a map is loaded.
 void hud_shared_init(void);
 void hud_shared_cleanup(void);
 

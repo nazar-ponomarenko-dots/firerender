@@ -1,9 +1,9 @@
 // ============================================================================
-//  Fauna — фрагментный шейдер частиц
+//  Fauna — particle fragment shader
 // ----------------------------------------------------------------------------
-//  uMode 0: светлячок — glow-текстура, мерцание, тёплый тон (additive).
-//  uMode 1: бабочка/птица — текстура с альфа-тестом, машущие крылья
-//           (сжатие по X от времени: только для бабочек — flutter).
+//  uMode 0: firefly — glow texture, flicker, warm tint (additive).
+//  uMode 1: butterfly/bird — alpha-tested texture, flapping wings
+//           (X-squash driven by time: butterflies only — flutter).
 // ============================================================================
 
 in vec2 vUV;
@@ -23,8 +23,8 @@ void main() {
         FragColor = vec4(c.rgb * uTint, 1.0);
         return;
     }
-    // светлячок: мерцание (двойная синусоида от времени + случайная фаза
-    // из позиции — иначе все мигали бы синхронно)
+    // firefly: flicker (double sine over time + a random phase derived from
+    // position — otherwise all of them would blink in sync)
     float flick = 0.35 + 0.65 * pow(0.5 + 0.5 * sin(uTime * 2.2
                     + vWorldPos.x * 0.05 + vWorldPos.z * 0.07), 2.0);
     FragColor = vec4(c.rgb * uTint * flick, c.a * flick);

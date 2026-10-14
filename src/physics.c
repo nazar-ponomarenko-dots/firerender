@@ -1,17 +1,18 @@
 // ============================================================================
-//  physics.c — мини-движок физики тел (Verlet), см. physics.h
+//  physics.c — mini body physics engine (Verlet), see physics.h
 // ----------------------------------------------------------------------------
-//  Ядро без рендера: частицы + связи, интеграция Верле, релаксация связей,
-//  коллизия с рельефом через колбэк (main.c подсовывает sample_height).
-//  Тестовый мир — один глобальный (верёвка/цепь из консоли); на нём
-//  отрабатывается фундамент под будущий рэгдолл (частицы = кости скелета).
+//  Render-free core: particles + constraints, Verlet integration, constraint
+//  relaxation, terrain collision through a callback (main.c supplies
+//  sample_height). The test world is a single global one (rope/chain from
+//  the console); it exercises the foundation for the future ragdoll
+//  (particles = skeleton bones).
 // ============================================================================
 #include "physics.h"
 
 #include <math.h>
 #include <string.h>
 
-// Колбэк высоты рельефа (ставит main.c: sample_height мира игры)
+// Terrain height callback (set by main.c: the game world's sample_height)
 static float (*s_ground)(float x, float z) = NULL;
 
 void physics_set_ground(float (*fn)(float x, float z))
@@ -72,17 +73,18 @@ void physics_impulse(PhysWorld *w, int idx, const float vel[3])
     if (idx < 0 || idx >= w->np) return;
     PhysPart *p = &w->part[idx];
     if (p->inv_mass <= 0.0f) return;
-    // Верле: скорость = pos - prev (СМЕЩЕНИЕ ЗА ШАГ). Импульс задан в м/с —
-    // переводим в смещение за шаг: dprev = vel * dt. Без этого толчок 6 м/с
-    // превращался в 6 м/ШАГ = 600 м/с, и модель улетала в стратосферу.
+    // Verlet: velocity = pos - prev (DISPLACEMENT PER STEP). The impulse is
+    // given in m/s — convert it to a per-step displacement: dprev = vel * dt.
+    // Without this a 6 m/s shove became 6 m/STEP = 600 m/s and the model
+    // flew off into the stratosphere.
     float s = w->dt > 1e-6f ? w->dt : (1.0f / 100.0f);
     p->prev[0] -= vel[0] * s;
     p->prev[1] -= vel[1] * s;
     p->prev[2] -= vel[2] * s;
 }
 
-// Релаксация одной связи: частицы съезжаются/разъезжаются к длине покоя,
-// пропорционально обратным массам.
+// Relax one constraint: particles slide together/apart toward the rest
+// length, proportionally to their inverse masses.
 static void link_relax(PhysWorld *w, const PhysLink *l)
 {
     PhysPart *a = &w->part[l->a], *b = &w->part[l->b];
@@ -116,7 +118,7 @@ void physics_step(PhysWorld *w, float dt)
     w->dt = dt;
     float g = w->gravity * dt * dt;
 
-    // 1) Интеграция Верле: pos += (pos - prev) * (1 - damping) + g
+    // 1) Verlet integration: pos += (pos - prev) * (1 - damping) + g
     for (int i = 0; i < w->np; i++) {
         PhysPart *p = &w->part[i];
         if (p->inv_mass <= 0.0f) continue;
@@ -132,18 +134,18 @@ void physics_step(PhysWorld *w, float dt)
         p->pos[2] = nz;
     }
 
-    // 2) Релаксация связей + коллизии (несколько итераций: сеть «дожимается»)
+    // 2) Constraint relaxation + collisions (several iterations: the mesh settles)
     for (int it = 0; it < w->iterations; it++) {
         for (int i = 0; i < w->nl; i++)
             link_relax(w, &w->link[i]);
-        // Коллизия с рельефом: частица не ниже земли + радиус
+        // Terrain collision: a particle never below ground + radius
         if (s_ground) {
             for (int i = 0; i < w->np; i++) {
                 PhysPart *p = &w->part[i];
                 if (p->inv_mass <= 0.0f || p->radius <= 0.0f) continue;
                 float h = s_ground(p->pos[0], p->pos[2]) + p->radius;
                 if (p->pos[1] < h) {
-                    // трение: гасим горизонтальный сдвиг при контакте
+                    // friction: damp the horizontal slide on contact
                     p->pos[1] = h;
                     p->prev[0] += (p->pos[0] - p->prev[0]) * 0.5f;
                     p->prev[2] += (p->pos[2] - p->prev[2]) * 0.5f;

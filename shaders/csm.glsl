@@ -1,34 +1,34 @@
 // ============================================================================
-//  csm.glsl — общий каскадный теневой код (подключается через '#include "csm.glsl"')
+//  csm.glsl — shared cascaded shadow code (included via '#include "csm.glsl"')
 // ----------------------------------------------------------------------------
-//  Один источник правды для terrain/wheat/object/mesh/material/volumetric:
-//  объявления uniform'ов каскадов, выборка одного каскада (аппаратный PCF:
-//  GL_COMPARE + LINEAR — один texture() даёт гладкую полутень) и выбор
-//  каскада по дистанции с плавным смешиванием на границах uShadowBox[0..2]
-//  (uShadowBox[3] — жёсткий лимит дальности теней). Границы приходят
-//  uniform'ом из RendererContext (renderer.c) — больше никаких захардкоженных
-//  #define SHADOW_BOX*, рассинхронизированных с C.
+//  Single source of truth for terrain/wheat/object/mesh/material/volumetric:
+//  cascade uniform declarations, single-cascade sampling (hardware PCF:
+//  GL_COMPARE + LINEAR — one texture() yields a smooth penumbra) and cascade
+//  selection by distance with smooth blending at the uShadowBox[0..2] borders
+//  (uShadowBox[3] — hard shadow range limit). The borders arrive as a uniform
+//  from RendererContext (renderer.c) — no more hardcoded #define SHADOW_BOX*
+//  out of sync with C.
 //
-//  Требует объявленными ДО include: uCamPos.
+//  Requires uCamPos to be declared BEFORE the include.
 // ============================================================================
 
-// Каскады — отдельные сэмплеры: индексация массивов сэмплеров запрещена
-// в GLSL 330 на Mesa. uShadowMap* биндятся на юниты 3..6 (для volumetric —
-// 5..8, статично при инициализации программы).
-uniform sampler2DShadow uShadowMap0;   // 0 = у ног, 3 = далеко
+// Cascades are separate samplers: indexing sampler arrays is forbidden
+// in GLSL 330 on Mesa. uShadowMap* bind to units 3..6 (for volumetric —
+// 5..8, static at program initialization).
+uniform sampler2DShadow uShadowMap0;   // 0 = at your feet, 3 = far away
 uniform sampler2DShadow uShadowMap1;
 uniform sampler2DShadow uShadowMap2;
 uniform sampler2DShadow uShadowMap3;
-uniform mat4 uShadowMatrix[4];         // мир -> NDC каскада (с bias 0.5)
-uniform float uShadowBias[4];          // смещение глубины против acne
-uniform float uShadowBox[4];           // границы смешивания; [3] = лимит теней
-uniform float uShadowOn;               // 1 = тени включены
+uniform mat4 uShadowMatrix[4];         // world -> cascade NDC (with 0.5 bias)
+uniform float uShadowBias[4];          // depth offset against acne
+uniform float uShadowBox[4];           // blend borders; [3] = shadow limit
+uniform float uShadowOn;               // 1 = shadows enabled
 
 float csm_tap(sampler2DShadow map, float bias, vec3 suv) {
     return texture(map, vec3(suv.xy, suv.z - bias));
 }
 
-// Проекция точки мира в каскад c; вне его объёма — тени нет (1.0).
+// Project a world point into cascade c; outside its volume — no shadow (1.0).
 float csm_sample_cascade(vec3 wp, int c, float bias) {
     vec4 sc = uShadowMatrix[c] * vec4(wp, 1.0);
     vec3 suv = sc.xyz / sc.w;
@@ -48,8 +48,8 @@ float csm_pick_bias(int c) {
     return uShadowBias[3];
 }
 
-// Выбор каскада по дистанции до камеры: смешивание в зоне ~20% перед
-// границей (без колец-полос между каскадами), дальше uShadowBox[3] — 1.0.
+// Cascade selection by distance to camera: blending in a ~20% zone before
+// the border (no banding rings between cascades), beyond uShadowBox[3] — 1.0.
 float csm_select(vec3 wp, float bias0, float bias1, float bias2, float bias3) {
     float dist = distance(uCamPos, wp);
     if (dist >= uShadowBox[3]) return 1.0;
@@ -71,7 +71,7 @@ float csm_select(vec3 wp, float bias0, float bias1, float bias2, float bias3) {
     return csm_sample_cascade(wp, 3, bias3);
 }
 
-// Стандартный вариант: bias берётся из uShadowBias[каскад].
+// Standard variant: bias comes from uShadowBias[cascade].
 float csm_select_std(vec3 wp) {
     return csm_select(wp, uShadowBias[0], uShadowBias[1],
                       uShadowBias[2], uShadowBias[3]);
