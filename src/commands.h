@@ -1,14 +1,14 @@
 // ============================================================================
-//  commands.h — консольные команды-действия (см. commands.c)
+//  commands.h — console action commands (see commands.c)
 // ----------------------------------------------------------------------------
-//  Обработчики команд, которые раньше жили в main.c: движение-тумблеры,
-//  карты, save/load/setpos, сущности, скриншот, звук. РЕГИСТРАЦИЯ команд
-//  (console_add_command) осталась в main.c — там виден весь список сразу.
+//  Command handlers that used to live in main.c: movement toggles,
+//  maps, save/load/setpos, entities, screenshot, sound. Command REGISTRATION
+//  (console_add_command) stayed in main.c — the whole list is visible there at once.
 // ============================================================================
 #ifndef COMMANDS_H
 #define COMMANDS_H
 
-// --- Команды-действия (вешаются на бинды в config.cfg) ------------------------
+// --- Action commands (bound to keys in config.cfg) ------------------------
 void cmd_noclip(const char *args);
 void cmd_toggle_map(const char *args);
 void cmd_toggle_debug(const char *args);
@@ -18,11 +18,11 @@ void cmd_toggle_fog(const char *args);
 void cmd_demo(const char *args);
 void cmd_pause(const char *args);
 
-// Выбор карты: map <имя> — "map" (папка) или имя из maps/*.zip.
+// Map selection: map <name> — a "map" (folder) or a name from maps/*.zip.
 void cmd_map_select(const char *args);
 void cmd_maps_list(const char *args);
 
-// HL-стиль: команды, адаптированные под наши системы
+// HL-style: commands adapted to our systems
 void cmd_restart(const char *args);
 void cmd_changelevel(const char *args);
 
@@ -31,54 +31,54 @@ void cmd_mat_wireframe(const char *args);
 void cmd_thirdperson(const char *args);
 void cmd_firstperson(const char *args);
 
-// Сущности (читай — дебаг фундамента для Lua)
+// Entities (read: debug foundation for Lua)
 void cmd_ent_create(const char *args);
 void cmd_ent_list(const char *args);
 
-// Скриншот / звук
+// Screenshot / sound
 void cmd_screenshot(const char *args);
 void cmd_snd_test(const char *args);
 
-// Применяет сохранённое состояние мира (сработавшие триггеры, use-объекты)
-// после загрузки карты. Авто-вызов из game_load_world и cmd_load.
+// Applies the saved world state (triggered triggers, use-objects)
+// after loading a map. Auto-called from game_load_world and cmd_load.
 void commands_apply_saved_world_state(void);
 
-// Save/Load (F5/F9): позиция игрока + карта в save.cfg
+// Save/Load (F5/F9): player position + map in save.cfg
 void cmd_save(const char *args);
 void cmd_load(const char *args);
 
-// Телепорт игрока: setpos x y z [yaw] [pitch]
+// Player teleport: setpos x y z [yaw] [pitch]
 void cmd_setpos(const char *args);
 void cmd_mesh(const char *args);
-// Поставить бинарный glTF (.glb): glb <путь> [x y z] [scale]
+// Place a binary glTF (.glb): glb <path> [x y z] [scale]
 void cmd_glb(const char *args);
-// Поставить анимированный glTF (.glb) со скиннингом: glbanim <путь> [x y z] [scale]
+// Place an animated skinning glTF (.glb): glbanim <path> [x y z] [scale]
 void cmd_glbanim(const char *args);
-// Мини-физика (Verlet): верёвка перед камерой, толчок, очистка
+// Mini-physics (Verlet): rope in front of the camera, push, clear
 void cmd_phys_rope(const char *args);
 void cmd_phys_push(const char *args);
 void cmd_phys_clear(const char *args);
-// Рэгдолл на последней анимированной модели: phys_ragdoll [hang] [kick]
+// Ragdoll on the last animated model: phys_ragdoll [hang] [kick]
 void cmd_phys_ragdoll(const char *args);
-// Список клипов анимации анимик-узла: glbclips [имя-узла]
+// List animation clips of an anim node: glbclips [node-name]
 void cmd_glbclips(const char *args);
-// Переключить клип: glbclip <индекс|имя> [имя-узла]
+// Switch clip: glbclip <index|name> [node-name]
 void cmd_glbclip(const char *args);
-// Управление воспроизведением
-void cmd_glbanim_pause(const char *args);   // пауза
-void cmd_glbanim_play(const char *args);    // продолжить
+// Playback control
+void cmd_glbanim_pause(const char *args);   // pause
+void cmd_glbanim_play(const char *args);    // resume
 void cmd_glbanim_speed(const char *args);   // glbanim_speed <x>
 void cmd_glbanim_loop(const char *args);    // glbanim_loop <0|1>
-void cmd_glbanim_seek(const char *args);    // glbanim_seek <сек> [имя-узла]
-void cmd_glbanim_frame(const char *args);   // glbanim_frame <кадр> [fps] [имя-узла]
-void cmd_anim(const char *args);            // инструмент anim (реестр по индексу)
-// Крепление узлов к моделям/костям: attach sprite|glb|mesh <N> <кость> <файл>
+void cmd_glbanim_seek(const char *args);    // glbanim_seek <seconds> [node-name]
+void cmd_glbanim_frame(const char *args);   // glbanim_frame <frame> [fps] [node-name]
+void cmd_anim(const char *args);            // anim tool (registry by index)
+// Attaching nodes to models/bones: attach sprite|glb|mesh <N> <bone> <file>
 void cmd_attach(const char *args);
-// Свободный спрайт в мире: sprite <png> [x y z] [w h] [flat]
+// Free sprite in the world: sprite <png> [x y z] [w h] [flat]
 void cmd_sprite(const char *args);
 void cmd_matlist(const char *args);
 
-// Здоровье (HP): статус, урон/лечение, бессмертие, смерть, лимиты
+// Health (HP): status, damage/heal, invulnerability, death, limits
 void cmd_hp(const char *args);
 void cmd_hurt(const char *args);
 void cmd_heal(const char *args);
@@ -87,19 +87,19 @@ void cmd_kill(const char *args);
 void cmd_sethp(const char *args);
 void cmd_maxhp(const char *args);
 
-// Эффекты (fx) — частицы на точке попадения луча взгляда в рельеф
+// Effects (fx) — particles at the point where the look ray hits the terrain
 void cmd_fx_sparks(const char *args);
 void cmd_fx_smoke(const char *args);
 void cmd_fx_blood(const char *args);
 
-// Hot-reload шейдеров: перекомпилирует изменённые (по mtime) файлы.
+// Shader hot-reload: recompiles the changed (by mtime) files.
 void cmd_reload_shaders(const char *args);
 
-// Кубомап: рендер 6 граней из позиции игрока (или точки) + 6 PNG в cubemaps/
+// Cubemap: render 6 faces from the player position (or a point) + 6 PNGs into cubemaps/
 void cmd_cubemap_capture(const char *args);
 
-// Вызывается из главного цикла каждый кадр: сохраняет кадр в PNG, если
-// была запрошена команда screenshot (F12).
+// Called from the main loop every frame: saves the frame to a PNG if the
+// screenshot command (F12) was requested.
 void commands_shot_take(int vw, int vh);
 
 #endif

@@ -1,16 +1,16 @@
 // ============================================================================
-//  Text — фрагментный шейдер HUD-текста
+//  Text — fragment shader for HUD text
 // ----------------------------------------------------------------------------
-//  Один шейдер на панель и буквы:
-//    uUseTex = 0 -> сплошной цвет uColor (полупрозрачная панель HUD);
-//    uUseTex = 1 -> глиф: цвет uColor, альфа из атласа шрифта.
+//  One shader for both the panel and the letters:
+//    uUseTex = 0 -> solid uColor (translucent HUD panel);
+//    uUseTex = 1 -> glyph: uColor, alpha from the font atlas.
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uFont;      // атлас шрифта: покрытие глифа в R (GL_R8)
-uniform vec4 uColor;          // цвет текста/панели (rgb + alpha)
-uniform float uUseTex;        // 1 = глиф, 0 = сплошной цвет
+uniform sampler2D uFont;      // font atlas: glyph coverage in R (GL_R8)
+uniform vec4 uColor;          // text/panel color (rgb + alpha)
+uniform float uUseTex;        // 1 = glyph, 0 = solid color
 
 out vec4 FragColor;
 

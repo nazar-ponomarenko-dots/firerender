@@ -1,9 +1,9 @@
 // ============================================================================
-//  input.c — ввод: события главного цикла и режим мыши (см. input.h)
+//  input.c — input: main-loop events and mouse mode (see input.h)
 // ----------------------------------------------------------------------------
-//  Вынесено из main.c (строки 659–688 и разбор событий главного цикла):
-//  консоль перехватывает ввод первой, затем бинды (HL-стиль), ESC —
-//  пауза/назад; ресайз окна обновляет размеры сцены и FBO рендера.
+//  Moved out of main.c (lines 659–688 and the main-loop event parsing):
+//  the console grabs input first, then the binds (HL-style), ESC —
+//  pause/back; a window resize updates the scene sizes and render FBO.
 // ============================================================================
 #include "input.h"
 
@@ -20,10 +20,10 @@
 #include <SDL3/SDL.h>
 
 static SDL_Window *s_win = NULL;
-static Game *s_game = NULL;     // состояние мира (для ресайза)
-static int s_ui_mode = -1;      // текущий режим мыши
-static int s_text_input = -1;   // текущее состояние text input
-static int s_quit = 0;          // SDL_EVENT_QUIT получен
+static Game *s_game = NULL;     // world state (for resize)
+static int s_ui_mode = -1;      // current mouse mode
+static int s_text_input = -1;   // current text input state
+static int s_quit = 0;          // SDL_EVENT_QUIT received
 static int s_background = 0;
 static int s_resumed = 0;
 
@@ -61,7 +61,7 @@ int input_take_resumed(void)
     return resumed;
 }
 
-// --- Синк режима ввода ---------------------------------------------------------
+// --- Input mode sync ---------------------------------------------------------
 void input_sync_mode(void)
 {
     bool ui_mode = (app_state() != APP_PLAY) || console_active();
@@ -74,8 +74,9 @@ void input_sync_mode(void)
             SDL_ShowCursor();
         } else {
             SDL_HideCursor();
-            // Сброс накопленного движения мыши: в меню курсор двигался в
-            // absolute-режиме, и без сброса камера дёрнется на весь этот путь.
+            // Flush accumulated mouse motion: in menus the cursor moved in
+            // absolute mode, and without a flush the camera would jolt by
+            // that whole distance.
             float mx = 0, my = 0;
             SDL_GetRelativeMouseState(&mx, &my);
             SDL_GetRelativeMouseState(&mx, &my);
@@ -92,7 +93,7 @@ void input_sync_mode(void)
     }
 }
 
-// --- Разбор событий кадра -------------------------------------------------------
+// --- Per-frame event processing ------------------------------------------------
 void input_process(void)
 {
     SDL_Event ev;
@@ -140,22 +141,22 @@ void input_process(void)
         }
 #endif
 
-        // Бинды (Half-Life): клавиша -> команда. KEYDOWN выполняет
-        // команду (или комбинацию "cmd1; cmd2"), KEYUP снимает "+действия".
-        // Запись биндов из меню "Клавиши" перехватывает клавиши первой.
+        // Binds (Half-Life): key -> command. KEYDOWN runs the command
+        // (or a "cmd1; cmd2" combination), KEYUP cancels the "+actions".
+        // Bind recording from the "Keys" menu intercepts keys first.
         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
             if (app_bind_key(ev.key.scancode)) continue;
             binds_key(ev.key.scancode, 1);
         } else if (ev.type == SDL_EVENT_KEY_UP) {
             binds_key(ev.key.scancode, 0);
         }
-        // Колесо мыши — бинды (bind mouse_wheel_up "cmd"):
-        // например bind mouse_wheel_up "set fov 90"
+        // Mouse wheel — binds (bind mouse_wheel_up "cmd"):
+        // e.g. bind mouse_wheel_up "set fov 90"
         if (ev.type == SDL_EVENT_MOUSE_WHEEL && ev.wheel.y != 0) {
             binds_wheel(ev.wheel.y > 0);
         }
 
-        // ESC / Android Back (жест назад): пауза/назад — в app
+        // ESC / Android Back (back gesture): pause/back — handled in app
         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat &&
             (ev.key.key == SDLK_ESCAPE || ev.key.key == SDLK_AC_BACK)) {
             app_escape();

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Собирает карту в maps/<имя>.zip.
+"""Pack a map into maps/<name>.zip.
 
-Внутри zip — корень карты:
-    map.json            манифест карты
-    map.png             карта высот
-    img/...             текстуры, на которые ссылается map.json
-    (позже: models/, scripts/, sounds/)
+Inside the zip — the map root:
+    map.json            map manifest
+    map.png             height map
+    img/...             textures referenced by map.json
+    (later: models/, scripts/, sounds/)
 
-Ресурсов, которых нет в zip, движок подсосёт из img/ движка.
-Запуск:  python3 tools/make_map_zip.py [имя]
+For resources missing from the zip, the engine falls back to its own img/.
+Usage:  python3 tools/make_map_zip.py [name]
 """
 import json
 import os
@@ -20,7 +20,7 @@ MAP_NAME = sys.argv[1] if len(sys.argv) > 1 else "map1"
 MAP_DIR = os.path.join(ROOT, "map")
 OUT = os.path.join(ROOT, "maps", MAP_NAME + ".zip")
 
-# Все относительные пути, на которые ссылается map.json
+# All relative paths referenced by map.json
 refs = []
 with open(os.path.join(MAP_DIR, "map.json"), "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -38,14 +38,14 @@ with open(os.path.join(MAP_DIR, "map.json"), "r", encoding="utf-8") as f:
             refs.append(o)
     walk(data)
 
-# Обязательные файлы — из map/ (в zip кладутся в КОРЕНЬ)
+# Required files — from map/ (stored at the zip ROOT)
 files = [("map.json", os.path.join(MAP_DIR, "map.json")),
          ("map.png", os.path.join(MAP_DIR, "map.png"))]
-# Ресурсы карты — с их относительными путями (img/...). Сначала ищем в
-# корне движка (общие текстуры/шейдеры), потом в папке карты map/ —
-# карта может нести свои ресурсы (shaders/, img/, audio/).
-# map.json/map.png уже добавлены выше: пропускаем, иначе zip получал
-# дубликат имени (map.png лежит и в манифесте как terrain.image).
+# Map resources — keep their relative paths (img/...). Look first in the
+# engine root (shared textures/shaders), then in the map folder map/ —
+# a map may carry its own resources (shaders/, img/, audio/).
+# map.json/map.png were already added above: skip them, otherwise the zip
+# would get duplicate names (map.png is also in the manifest as terrain.image).
 added = {name for name, _ in files}
 for rel in sorted(set(refs)):
     if rel in added:
@@ -57,8 +57,8 @@ for rel in sorted(set(refs)):
         files.append((rel, src))
         added.add(rel)
 
-# Запечённый свет (make mapbake): всё из map/baked/ кладём в zip как baked/*.
-# Движок читает baked/lightmap.png и baked/probes.bin (см. terrain.c).
+# Baked light (make mapbake): everything in map/baked/ goes into the zip as baked/*.
+# The engine reads baked/lightmap.png and baked/probes.bin (see terrain.c).
 baked_dir = os.path.join(MAP_DIR, "baked")
 if os.path.isdir(baked_dir):
     for fn in sorted(os.listdir(baked_dir)):
@@ -72,4 +72,4 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(src, name)
         print(f"  + {name}")
 
-print(f"Карта собрана: {OUT} ({os.path.getsize(OUT)//1024} КБ)")
+print(f"Map packed: {OUT} ({os.path.getsize(OUT)//1024} KB)")

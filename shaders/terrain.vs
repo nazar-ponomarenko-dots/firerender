@@ -1,27 +1,29 @@
 // ============================================================================
-//  Terrain — вершинный шейдер рельефа
+//  Terrain — terrain vertex shader
 // ----------------------------------------------------------------------------
-//  Загружается с префиксом "#version 330 core" (десктоп) или
-//  "#version 300 es" (GLES) — версия подставляется из кода (см. main.c).
-//  Задача: взять плоскую сетку (x, z + uv), вытащить высоту из текстуры
-//  высот и поднять вершину. Мир плоский, всё смещение по Y.
+//  Loaded with a "#version 330 core" (desktop) or "#version 300 es"
+//  (GLES) prefix — the version is injected from code (see main.c).
+//  Job: take a flat mesh (x, z + uv), read the height out of the heightmap
+//  texture and lift the vertex. The world is flat, all displacement is on Y.
 //
-//  Текстура высот (GL_R8, сглажена в C-коде + билинейная фильтрация):
-//  в ней УЖЕ применена кривая высот с игровой полосой (см. height_curve
-//  в main.c) — шейдеру остаётся только линейно растянуть её в метры.
-//  Карта (цвет) от высоты отделена: цвет земли рисует фрагментный шейдер.
+//  Heightmap texture (GL_R8, smoothed in the C code + bilinear filtering):
+//  the height curve with the gameplay band is ALREADY applied in it
+//  (see height_curve in main.c) — the shader only stretches it linearly into
+//  meters. Color is decoupled from height: the fragment shader paints ground
+//  color.
 // ============================================================================
 
-layout (location = 0) in vec2 aPos;   // x,z вершины на плоскости
-layout (location = 1) in vec2 aUV;    // координаты в карте 0..1
-layout (location = 2) in float aDrop; // юбка: на сколько метров опустить вершину
-                                      // ниже высоты рельефа (0 = поверхность,
-                                      // >0 = нижняя кромка юбки на стыках LOD)
+layout (location = 0) in vec2 aPos;   // vertex x,z on the plane
+layout (location = 1) in vec2 aUV;    // coordinates in the map, 0..1
+layout (location = 2) in float aDrop; // skirt: how many meters to drop the
+                                      // vertex below the terrain height
+                                      // (0 = surface, >0 = bottom skirt edge
+                                      // at LOD seams)
 
-uniform mat4 uViewProj;               // вид * проекция (из узла Camera)
-uniform sampler2D uHeightmap;         // высоты рельефа (0 = низ, 1 = пик)
-uniform float uHeightMin;             // высота, соответствующая 0 (-100 м)
-uniform float uHeightMax;             // высота, соответствующая 1 (+400 м)
+uniform mat4 uViewProj;               // view * projection (from the Camera node)
+uniform sampler2D uHeightmap;         // terrain heights (0 = low, 1 = peak)
+uniform float uHeightMin;             // height that 0 maps to (-100 m)
+uniform float uHeightMax;             // height that 1 maps to (+400 m)
 
 out vec2 vUV;
 out vec3 vWorldPos;

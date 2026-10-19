@@ -1,10 +1,10 @@
 // ============================================================================
-//  jobs.c — мини-пул рабочих потоков (см. jobs.h)
+//  jobs.c — mini worker thread pool (see jobs.h)
 // ----------------------------------------------------------------------------
-//  Постоянные работники спят на condvar; jobs_parallel_for будит их,
-//  раздаёт диапазоны и ждёт завершения. Работники живут до выхода процесса
-//  (движок — приложение с жизненным циклом процесса, отдельного shutdown
-//  не требуется; SDL прибьёт потоки при exit).
+//  Persistent workers sleep on a condvar; jobs_parallel_for wakes them, hands
+//  out ranges and waits for completion. Workers live until process exit
+//  (the engine is an app whose lifecycle equals the process; no separate
+//  shutdown is needed; SDL kills the threads at exit).
 // ============================================================================
 #include "jobs.h"
 
@@ -16,18 +16,18 @@
 
 typedef struct {
     SDL_Thread *thread;
-    int idx;                    // номер работника
-    int done;                   // 1 — текущее задание работника выполнено
+    int idx;                    // worker number
+    int done;                   // 1 — the worker's current job is finished
 } Worker;
 
 typedef struct {
     JobsFn fn;
     void *ud;
-    int first, count;           // общий диапазон [first, first+count)
-    int chunk;                  // размер куска на работника
-    int next;                   // курсор выдачи кусков (под мьютексом)
-    int remaining;              // сколько кусков не сдано
-    int epoch;                  // номер задания (борьба со спящими зря)
+    int first, count;           // overall range [first, first+count)
+    int chunk;                  // chunk size per worker
+    int next;                   // chunk hand-out cursor (under the mutex)
+    int remaining;              // how many chunks are not returned yet
+    int epoch;                  // job number (avoids spurious wake-ups)
     int quit;
     SDL_Mutex *mx;
     SDL_Condition *cv_work, *cv_done;
@@ -49,7 +49,7 @@ static int worker_main(void *p)
             SDL_WaitCondition(st->cv_work, st->mx);
         if (st->quit) { SDL_UnlockMutex(st->mx); break; }
         my_epoch = st->epoch;
-        // Забрать свой кусок
+        // Take my chunk
         int i0 = -1, i1 = 0;
         if (st->next < st->count) {
             i0 = st->first + st->next;
@@ -87,7 +87,7 @@ void jobs_init(void)
         s_st.cv_work = s_st.cv_done = NULL;
         s_workers_n = 0;
         s_inited = 1;
-        SDL_Log("jobs: sync fallback (не удалось создать синхронизацию: %s)",
+        SDL_Log("jobs: sync fallback (failed to create synchronization: %s)",
                 SDL_GetError());
         return;
     }
@@ -102,13 +102,13 @@ void jobs_init(void)
         w->done = 1;
         w->thread = SDL_CreateThread(worker_main, name, w);
         if (!w->thread) {
-            SDL_Log("jobs: worker %d не создан: %s", i, SDL_GetError());
+            SDL_Log("jobs: worker %d not created: %s", i, SDL_GetError());
             continue;
         }
         s_workers_n++;
     }
     s_inited = 1;
-    SDL_Log("jobs: пул из %d работников (ядер %d)", s_workers_n,
+    SDL_Log("jobs: pool of %d workers (%d cores)", s_workers_n,
             SDL_GetNumLogicalCPUCores());
 }
 
@@ -121,12 +121,12 @@ void jobs_parallel_for(int first, int count, JobsFn fn, void *ud)
 {
     if (count <= 0) return;
     jobs_init();
-    if (s_workers_n <= 0) {                 // пул не поднялся — fallback
+    if (s_workers_n <= 0) {                 // pool did not come up — fallback
         fn(first, first + count, ud);
         return;
     }
     JobsState *st = &s_st;
-    int chunk = count / (s_workers_n + 1);  // вызыватель тоже работает
+    int chunk = count / (s_workers_n + 1);  // the caller works too
     if (chunk < 1) chunk = 1;
 
     SDL_LockMutex(st->mx);
@@ -142,12 +142,12 @@ void jobs_parallel_for(int first, int count, JobsFn fn, void *ud)
     SDL_BroadcastCondition(st->cv_work);
     SDL_UnlockMutex(st->mx);
 
-    // Вызывающий поток берёт хвост диапазона — не бездельничает
+    // The calling thread takes the tail of the range — it does not idle
     int main_len = count - s_workers_n * chunk;
     int m0 = first + (main_len > 0 ? s_workers_n * chunk : 0);
     if (main_len > 0) fn(m0, first + count, ud);
     else {
-        // кусков меньше, чем работников: заберём что осталось в лоб
+        // fewer chunks than workers: grab whatever is left, inline
         SDL_LockMutex(st->mx);
         while (st->next < st->count) {
             int i0 = st->first + st->next;
@@ -161,7 +161,7 @@ void jobs_parallel_for(int first, int count, JobsFn fn, void *ud)
         SDL_UnlockMutex(st->mx);
     }
 
-    // Дождаться работников (кто не получил куска — сразу done)
+    // Wait for the workers (those that got no chunk are done immediately)
     SDL_LockMutex(st->mx);
     for (;;) {
         int all = 1;

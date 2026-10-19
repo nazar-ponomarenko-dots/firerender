@@ -1,22 +1,22 @@
 // ============================================================================
-//  shadow.c — каскадные карты теней: FBO, матрицы и оркестрация прохода
+//  shadow.c — cascaded shadow maps: FBOs, matrices and pass orchestration
 // ----------------------------------------------------------------------------
-//  Теневой проход ЕДИН (п.13): shadow_render для каждого каскада выставляет
-//  в RendererContext pass = RP_SHADOW и обходит дерево сцены — рельеф,
-//  растительность и объекты рисуют СВОЮ геометрию в глубину (у каждого узла
-//  своя программа и свои правила прореживания), остальные узлы в теневом
-//  проходе пропускаются. Здесь остаются только FBO каскадов и матрицы
-//  "свет -> NDC" (с выравниванием по текселям).
+//  The shadow pass is UNIFIED (item 13): for each cascade shadow_render sets
+//  pass = RP_SHADOW in RendererContext and walks the scene tree — terrain,
+//  vegetation and objects draw THEIR OWN geometry into depth (each node has
+//  its own program and its own thinning rules), the remaining nodes are
+//  skipped in the shadow pass. Only the cascade FBOs and the
+//  "light -> NDC" matrices (with texel alignment) stay here.
 //
-//  Оптимизировано под частоту кадров:
-//    - растительность в тенях: прореживание делается на CPU (vegetation.c:
-//      статика — каждый 2-й экземпляр, динамика — правило uThin), шейдер
-//      не отбраковывает экземпляры, вершинный этап вдвое дешевле;
-//    - каскады 0/1 (боксы 8/16 м): рисуются только супер-чанки/чанки
-//      внутри бокса (ARB_base_instance) — вершинный этап не гоняет сотни
-//      тысяч экземпляров ради нескольких видимых;
-//    - каскад 3 (512 м) рисует только статику: тени густой динамики там
-//      меньше текселя и не видны.
+//  Optimized for frame rate:
+//    - vegetation in shadows: thinning is done on the CPU (vegetation.c:
+//      statics — every 2nd instance, dynamics — the uThin rule), the shader
+//      does not reject instances, the vertex stage is twice cheaper;
+//    - cascades 0/1 (8/16 m boxes): only super-chunks/chunks inside the box
+//      are drawn (ARB_base_instance) — the vertex stage does not run hundreds
+//      of thousands of instances for a few visible ones;
+//    - cascade 3 (512 m) draws statics only: shadows of dense dynamics there
+//      are smaller than a texel and invisible.
 // ============================================================================
 #include "shadow.h"
 
@@ -33,27 +33,28 @@
 #include <string.h>
 
 static GLuint g_shadow_fbo[SHADOW_CASCADES], g_shadow_tex[SHADOW_CASCADES];
-static int g_shadow_on = 1;         // [ — вкл/выкл теней
+static int g_shadow_on = 1;         // [ — enable/disable shadows
 int g_shadow_size[SHADOW_CASCADES] = { 2048, 2048, 2048, 2048 };
-// Тестовые тумблеры замеров производительности (FR_TEST в main.c):
-int g_shadow_terrain = 1;           // рельеф в картах теней
-int g_shadow_cull = 1;              // culling чанков по боксу каскада
-int g_shadow_veg = 1;               // растительность в картах теней
-int g_shadow_obj = 1;               // объекты (деревья) в картах теней
-int g_shadow_cache = 1;             // кэш статических каскадов (FR_TEST 'C' выкл)
-// Матрицы каскадов последнего кадра (для renderer.c/совместимости)
+// Test toggles for performance measurements (FR_TEST in main.c):
+int g_shadow_terrain = 1;           // terrain into shadow maps
+int g_shadow_cull = 1;              // chunk culling by cascade box
+int g_shadow_veg = 1;               // vegetation into shadow maps
+int g_shadow_obj = 1;               // objects (trees) into shadow maps
+int g_shadow_cache = 1;             // static cascade cache (FR_TEST 'C' disables)
+// Cascade matrices of the last frame (for renderer.c/compatibility)
 static float g_last_mvp[SHADOW_CASCADES][16];
 
-// --- Кэш статических каскадов -------------------------------------------------
-// Каскады 2/3 не содержат динамики (vegetation.c рисует динамику только при
-// shadow_dyn, модели в карты теней не пишутся вовсе) — их содержимое зависит
-// ТОЛЬКО от снапнутой матрицы. Пока она не сменилась, перерисовывать карту
-// не нужно: FBO хранит глубину с прошлого кадра. Стоя на месте — 100% попаданий,
-// на ходу матрица меняется лишь через шаг сетки снапа (шаг крупнее текселя:
-// 4 текселя у каскада 2, 8 — у каскада 3; подёргивание теней на ходу
-// незаметно — тени там мягкие и блендятся с соседним каскадом).
-// Содержимое: рельеф, деревья, статичные трава/пшеница (кулимые по
-// супер-чанкам — единицы чанков на каскад, см. vegetation.c).
+// --- Static cascade cache -------------------------------------------------
+// Cascades 2/3 contain no dynamics (vegetation.c draws dynamics only when
+// shadow_dyn, models never write into the shadow maps at all) — their content
+// depends ONLY on the snapped matrix. While it has not changed, there is no
+// need to redraw the map: the FBO keeps last frame's depth. Standing still —
+// 100% hits; while moving the matrix changes only once per snap-grid step
+// (the step is coarser than a texel: 4 texels for cascade 2, 8 — for cascade
+// 3; shadow jitter while moving is unnoticed — shadows there are soft and
+// blended with the neighbouring cascade).
+// Content: terrain, trees, static grass/wheat (culled by super-chunks —
+// a handful of chunks per cascade, see vegetation.c).
 static float g_cache_vp[SHADOW_CASCADES][16];
 static int g_cache_valid[SHADOW_CASCADES];
 
@@ -64,14 +65,14 @@ static void shadow_cache_invalidate(void)
 
 void shadow_init(void)
 {
-    // Состояние — из cvar'а r_shadows_mode: иначе r_shadows_mode 0 из
-    // config.cfg не выключит тени (sync_cvars срабатывает на изменение).
+    // State comes from the r_shadows_mode cvar: otherwise r_shadows_mode 0 in
+    // config.cfg would not disable shadows (sync_cvars fires on change).
     {
         float m = cvar_get("r_shadows_mode");
         g_shadow_on = (m == 1.0f || m == 2.0f);
     }
     shadow_cache_invalidate();
-    // Размер карт теней из map/map.json (shadows.size, по умолчанию 2048)
+    // Shadow map size from map/map.json (shadows.size, default 2048)
     {
         MapShadows sh;
         mapdata_shadows(&sh);
@@ -81,15 +82,15 @@ void shadow_init(void)
         SDL_Log("Shadows: %dx%d per cascade", g_shadow_size[0], g_shadow_size[0]);
     }
 
-    // Карты теней каскадов: FBO без цвета (только глубина)
+    // Cascade shadow maps: colorless FBO (depth only)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         int size = g_shadow_size[c];
         glGenTextures(1, &g_shadow_tex[c]);
         glBindTexture(GL_TEXTURE_2D, g_shadow_tex[c]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size,
                      0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
-        // Аппаратный PCF: сравнение с референсом + билинейный фильтр —
-        // один texture() в шейдере даёт гладкую полутень без полос.
+        // Hardware PCF: comparison against reference + bilinear filter —
+        // one texture() in the shader gives a smooth penumbra without bands.
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -136,11 +137,11 @@ const float *shadow_matrix(int c)
     return g_last_mvp[c];
 }
 
-// Матрица теней от позиции солнца: вид+проекция (vp) и с bias'ом [0..1] (mvp).
-// center — центр бокса (позиция игрока).
-// ndc_texel — размер NDC-квадрата одного текселя (0 = без выравнивания):
-// карта выравнивается по сетке текселей, чтобы при движении камеры
-// тени не "плыли" по одному текселю туда-сюда.
+// Shadow matrix from the sun position: view+projection (vp) and with [0..1] bias (mvp).
+// center — the box center (player position).
+// ndc_texel — the NDC-square size of one texel (0 = no alignment):
+// the map is aligned to the texel grid so that while the camera moves
+// shadows do not "crawl" back and forth by one texel.
 static void shadow_matrix_for(const float *center, const float *sun_dir,
                               float area, float depth, float ndc_texel,
                               float mvp[16], float vp[16])
@@ -153,10 +154,10 @@ static void shadow_matrix_for(const float *center, const float *sun_dir,
     mat4_ortho(proj, -area / 2, area / 2, -area / 2, area / 2, 1.0f, 2.0f * depth);
     mat4_mul(vp, proj, view);
     if (ndc_texel > 0.0f) {
-        // Стабилизация теней: сетка текселей привязывается к МИРУ (якорь —
-        // начало координат), а не к камере. Иначе при ходьбе сетка
-        // перещёлкивается на тексель и края теней мерцают/прыгают.
-        float pc[4] = { 0.0f, 0.0f, 0.0f, 1.0f };   // фиксированная точка мира
+        // Shadow stabilization: the texel grid is anchored to the WORLD (anchor —
+        // the coordinate origin), not to the camera. Otherwise while walking the
+        // grid re-snaps by a texel and shadow edges flicker/jump.
+        float pc[4] = { 0.0f, 0.0f, 0.0f, 1.0f };   // fixed world point
         float pv[4];
         for (int r = 0; r < 4; r++)
             pv[r] = vp[0*4+r]*pc[0] + vp[1*4+r]*pc[1]
@@ -168,12 +169,12 @@ static void shadow_matrix_for(const float *center, const float *sun_dir,
     float bias[16] = { 0.5f,0,0,0,  0,0.5f,0,0,  0,0,0.5f,0,  0.5f,0.5f,0.5f,1 };
     mat4_mul(mvp, bias, vp);
 }
-// Рисует все каскады из камеры солнца. Узлы сцены сами рисуют глубину
-// (pass == RP_SHADOW в контексте); здесь — только матрицы и FBO каскадов.
+// Draws all cascades from the sun camera. Scene nodes draw depth themselves
+// (pass == RP_SHADOW in the context); here — only matrices and cascade FBOs.
 void shadow_render(SceneNode *root, RendererContext *rc)
 {
-    // Тени рисуем, только если включены глобально (клавиша [) и сам
-    // источник света отбрасывает тени (shadow.enabled из map/map.json).
+    // Shadows are drawn only if enabled globally (key [) and the light
+    // source itself casts shadows (shadow.enabled from map/map.json).
     if (!rc->shadow_on) return;
     const float *sd = rc->light_dir[0];
     const float boxes[SHADOW_CASCADES] = {
@@ -182,16 +183,16 @@ void shadow_render(SceneNode *root, RendererContext *rc)
     const int sizes[SHADOW_CASCADES] = {
         g_shadow_size[0], g_shadow_size[1], g_shadow_size[2], g_shadow_size[3]
     };
-    // Наклон тени: насколько далеко по горизонтали уходит тень объекта
-    // высотой 1 м (горизонталь / вертикаль по направлению солнца). Низкое
-    // солнце — длинные тени: дальние деревья должны рисоваться в ближних
-    // каскадах, иначе их тень (лежащая рядом с игроком) исчезает — узлы
-    // (vegetation/objects) добавляют к радиусу culling height*shadow_slope.
+    // Shadow slope: how far horizontally the shadow of a 1 m tall object
+    // stretches (horizontal / vertical along the sun direction). Low sun —
+    // long shadows: distant trees must be drawn into the near cascades,
+    // otherwise their shadow (lying next to the player) disappears — nodes
+    // (vegetation/objects) add height*shadow_slope to the culling radius.
     {
         float hy = sd[1] > 0.05f ? sd[1] : 0.05f;
         float hl = sqrtf(sd[0]*sd[0] + sd[2]*sd[2]);
         float slope = hl / hy;
-        rc->shadow_slope = slope > 12.0f ? 12.0f : slope;   // потолок от пологих
+        rc->shadow_slope = slope > 12.0f ? 12.0f : slope;   // cap for shallow angles
     }
 
     GLint prev_fbo = 0, prev_vp[4] = { 0, 0, 0, 0 };
@@ -204,50 +205,50 @@ void shadow_render(SceneNode *root, RendererContext *rc)
         float vp[16], mvp[16];
         shadow_matrix_for(rc->cam_pos, sd, box, depth,
                           2.0f / sizes[c], mvp, vp);
-        // Свежие матрицы каскада — в контекст (их читают vegetation/objects/
-        // voxfog в этом же кадре) и в g_last_mvp (для renderer_ctx_fill)
+        // Fresh cascade matrices — into the context (vegetation/objects/
+        // voxfog read them in this same frame) and into g_last_mvp (for renderer_ctx_fill)
         memcpy(rc->shadow_matrix[c], mvp, sizeof mvp);
         memcpy(g_last_mvp[c], mvp, sizeof mvp);
 
-        // Кэш статических каскадов: матрица не сменилась — карта глубины в
-        // FBO уже содержит ровно этот кадр. Содержимое каскадов 2/3 — рельеф
-        // и деревья (статика); качание статичной травы там < 1 текселя
-        // (9.4/50 см), поэтому замороженная карта не мерцает. Пропускаем
-        // проход целиком. Матрицы снапнуты к сетке — при ходьбе дальние
-        // тени переезжают плавными мелкими шагами, без подёргиваний.
+        // Static cascade cache: the matrix has not changed — the depth map in
+        // the FBO already holds exactly this frame. Cascades 2/3 contain terrain
+        // and trees (statics); static grass sway there is < 1 texel
+        // (9.4/50 cm), so the frozen map does not flicker. Skip the whole
+        // pass. Matrices are snapped to the grid — while walking, distant
+        // shadows shift in smooth small steps, without jitter.
         if (c >= 2 && g_shadow_cache && g_cache_valid[c] &&
             memcmp(g_cache_vp[c], vp, sizeof vp) == 0)
             continue;
 
-        // Теневой проход: узлы рисуют глубину в этот каскад
+        // Shadow pass: nodes draw depth into this cascade
         rc->pass = RP_SHADOW;
         memcpy(rc->shadow_vp, vp, sizeof vp);
         rc->shadow_box_cur = box;
         rc->shadow_cascade = c;
-        // Каскады 0-1 (8/16 м): статика + динамика (детальные тени у ног).
-        // Каскады 2/3 (96/512 м): только статика — динамика там (~200 тыс.
-        // инстансов) даёт тень меньше текселя. Статика теперь во ВСЕХ
-        // каскадах (в 3-м её прореживает vegetation.c до одной пшеницы):
-        // тени поля и деревьев идут до горизонта, а куллинг по супер-чанкам
-        // + кэш матриц делают эти проходы почти бесплатными.
-        // ВНИМАНИЕ: растительность здесь рисуется КАЖДЫЙ кадр — попытка
-        // обновлять её через кадр (шахматка) даёт видимое мерцание качания:
-        // на текселе каскада 0 (~4 мм) размах травы 7 см = ~20 текселей.
+        // Cascades 0-1 (8/16 m): statics + dynamics (detailed shadows at the feet).
+        // Cascades 2/3 (96/512 m): statics only — dynamics there (~200 thousand
+        // instances) cast a shadow smaller than a texel. Statics are now in ALL
+        // cascades (in the 3rd, vegetation.c thins them down to a single wheat):
+        // field and tree shadows reach the horizon, while super-chunk culling
+        // + the matrix cache make these passes almost free.
+        // NOTE: vegetation here is drawn EVERY frame — trying to update it
+        // every other frame (checkerboard) gives visible sway flicker:
+        // at a cascade-0 texel (~4 mm) the 7 cm grass swing is ~20 texels.
         rc->shadow_dyn = (c < 2) ? 1 : 0;
         rc->shadow_static = 1;
         rc->shadow_cull = g_shadow_cull ? 1 : 0;
 
         glBindFramebuffer(GL_FRAMEBUFFER, g_shadow_fbo[c]);
         glViewport(0, 0, sizes[c], sizes[c]);
-        // ВАЖНО: маска записи глубины должна быть TRUE ДО glClear — иначе
-        // glClear игнорируется (скайбокс перед этим ставит glDepthMask(FALSE),
-        // и без сброса карта теней "смазывается").
+        // IMPORTANT: the depth write mask must be TRUE BEFORE glClear — otherwise
+        // glClear is ignored (the skybox just set glDepthMask(FALSE), and without
+        // the reset the shadow map "smears").
         glDepthMask(GL_TRUE);
         glClear(GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
-        glCullFace(GL_BACK);         // лицевые грани — как в обычном рендере
+        glCullFace(GL_BACK);         // back faces — as in the regular render
 
-        // Единый проход: узлы сами выбирают, что рисовать в RP_SHADOW
+        // Unified pass: nodes choose themselves what to draw in RP_SHADOW
         for (SceneNode *n = root->first_child; n; n = n->next)
             if (n->render) n->render(n, 0.0f);
 
@@ -255,8 +256,8 @@ void shadow_render(SceneNode *root, RendererContext *rc)
         g_cache_valid[c] = 1;
     }
     rc->pass = RP_COLOR;
-    // Вернуть FBO и вьюпорт цветного прохода (первый узел — небо — не
-    // сбрасывает вьюпорт сам, а рисует полноэкранный треугольник)
+    // Restore the color pass's FBO and viewport (the first node — sky — does
+    // not reset the viewport itself, and draws a fullscreen triangle)
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
 }

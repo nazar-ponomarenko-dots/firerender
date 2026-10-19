@@ -1,29 +1,29 @@
 // ============================================================================
-//  Composite — сцена + glow + лёгкий HDR + цвето-коррекция
+//  Composite — scene + glow + light HDR + color grading
 // ----------------------------------------------------------------------------
-//  Сцена уже гамма-кодирована шейдерами (sRGB-подобные значения 0..1), а не
-//  линейный HDR. Поэтому тонмаппинг ТОЛЬКО как мягкий "плечевой" ролл-офф
-//  пересветов: середину и тени не трогает (не сереет и не давит тени).
-//  Основное — насыщенность и контраст поверх, чтобы вернуть сочность.
+//  The scene is already gamma-encoded by the shaders (sRGB-like 0..1 values),
+//  not linear HDR. So tone mapping is ONLY a soft "shoulder" roll-off of
+//  highlights: it leaves mids and shadows untouched (no graying, no crushing).
+//  The main work is saturation and contrast on top, to bring the punch back.
 //
-//  Под водой (uUnderwater > 0): волнистое искажение UV (картинка «плывёт»,
-//  как сквозь водную толщу), тонирование цветом воды, дезатурация и
-//  затемнение к краям кадра — мир выглядит погружённым.
+//  Underwater (uUnderwater > 0): wavy UV distortion (the picture "swims", as
+//  through a body of water), tinting with the water color, desaturation and
+//  darkening toward the frame edges — the world looks submerged.
 // ============================================================================
 
 in vec2 vUV;
 
 uniform sampler2D uScene;
 uniform sampler2D uGlow;
-uniform float uStrength;     // сила glow
-uniform float uExposure;     // экспозиция
-uniform float uGamma;        // гамма (1 = без изменений)
-uniform float uSat;          // насыщенность (>1 — сочнее)
-uniform float uContrast;     // контраст (1 = без изменений)
-uniform float uWetness;      // мокрота 0..1 — в дождь цветастость ниже
-uniform float uUnderwater;   // 0..1 — сила подводных эффектов (плавный вход)
-uniform vec3  uWaterTint;    // тон водоёма под глазами
-uniform float uTime;         // время (анимация подводных волн)
+uniform float uStrength;     // glow strength
+uniform float uExposure;     // exposure
+uniform float uGamma;        // gamma (1 = unchanged)
+uniform float uSat;          // saturation (>1 — punchier)
+uniform float uContrast;     // contrast (1 = unchanged)
+uniform float uWetness;      // wetness 0..1 — colors get duller in rain
+uniform float uUnderwater;   // 0..1 — strength of underwater effects (smooth entry)
+uniform vec3  uWaterTint;    // water body tint under the eyes
+uniform float uTime;         // time (underwater wave animation)
 
 out vec4 FragColor;
 
@@ -32,9 +32,9 @@ const vec3 luma = vec3(0.299, 0.587, 0.114);
 void main() {
     vec2 uv = vUV;
 
-    // Под водой: UV «плывёт» — две низкочастотные волны двигают выборку
-    // сцены. Чем глубже, тем сильнее (uUnderwater) — у поверхности дрожит
-    // слабо. Истончение к низу: там вода толще, искажение сильнее.
+    // Underwater: UVs "swim" — two low-frequency waves shift the scene
+    // sample. The deeper, the stronger (uUnderwater) — near the surface it
+    // barely trembles. Thinning toward the bottom: water is thicker there, distortion stronger.
     if (uUnderwater > 0.001) {
         float amp = 0.0105 * uUnderwater;
         vec2 w;
@@ -47,47 +47,48 @@ void main() {
     }
 
     vec3 sc = texture(uScene, uv).rgb;
-    // glow-выборку берём только когда bloom реально включён (uStrength > 0).
-    // При выключенном bloom (КАРТОШКА, uStrength = 0) glow всё равно умножался
-    // бы на ноль — фуллскрин-выборка glow-текстуры впустую. Пропуск байт-в-байт
-    // с прежним путём (sc + 0), а на iGPU экономит полный проход по glow-буферу.
+    // Take the glow sample only when bloom is actually on (uStrength > 0).
+    // With bloom off (potato preset, uStrength = 0) the glow would still be
+    // multiplied by zero — a fullscreen glow-texture sample wasted. The skip is
+    // byte-for-byte identical to the old path (sc + 0), and on iGPU it saves a
+    // full pass over the glow buffer.
     vec3     c = sc;
     if (uStrength > 0.0)
         c += texture(uGlow, uv).rgb * uStrength;
 
     c *= uExposure;
 
-    // Мягкий плечевой ролл-офф ТОЛЬКО для пересветов (HDR-голова). До ~1.0 —
-    // идентичность (середина и тени не гнём), выше 1.0 — плавный сгиб в 1.
-    // Не Рейнхард: он согнул бы всё и обесцветил, как было.
+    // Soft shoulder roll-off ONLY for highlights (HDR headroom). Up to ~1.0 —
+    // identity (mids and shadows unbent), above 1.0 — a smooth bend into 1.
+    // Not Reinhard: it would bend everything and wash out the colors, as before.
     c = c / (1.0 + smoothstep(1.0, 3.0, c) * 0.35);
 
-    // Контраст по яркости вокруг 0.5 — мягко, чтобы не давить тени.
+    // Contrast on luminance around 0.5 — gently, so as not to crush shadows.
     float l = dot(c, luma);
     float target = (l - 0.5) * uContrast + 0.5;
     c *= max(target / max(l, 1e-5), 0.0);
 
-    // Насыщенность: mix к серому по Rec.709 (>1 — сочнее).
-    // В дождь (uWetness) цветастость снижается слегка (не до серого).
+    // Saturation: mix toward gray per Rec.709 (>1 — punchier).
+    // In rain (uWetness) saturation drops slightly (not to gray).
     float sat = mix(uSat, 0.55, uWetness);
-    // Под водой — цвета вымываются: свет фильтруется толщей воды.
+    // Underwater — colors leach out: light is filtered by the water body.
     if (uUnderwater > 0.001)
         sat = mix(sat, min(sat * 0.45, 0.55), uUnderwater);
     c = mix(vec3(dot(c, luma)), c, sat);
 
-    // Доп. гамма-коррекция (по умолчанию 1 — сцена уже гаммирована).
-    // Можно поднять в консоли, если хочется ярче/поднять тени.
+    // Extra gamma correction (default 1 — the scene is already gamma-encoded).
+    // Can be raised in the console for a brighter look / lifted shadows.
     c = pow(max(c, 0.0), vec3(1.0 / uGamma));
 
-    // --- Подводное окрашивание ------------------------------------------------------
+    // --- Underwater tinting ------------------------------------------------------
     if (uUnderwater > 0.001) {
-        // Тон воды фильтрует свет: дальнее и тёмное уходит в цвет толщи.
+        // The water tint filters light: far and dark areas shift toward the body color.
         c = mix(c, uWaterTint * (0.25 + 0.75 * dot(c, luma)),
                 uUnderwater * 0.55);
-        // Внизу кадра вода глубже — темнее (луч прошёл толще).
+        // The bottom of the frame is deeper water — darker (light passed through more).
         c *= 1.0 - uUnderwater * 0.25 * (1.0 - vUV.y);
-        // Виньетка: затемнение к краям (толща воды «давит») и лёгкое
-        // свечение по центру — свет сверху, сквозь толщу.
+        // Vignette: darkening toward the edges (the water body "presses") and a
+        // slight glow in the center — light from above, through the depth.
         float d = length(vUV - 0.5);
         c *= 1.0 - uUnderwater * 0.45 * smoothstep(0.22, 0.75, d);
         c += uWaterTint * uUnderwater * 0.05 * (1.0 - smoothstep(0.0, 0.5, d));

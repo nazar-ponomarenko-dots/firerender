@@ -1,49 +1,49 @@
 // ============================================================================
-//  gi_apply.fs — наложение GI на сцену (с bilateral upsample)
+//  gi_apply.fs — applying GI to the scene (with bilateral upsample)
 // ----------------------------------------------------------------------------
-//  Сцена уже освещена прямым светом и полусферным ambient'ом. GI добавляет:
-//    * непрямой ОТРАЖЁННЫЙ свет (рефлекс от травы, от асфальта, от стен);
-//    * затенение — контактное и крупномасштабное (закрытость небосвода).
+//  The scene is already lit by direct light and hemispheric ambient. GI adds:
+//    * indirect REFLECTED light (bounce from grass, from asphalt, from walls);
+//    * shading — contact and large-scale (sky visibility).
 //
 //      add   = albedo(scene) * gi * strength
-//      add   = min(add, max(scene, соседи) + FLOOR)  <-- сохранение энергии
+//      add   = min(add, max(scene, neighbors) + FLOOR)  <-- energy conservation
 //      color = scene * ao + add
 //
-//  ГЛАВНОЕ ПРАВИЛО (v7): добавка ограничена ЛОКАЛЬНОЙ яркостью окрестности,
-//  а не самого пикселя. Раньше потолок был «яркость пикселя + порог» — и
-//  рефлекс лампы в тени (тёмный пиксель рядом с освещённой стеной) резался
-//  до порога: переотражения источников света глохли. Теперь потолок берёт
-//  максимум яркости из 4 соседей GI-размера: свет МОЖЕТ течь с освещённой
-//  поверхности в соседнюю тень (физика!), но не с яркого пятна в центре
-//  тёмной комнаты (глобальное свечение по-прежнему невозможно).
+//  MAIN RULE (v7): the addition is limited by the LOCAL brightness of the
+//  neighborhood, not of the pixel itself. Previously the cap was "pixel
+//  brightness + threshold" — and a lamp reflection in shadow (a dark pixel
+//  next to a lit wall) got cut down to the threshold: re-reflections of light
+//  sources died out. Now the cap takes the max brightness from 4 neighbors of GI
+//  size: light CAN flow from a lit surface into an adjacent shadow (physics!), but
+//  not from a bright spot into the center of a dark room (global glow is still impossible).
 //
-//  albedo — оттенок поверхности, нормированный в ~0.5 (типичное диффузное
-//  альбедо). Спад на ярких пикселях мягкий и не до нуля, иначе непрямой свет
-//  исчезает как раз там, где создаёт «игру света».
+//  albedo — the surface tint, normalized to ~0.5 (typical diffuse albedo).
+//  The falloff on bright pixels is soft and not to zero, otherwise indirect
+//  light disappears exactly where it creates the "play of light".
 //
-//  Затенение прикладывается к прямому свету ЧАСТИЧНО: экранное GI в густой
-//  геометрии (трава, поле, листва) всегда завышает закрытость, и полная сила
-//  чернила освещённые поверхности. На ярком пикселе затенение ослаблено, в
-//  нишах и щелях работает целиком.
+//  Shading is applied to direct light PARTIALLY: screen-space GI in dense
+//  geometry (grass, field, foliage) always overestimates occlusion, and full
+//  strength inks lit surfaces. On a bright pixel the shading is weakened; in
+//  niches and crevices it works at full strength.
 //
-//  GI живёт на полукадре (r_gi_scale), и обычная билинейная выборка тянет
-//  свет через силуэты: вокруг объектов появляется ореол шириной в тексель
-//  GI-таргета (на 0.5 это 2 пикселя экрана). Здесь вместо неё joint bilateral
-//  upsample: 4 ближайших текселя GI взвешиваются по совпадению глубины с
-//  ПОЛНЫМ разрешением. Стоит 4 выборки глубины на пиксель, а край объекта
-//  получает GI только со «своей» стороны силуэта.
+//  GI lives at half resolution (r_gi_scale), and plain bilinear sampling
+//  drags light across silhouettes: a halo one GI-target texel wide appears
+//  around objects (at 0.5 that is 2 screen pixels). Instead of it here is a
+//  joint bilateral upsample: the 4 nearest GI texels are weighted by depth
+//  match at FULL resolution. It costs 4 depth samples per pixel, and an
+//  object edge receives GI only from its "own" side of the silhouette.
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uScene;    // сцена (unit 0)
-uniform sampler2D uGI;       // GI: rgb непрямой свет, a = затенение (unit 1)
-uniform sampler2D uDepth;    // глубина (unit 2)
-uniform vec2 uGiTexel;       // 1 / разрешение GI-таргета
+uniform sampler2D uScene;    // scene (unit 0)
+uniform sampler2D uGI;       // GI: rgb indirect light, a = shading (unit 1)
+uniform sampler2D uDepth;    // depth (unit 2)
+uniform vec2 uGiTexel;       // 1 / GI target resolution
 uniform vec2 uZ;             // znear, zfar
-uniform float uStrength;     // сила непрямого света
-uniform float uAoStrength;   // сила затенения 0..1
-uniform float uDebug;        // 0 выкл, 1 только GI, 2 только затенение
+uniform float uStrength;     // indirect light strength
+uniform float uAoStrength;   // shading strength 0..1
+uniform float uDebug;        // 0 off, 1 GI only, 2 shading only
 
 out vec4 FragColor;
 
@@ -61,9 +61,9 @@ float linz(float ndc_z) {
     return (2.0 * zn * zf) / (zf + zn - ndc_z * (zf - zn));
 }
 
-// 4 ближайших текселя GI с весом по совпадению глубины. Веса — билинейные,
-// умноженные на билатеральный множитель; при полном несовпадении (силуэт)
-// остаётся ближайший тексель, а не смесь двух поверхностей.
+// 4 nearest GI texels with a depth-match weight. Weights are bilinear times
+// the bilateral factor; on complete mismatch (silhouette) the nearest texel
+// remains, not a blend of two surfaces.
 vec4 upsample(vec2 uv, float z0) {
     vec2 tc = uv / uGiTexel - 0.5;
     vec2 base = floor(tc);
@@ -80,11 +80,11 @@ vec4 upsample(vec2 uv, float z0) {
         float sd = texture(uDepth, suv).r;
         float dz = (sd >= 0.9999 || sd <= 1e-5)
                    ? 1e9 : abs(linz(sd * 2.0 - 1.0) - z0);
-        // Допуск растёт с дистанцией: далеко тексель покрывает больше мира.
+        // The tolerance grows with distance: far away a texel covers more world.
         float tol = 0.05 + 0.03 * z0;
         float w = bw * (1.0 - smoothstep(tol, tol * 5.0, dz));
         vec4 c = texture(uGI, suv);
-        if (bw > best_w) { best_w = bw; best = c; }   // фолбэк: ближайший
+        if (bw > best_w) { best_w = bw; best = c; }   // fallback: nearest
         acc += c * w;
         wsum += w;
     }
@@ -99,37 +99,37 @@ void main() {
     vec4 gi = upsample(vUV, linz(d * 2.0 - 1.0));
     vec3 ind = sane3(gi.rgb);
     float ao = (isnan(gi.a) || isinf(gi.a)) ? 1.0 : clamp(gi.a, 0.0, 1.0);
-    // Сила затенения до 1.5: значения выше 1 пережимают тень глубже нуля
-    // (в нишах — до чистого чёрного), итог зажат в 0..1.
+    // Shading strength up to 1.5: values above 1 push the shadow deeper than
+    // zero (in niches — to pure black); the result is clamped to 0..1.
     ao = clamp(mix(1.0, ao, clamp(uAoStrength, 0.0, 1.5)), 0.0, 1.0);
 
     if (uDebug > 1.5) { FragColor = vec4(vec3(ao), 1.0); return; }
     if (uDebug > 0.5) { FragColor = vec4(ind * uStrength, 1.0); return; }
 
-    // Альбедо-прокси: оттенок поверхности с яркостью ~0.5. Рефлекс красится
-    // в цвет материала и остаётся физичным по энергии.
+    // Albedo proxy: the surface tint with brightness ~0.5. A reflection is
+    // tinted with the material color and stays physical in energy.
     float l = max(dot(sc, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
     vec3 albedo = clamp(sc * (0.5 / l), vec3(0.0), vec3(1.0));
-    // Спад на ярких пикселях — мягкий и не до нуля: непрямой свет остаётся
-    // виден и на освещённых поверхностях (там он и создаёт «игру света»).
+    // Falloff on bright pixels — soft and not to zero: indirect light stays
+    // visible on lit surfaces too (that is where it creates the "play of light").
     float room = mix(1.0, 0.35, smoothstep(0.5, 3.0, l));
 
-    // Затенение прикладывается к прямому свету почти целиком. Послабление на
-    // ЯРКИХ пикселях минимально (0.45 -> 0.25 в v7.1): сильное ослабление
-    // делало контактные тени едва заметными на солнце. Остаток нужен только
-    // против завышения закрытости в густой траве/листве.
+    // Shading is applied to direct light almost entirely. The weakening on
+    // BRIGHT pixels is minimal (0.45 -> 0.25 in v7.1): strong relaxation made
+    // contact shadows barely visible in sunlight. The remainder is needed only
+    // against occlusion overestimation in dense grass/foliage.
     float lit = smoothstep(0.15, 0.9, l);
     float ao_direct = mix(ao, mix(ao, 1.0, 0.25), lit);
 
-    // --- ЗАКОН СОХРАНЕНИЯ ЭНЕРГИИ (локальный) --------------------------------
-    // Потолок добавки = самая яркая из окрестности (4 соседа GI-размера
-    // вокруг пикселя) с запасом вниз + FLOOR. Свет от лампы/солнца,
-    // переотражённый освещённой поверхностью в соседнюю тень, проходит
-    // целиком (соседи яркие), а «свечение из ниоткуда» в тёмной комнате —
-    // нет (все соседи тёмные). FLOOR = 0.10 приподнимает глубокие тени:
-    // в них виден небесный свет и цветной рефлекс, а не чёрная дыра.
-    // Ограничение по ЯРКОСТИ (с сохранением оттенка добавки): цветной
-    // рефлекс остаётся цветным, а не срезается в серый.
+    // --- ENERGY CONSERVATION LAW (local) --------------------------------
+    // Cap of the addition = the brightest of the neighborhood (4 neighbors of
+    // GI size around the pixel) scaled down + FLOOR. Light from a lamp/sun,
+    // re-reflected by a lit surface into an adjacent shadow, passes entirely
+    // (neighbors are bright), while "glow from nowhere" in a dark room — does
+    // not (all neighbors are dark). FLOOR = 0.10 lifts deep shadows: they show
+    // sky light and colored bounce instead of a black hole.
+    // The limit is on BRIGHTNESS (preserving the tint of the addition): a
+    // colored reflection stays colored, not cut to gray.
     const float GI_FLOOR = 0.10;
     vec3 add = albedo * ind * (uStrength * room);
     float add_l = dot(add, LUMA);

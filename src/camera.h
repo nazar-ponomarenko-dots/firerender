@@ -1,10 +1,10 @@
 // ============================================================================
-//  camera.h — камера (POV от первого лица)
+//  camera.h — camera (first-person POV)
 // ----------------------------------------------------------------------------
-//  Два режима (клавиша F):
-//    fly  — свободный полёт: WASD по взгляду, SPACE/CTRL вверх/вниз;
-//    walk — ходьба с минимальной физикой: гравитация, коллизия с рельефом
-//           (земля = та же квантованная высота, что рисует шейдер), прыжок.
+//  Two modes (key F):
+//    fly  — free flight: WASD along the view, SPACE/CTRL up/down;
+//    walk — walking with minimal physics: gravity, collision with the terrain
+//           (ground = the same quantized height the shader draws), jump.
 // ============================================================================
 #ifndef CAMERA_H
 #define CAMERA_H
@@ -12,84 +12,85 @@
 #include "scene.h"
 #include "world.h"
 
-#define CAM_SPEED 25.0f     // Скорость полёта (м/с), Shift умножает на 4
-#define WALK_SPEED 2.5f     // Максимальная скорость ходьбы (м/с)
-#define MOUSE_SENS 0.0025f  // Чувствительность мыши (рад/пиксель)
-#define EYE_H   0.8f        // высота глаз над землёй (персонаж низкий)
-#define EYE_DUCK 0.35f      // высота глаз при приседании (+duck)
-#define GRAVITY 20.0f       // ускорение свободного падения, м/с2
-#define JUMP_V   7.0f       // скорость прыжка, м/с
+#define CAM_SPEED 25.0f     // Flight speed (m/s), Shift multiplies by 4
+#define WALK_SPEED 2.5f     // Maximum walking speed (m/s)
+#define MOUSE_SENS 0.0025f  // Mouse sensitivity (rad/pixel)
+#define EYE_H   0.8f        // eye height above ground (the character is short)
+#define EYE_DUCK 0.35f      // eye height when crouching (+duck)
+#define GRAVITY 20.0f       // free-fall acceleration, m/s2
+#define JUMP_V   7.0f       // jump velocity, m/s
 
-// --- Физическая коллизия персонажа (hitbox) ------------------------------------
-// Ширина/глубина 1 м -> половина 0.5 м; высота 2 м. Растительность (пшеница)
-// использует СВОЙ радиус раздвигания в wheat.vs и от этих констант не зависит.
-#define PLAYER_HALF_W  0.5f   // половина ширины/глубины коллизии, м (1 м всего)
-#define PLAYER_HEIGHT  2.0f   // высота коллизии персонажа, м
+// --- Character physical collision (hitbox) ------------------------------------
+// Width/depth 1 m -> half 0.5 m; height 2 m. Vegetation (wheat) uses its OWN
+// push radius in wheat.vs and does not depend on these constants.
+#define PLAYER_HALF_W  0.5f   // half collision width/depth, m (1 m overall)
+#define PLAYER_HEIGHT  2.0f   // character collision height, m
 
 typedef struct {
-    float pos[3];   // позиция в мире
-    float yaw;      // поворот влево-вправо (рад)
-    float pitch;    // наклон вверх-вниз (рад)
-    float vy;       // вертикальная скорость (физика ходьбы)
-    float vx, vz;   // горизонтальная скорость (HL1-контроллер: инерция)
-    bool fly;       // режим полёта (F)
-    bool noclip;    // noclip: коллизии персонажа выключены (рельеф/объекты
-                    // проходимы) — простое вкл/выкл, без телепортации
+    float pos[3];   // position in the world
+    float yaw;      // left-right rotation (rad)
+    float pitch;    // up-down tilt (rad)
+    float vy;       // vertical velocity (walking physics)
+    float vx, vz;   // horizontal velocity (HL1 controller: inertia)
+    bool fly;       // flight mode (F)
+    bool noclip;    // noclip: character collisions off (terrain/objects
+                    // are passable) — plain on/off, no teleporting
 } Camera;
 
 typedef struct {
-    Camera cam;          // позиция, yaw, pitch
-    const WorldState *world;  // данные мира: высоты, размеры, поле
-    float fov_deg;       // угол обзора
-    float znear, zfar;   // ближняя/дальняя плоскости отсечения
-    float aspect;        // пропорции окна (обновляет главный цикл)
-    float viewproj[16];  // вид * проекция — считает сам узел каждый кадр
-    // Действительный базис ВИДОВОЙ камеры — точка, откуда реально смотрит
-    // рендер (в 3-м лице камера стоит сзади персонажа и смотрит на точку
-    // прицела, а не туда, куда направлен взгляд игрока). Небо, частицы,
-    // туман и постобработка берут базис ОТСЮДА — иначе скайбокс и лучи
-    // разъезжались со сценой в 3-м лице.
+    Camera cam;          // position, yaw, pitch
+    const WorldState *world;  // world data: heights, sizes, field
+    float fov_deg;       // field of view angle
+    float znear, zfar;   // near/far clipping planes
+    float aspect;        // window aspect ratio (updated by the main loop)
+    float viewproj[16];  // view * projection — the node computes it each frame
+    // The actual basis of the VIEW camera — the point the render really looks from
+    // (in third person the camera stands behind the character and looks at the aim
+    // point, not where the player's view is aimed). Sky, particles, fog and
+    // post-processing take the basis FROM HERE — otherwise the skybox and rays
+    // drifted apart from the scene in third person.
     float view_pos[3];
     float view_fwd[3], view_right[3], view_up[3];
 } CameraParams;
 
-// Направления взгляда камеры (forward, right) — для движения WASD.
-// right = cross(forward, up) — ТОТ ЖЕ базис, что строит mat4_lookat
-// (там s = cross(f, up)), иначе "вправо" окажется зеркальным.
+// Camera view directions (forward, right) — for WASD movement.
+// right = cross(forward, up) — the SAME basis mat4_lookat builds (there s = cross(f, up)),
+// otherwise "right" would come out mirrored.
 void camera_dirs(const Camera *cam, float *forward, float *right);
 
-// Привязать цели сглаживания мыши (m_smooth) к текущему yaw/pitch камеры.
-// Вызывать после прямой записи взгляда (телепорт/спавн/загрузка): иначе
-// интерполяция потянет взгляд обратно к старой цели.
+// Bind the mouse smoothing targets (m_smooth) to the camera's current yaw/pitch.
+// Call after writing the view directly (teleport/spawn/load): otherwise the
+// interpolation will drag the view back toward the old target.
 void camera_sync_look(Camera *cam);
 
-// Перемещение по действиям (actions.h: +forward/-forward и т.п.) и поворот
-// мыши (dx, dy). В режиме ходьбы — гравитация и земля под ногами;
-// в полёте — свободно.
+// Movement by actions (actions.h: +forward/-forward etc.) and mouse look
+// (dx, dy). In walking mode — gravity and the ground underfoot;
+// in flight — free.
 void camera_update(Camera *cam, const WorldState *w, float dx, float dy, float dt);
 
-// Создаёт узел Camera3D с заданной стартовой позицией и параметрами вида.
+// Creates a Camera3D node with the given start position and view parameters.
 SceneNode *camera_make_node(const WorldState *w, const float *start_pos,
                             float yaw, float pitch,
                             float fov_deg, float znear, float zfar);
 
 void camera_node_update(SceneNode *n, float dt);
 
-// Демо-сцена (клавиша Q): 1 — камера игнорирует ввод, позицию и взгляд
-// задаёт main.c (автополёт по маршруту); 0 — обычный ввод.
+// Demo scene (key Q): 1 — the camera ignores input, main.c drives position
+// and view (autopilot along a route); 0 — normal input.
 void camera_demo_set(int on);
 
-// Блокировка ввода игрока (1 = консоль открыта): мышь и WASD не трогают
-// камеру, пока консоль принимает текст.
+// Player input lock (1 = console open): mouse and WASD do not touch
+// the camera while the console is accepting text.
 void camera_lock_input(int lock);
 
-// Заморозка игрока (1 = мёртв): ввод и движение (WASD/мышь) отключены до
-// возрождения. Отдельно от camera_lock_input — их выставляют разные слои.
+// Character freeze (independent of the demo flag): input and movement
+// (WASD/mouse) are blocked until unfrozen. Separate from camera_lock_input —
+// different layers set them.
 void camera_set_frozen(int frozen);
 
-// Raycast: луч из камеры вниз до рельефа.
-// Возвращает 1 если попал в рельеф в пределах max_dist (м).
-// out_x/out_y/out_z — точка попадания (y = высота рельефа).
+// Raycast: a ray from the camera down to the terrain.
+// Returns 1 if it hit the terrain within max_dist (m).
+// out_x/out_y/out_z — the hit point (y = terrain height).
 int camera_raycast_terrain(const Camera *cam, const WorldState *w,
                            float max_dist, float *out_x, float *out_y, float *out_z);
 

@@ -34,8 +34,8 @@ void lowend_profile_init(void)
 void lowend_profile_apply(void)
 {
     s_active = select_profile();
-    /* Профиль выбирает backend policy, но не имеет права менять картинку
-       выбранного пользователем пресета. Масштаб сцены всегда нативный. */
+    /* The profile picks the backend policy but has no right to change the
+       picture of the user-selected preset. The scene scale is always native. */
     cvar_set("r_render_scale", 1.0f);
     cvar_set("r_dynamic_resolution", 0.0f);
     if (s_active != LOWEND_BALANCED)

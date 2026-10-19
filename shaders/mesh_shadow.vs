@@ -1,17 +1,17 @@
 // ============================================================================
-//  MeshShadow — вершинный шейдер мешей/сеток в карту теней (см. mesh.c, glb.c)
+//  MeshShadow — vertex shader of meshes/grids into the shadow map (see mesh.c, glb.c)
 // ----------------------------------------------------------------------------
-//  Генеричный глубинный проход: позиция (атрибут 0) умножается на модельную
-//  матрицу узла (uModel) и на вид*проекцию ОТ СОЛНЦА (uViewProj). VAO меша
-//  и glb-багеты уже ставят позицию в атрибут 0, поэтому один шейдер рисует
-//  любую геометрию (mesh/glb, включая LOD-уровни) в RP_SHADOW.
+//  Generic depth pass: the position (attribute 0) is multiplied by the node's
+//  model matrix (uModel) and by the SUN's view*projection (uViewProj). Mesh VAOs
+//  and glb rigs already put the position in attribute 0, so one shader draws any
+//  geometry (mesh/glb, including LOD levels) into RP_SHADOW.
 // ============================================================================
 
 layout (location = 0) in vec3 aPos;
-layout (location = 2) in vec2 aUV;    // для alpha-test листьев/травы в FS
+layout (location = 2) in vec2 aUV;    // for alpha-test of leaves/grass in the FS
 
-uniform mat4 uModel;       // модельная матрица инстанса (узла)
-uniform mat4 uViewProj;    // вид * проекция от солнца (rc->shadow_vp)
+uniform mat4 uModel;       // instance (node) model matrix
+uniform mat4 uViewProj;    // sun view * projection (rc->shadow_vp)
 
 out vec2 vUV;
 

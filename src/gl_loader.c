@@ -1,27 +1,27 @@
 // ============================================================================
-//  gl_loader.c — загрузка указателей функций OpenGL через SDL_GL_GetProcAddress
+//  gl_loader.c — loads OpenGL function pointers via SDL_GL_GetProcAddress
 // ============================================================================
 #include "gl_loader.h"
 
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 
-// Определения указателей (в заголовке они объявлены extern).
+// Pointer definitions (declared extern in the header).
 #define F(ret, name, args) ret (APIENTRY *p_##name) args;
 GL_FUNCS(F)
 #undef F
 
-// OPTIONAL GPU-driven указатели (могут остаться NULL на старых контекстах).
+// OPTIONAL GPU-driven pointers (may stay NULL on old contexts).
 #define F(ret, name, args) ret (APIENTRY *p_##name) args;
 GL_FUNCS_OPT(F)
 #undef F
 
 int g_gl_gpu_driven = 0;
 
-// --- Кэш GL-состояния (отсев избыточных bind/use) ---------------------------
-//  Единственная воронка: все модули зовут glXxx-макросы, которые ведут сюда.
-//  Тень хранит, что реально привязано, и не шлёт драйверу повтор. Значение
-//  GLC_UNKNOWN = "неизвестно" (следующий вызов пройдёт обязательно).
+// --- GL state cache (filters redundant bind/use) ---------------------------
+//  The single funnel: all modules call the glXxx macros that lead here.
+//  The shadow stores what is actually bound and never re-sends a repeat to
+//  the driver. GLC_UNKNOWN means "unknown" (the next call always goes).
 #define GLC_MAX_UNITS 16
 #define GLC_TARGETS   4                 // 2D, 3D, CUBE, 2D_ARRAY
 #define GLC_UNKNOWN   0xFFFFFFFFu
@@ -30,7 +30,7 @@ int g_prof_state_skipped = 0;
 static int    s_glcache_on = 1;
 static GLuint s_cur_prog   = GLC_UNKNOWN;
 static GLuint s_cur_vao    = GLC_UNKNOWN;
-static int    s_cur_unit   = 0;         // активный тексюнит (по спеке GL — 0)
+static int    s_cur_unit   = 0;         // active texture unit (per the GL spec — 0)
 static GLuint s_tex[GLC_MAX_UNITS][GLC_TARGETS];
 
 static int glc_target_idx(GLenum target)
@@ -42,7 +42,7 @@ static int glc_target_idx(GLenum target)
 #ifdef GL_TEXTURE_2D_ARRAY
         case GL_TEXTURE_2D_ARRAY: return 3;
 #endif
-        default:                  return -1;   // прочие цели — без кэша
+        default:                  return -1;   // other targets — not cached
     }
 }
 
@@ -69,9 +69,9 @@ int load_gl_funcs(void)
     GL_FUNCS(F)
 #undef F
 
-    // OPTIONAL GPU-driven функции: загружаем без фатальности. Если любая из
-    // них отсутствует (контекст < GL 4.3) — оставляем NULL и выключаем
-    // gpu-driven путь (фолбэк на инстансный рендер в vegetation.c).
+    // OPTIONAL GPU-driven functions: loaded without being fatal. If any of
+    // them is missing (context < GL 4.3) we keep NULL and disable the
+    // gpu-driven path (fallback to instanced rendering in vegetation.c).
 #define F(ret, name, args)                                                    \
     p_##name = (ret (APIENTRY *) args)SDL_GL_GetProcAddress(#name);
     GL_FUNCS_OPT(F)
@@ -91,12 +91,12 @@ int load_gl_funcs(void)
     return 0;
 }
 
-// --- Счётчики профилирования ----------------------------------------------------
+// --- Profiling counters --------------------------------------------------------
 int g_prof_draws = 0;
 int g_prof_verts = 0;
 int g_prof_tris = 0;
 
-// Треугольники в вызове (по режиму примитива)
+// Triangles in a call (per primitive mode)
 static int prim_tris(GLenum mode, GLsizei count)
 {
     switch (mode) {
@@ -157,7 +157,7 @@ void fr_glDrawElementsInstancedBaseInstance(GLenum mode, GLsizei count,
         SDL_Log("glDrawElementsInstancedBaseInstance not available (base=%u)", baseinstance);
 }
 
-// --- Обёртки отсева состояния -----------------------------------------------
+// --- State-culling wrappers -----------------------------------------------
 void fr_glUseProgram(GLuint prog)
 {
     if (s_glcache_on && prog == s_cur_prog) { g_prof_state_skipped++; return; }
@@ -179,8 +179,8 @@ void fr_glActiveTexture(GLenum texture)
         g_prof_state_skipped++;
         return;
     }
-    // Юнит вне отслеживаемого диапазона — помечаем как «нетрекнутый»,
-    // тогда fr_glBindTexture для него не кэширует (всегда шлёт).
+    // A unit outside the tracked range is marked "untracked", so
+    // fr_glBindTexture stops caching for it (it always sends).
     s_cur_unit = (unit >= 0 && unit < GLC_MAX_UNITS) ? unit : -1;
     p_glActiveTexture(texture);
 }
@@ -197,8 +197,8 @@ void fr_glBindTexture(GLenum target, GLuint tex)
 
 void fr_glDeleteTextures(GLsizei n, const GLuint *textures)
 {
-    // Удаляемая текстура могла быть привязана к любому юниту/цели — сбрасываем
-    // весь теневой кэш привязок, чтобы переиспользование id не дало ложный скип.
+    // A deleted texture could be bound to any unit/target — reset the whole
+    // shadow binding cache so id reuse cannot produce a bogus skip.
     for (int u = 0; u < GLC_MAX_UNITS; u++)
         for (int t = 0; t < GLC_TARGETS; t++) s_tex[u][t] = GLC_UNKNOWN;
     p_glDeleteTextures(n, textures);

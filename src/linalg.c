@@ -1,5 +1,5 @@
 // ============================================================================
-//  math.c — векторы и матрицы для камеры и проецирования
+//  math.c — vectors and matrices for the camera and projection
 // ============================================================================
 #include "linalg.h"
 
@@ -62,14 +62,14 @@ void mat4_lookat(float *m, const float *eye, const float *center, const float *u
     vec3_normalize(f);
     float s[3], u[3];
     vec3_cross(f, up, s);  vec3_normalize(s);  // right
-    vec3_cross(s, f, u);                        // up (уже единичный)
+    vec3_cross(s, f, u);                        // up (already unit)
     m[0]=s[0]; m[1]=u[0]; m[2]=-f[0]; m[3]=0;
     m[4]=s[1]; m[5]=u[1]; m[6]=-f[1]; m[7]=0;
     m[8]=s[2]; m[9]=u[2]; m[10]=-f[2]; m[11]=0;
     m[12]=-vec3_dot(s,eye); m[13]=-vec3_dot(u,eye); m[14]=vec3_dot(f,eye); m[15]=1;
 }
 
-// Обратная матрица 4x4 методом Гаусса-Жордана. out может совпадать с m.
+// Inverse 4x4 matrix via Gauss-Jordan. out may alias m.
 int mat4_invert(float *out, const float *m)
 {
     float a[16], inv[16] = {

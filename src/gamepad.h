@@ -1,25 +1,25 @@
 // ============================================================================
-//  gamepad.h — управление с геймпада (см. gamepad.c)
+//  gamepad.h — gamepad control (see gamepad.c)
 // ----------------------------------------------------------------------------
-//  Работает на любой платформе, где SDL видит геймпад (Linux/Windows/Android).
-//  Левый стик — движение (флаги g_act), правый стик — обзор, A — прыжок,
-//  B — присесть, RB — бег, Start — пауза/назад.
+//  Works on any platform where SDL sees a gamepad (Linux/Windows/Android).
+//  Left stick — movement (g_act flags), right stick — look, A — jump,
+//  B — crouch, RB — run, Start — pause/back.
 // ============================================================================
 #ifndef GAMEPAD_H
 #define GAMEPAD_H
 
 #include <SDL3/SDL.h>
 
-// Обрабатывает SDL_EVENT_GAMEPAD_* в состоянии игры. 1 — поглощено.
+// Handles SDL_EVENT_GAMEPAD_* in the game state. 1 — consumed.
 int gamepad_event(const SDL_Event *ev);
 
-// Кадровый апдейт: стики сглаживаются и держат флаги g_act, пока стик отклонён.
+// Per-frame update: sticks are smoothed and keep g_act flags while a stick is deflected.
 void gamepad_frame(void);
 
-// Забирает дельту обзора от правого стика (рад/кадр, уже умножена на sens).
+// Takes the look delta from the right stick (rad/frame, already multiplied by sens).
 void gamepad_look_take(float *dx, float *dy);
 
-// Сброс при уходе в меню/консоль.
+// Reset when leaving into the menu/console.
 void gamepad_reset(void);
 
 #endif

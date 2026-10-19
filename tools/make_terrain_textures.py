@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Генерирует БЕСШОВНЫЕ текстуры материалов рельефа в img/.
+"""Generate SEAMLESS terrain material textures into img/.
 
-Слои splat-карты рельефа (см. src/splat.h):
-    img/dirt.png     R — почва/грунтовая дорога (бурая земля, комки, камешки)
-    img/sand.png     G — песок (мелкое зерно, без запечённой ряби)
-    img/gravel.png   B — гравий/тропинка (серая щебёнка, мелкие камни)
-    img/asphalt.png  A — асфальт (тёмный, крупная фракция, трещины, разметка нет)
+Terrain splat-map layers (see src/splat.h):
+    img/dirt.png     R — soil/dirt road (brown earth, clumps, pebbles)
+    img/sand.png     G — sand (fine grain, no baked-in ripples)
+    img/gravel.png   B — gravel/path (grey crushed stone, small rocks)
+    img/asphalt.png  A — asphalt (dark, coarse aggregate, cracks, no lane markings)
 
-Все текстуры 512x512 RGB и ТАЙЛЯТСЯ без швов: шум построен на решётке с
-периодическим индексом (обход по модулю), поэтому правый край продолжает
-левый, а нижний — верхний.
+All textures are 512x512 RGB and TILE seamlessly: the noise is built on a
+lattice with periodic indexing (wrap by modulo), so the right edge continues
+the left one and the bottom — the top.
 
-Запуск: python3 tools/make_terrain_textures.py
+Usage: python3 tools/make_terrain_textures.py
 """
 import os
 
@@ -24,20 +24,20 @@ N = 512
 
 
 def lattice(rng, n):
-    """Периодическая решётка случайных значений n x n."""
+    """Periodic lattice of random values n x n."""
     return rng.random((n, n)).astype(np.float32)
 
 
 def value_noise(rng, size, cells):
-    """Бесшовный value-noise: решётка cells x cells, билинейная интерполяция
-    с обходом индексов по модулю (правый край стыкуется с левым)."""
+    """Seamless value-noise: a cells x cells lattice, bilinear interpolation
+    with indices wrapped by modulo (the right edge joins the left one)."""
     g = lattice(rng, cells)
-    # координаты в решётке
+    # lattice coordinates
     t = np.linspace(0.0, cells, size, endpoint=False, dtype=np.float32)
     i0 = np.floor(t).astype(np.int32) % cells
     i1 = (i0 + 1) % cells
     f = t - np.floor(t)
-    # smoothstep — мягкие переходы вместо линейных «ромбов»
+    # smoothstep — soft transitions instead of linear "diamonds"
     f = f * f * (3.0 - 2.0 * f)
     fx = f[None, :]
     fy = f[:, None]
@@ -51,7 +51,7 @@ def value_noise(rng, size, cells):
 
 
 def fbm(rng, size, base_cells, octaves, gain=0.5, lacunarity=2):
-    """Фрактальный шум: сумма октав value-noise (все периодические)."""
+    """Fractal noise: sum of value-noise octaves (all periodic)."""
     out = np.zeros((size, size), dtype=np.float32)
     amp = 1.0
     total = 0.0
@@ -70,13 +70,13 @@ def norm(a):
 
 
 def stones(rng, size, count, rmin, rmax, hard=1.0):
-    """Периодические «камешки»: диски со сглаженным краем, обёрнутые по краям."""
+    """Periodic "pebbles": discs with a smoothed edge, wrapped at the borders."""
     m = np.zeros((size, size), dtype=np.float32)
     ys, xs = np.mgrid[0:size, 0:size].astype(np.float32)
     for _ in range(count):
         cx, cy = rng.random(2) * size
         r = rmin + (rmax - rmin) * rng.random()
-        # обёртка: минимальное расстояние с учётом периодичности
+        # wrap: minimal distance taking periodicity into account
         dx = np.abs(xs - cx)
         dx = np.minimum(dx, size - dx)
         dy = np.abs(ys - cy)
@@ -88,7 +88,7 @@ def stones(rng, size, count, rmin, rmax, hard=1.0):
 
 
 def cracks(rng, size, count, width=1.6, seg=90):
-    """Тонкие ломаные трещины (для асфальта). Периодичны за счёт wrap-координат."""
+    """Thin broken-line cracks (for asphalt). Periodic thanks to wrap coordinates."""
     m = np.zeros((size, size), dtype=np.float32)
     ys, xs = np.mgrid[0:size, 0:size].astype(np.float32)
     for _ in range(count):
@@ -98,7 +98,7 @@ def cracks(rng, size, count, width=1.6, seg=90):
             ang += (rng.random() - 0.5) * 0.9
             nx = px + np.cos(ang) * 6.0
             ny = py + np.sin(ang) * 6.0
-            # отрезок (px,py)-(nx,ny): расстояние с обёрткой
+            # segment (px,py)-(nx,ny): wrapped distance
             for t in np.linspace(0.0, 1.0, 5):
                 sx = (px + (nx - px) * t) % size
                 sy = (py + (ny - py) * t) % size
@@ -120,12 +120,12 @@ def save(path, rgb):
 
 def make_dirt():
     rng = np.random.default_rng(1701)
-    clump = fbm(rng, N, 6, 5)                      # крупные комки
-    grain = fbm(rng, N, 64, 3)                     # зерно
-    peb = stones(rng, N, 220, 2.0, 5.5, hard=1.4)  # камешки
+    clump = fbm(rng, N, 6, 5)                      # large clumps
+    grain = fbm(rng, N, 64, 3)                     # grain
+    peb = stones(rng, N, 220, 2.0, 5.5, hard=1.4)  # pebbles
     v = 0.62 * norm(clump) + 0.30 * grain + 0.22 * peb
     v = np.clip(v, 0, 1)
-    # бурая земля: тёплый тёмный тон, камешки чуть светлее и серее
+    # brown earth: warm dark tone, pebbles slightly lighter and greyer
     base = np.stack([0.35 + 0.30 * v, 0.25 + 0.24 * v, 0.16 + 0.17 * v], -1)
     grey = np.stack([peb, peb, peb], -1) * 0.22
     return np.clip(base + grey, 0, 1)
@@ -133,11 +133,11 @@ def make_dirt():
 
 def make_sand():
     rng = np.random.default_rng(20240117)
-    grain = fbm(rng, N, 96, 3)                     # мелкое зерно
-    dune = value_noise(rng, N, 5)                  # плавные наплывы
-    # БЕЗ «ряби дюн»: запечённый синус при тайлинге текстуры давал на
-    # плоских пляжах регулярные диагональные полосы (фальшивые дюны).
-    # Рельеф песку дают детальные нормали шейдера и крупный dune.
+    grain = fbm(rng, N, 96, 3)                     # fine grain
+    dune = value_noise(rng, N, 5)                  # smooth swells
+    # NO "dune ripples": a baked-in sine gave regular diagonal bands on flat
+    # beaches when the texture tiled (fake dunes). The sand's relief comes from
+    # the shader's detail normals and the large-scale dune.
     v = 0.62 * grain + 0.38 * norm(dune)
     v = np.clip(v, 0, 1)
     return np.clip(np.stack([0.74 + 0.22 * v,
@@ -151,20 +151,20 @@ def make_gravel():
     big = stones(rng, N, 900, 2.5, 7.0, hard=1.8)
     small = stones(rng, N, 1800, 1.2, 3.0, hard=2.4)
     v = np.clip(0.30 * fine + 0.62 * big + 0.38 * small, 0, 1)
-    # серо-бежевая щебёнка, отдельные камни холоднее
+    # grey-beige crushed stone, individual rocks cooler
     tone = 0.42 + 0.44 * v
     return np.clip(np.stack([tone * 1.03, tone * 1.0, tone * 0.94], -1), 0, 1)
 
 
 def make_asphalt():
     rng = np.random.default_rng(555)
-    fine = fbm(rng, N, 128, 3)                     # мелкая фракция
-    aggr = stones(rng, N, 2600, 1.0, 2.6, hard=3.0)  # щебень в битуме
-    patch = fbm(rng, N, 4, 3)                      # пятна износа
+    fine = fbm(rng, N, 128, 3)                     # fine aggregate
+    aggr = stones(rng, N, 2600, 1.0, 2.6, hard=3.0)  # gravel in bitumen
+    patch = fbm(rng, N, 4, 3)                      # wear patches
     cr = cracks(rng, N, 5, width=1.5, seg=70)
     v = 0.34 * fine + 0.30 * aggr + 0.26 * norm(patch)
     tone = 0.17 + 0.24 * np.clip(v, 0, 1)
-    tone = tone * (1.0 - 0.55 * cr)                # трещины — темнее
+    tone = tone * (1.0 - 0.55 * cr)                # cracks — darker
     rgbv = np.stack([tone * 1.02, tone * 1.0, tone * 1.04], -1)
     return np.clip(rgbv, 0, 1)
 
@@ -175,4 +175,4 @@ if __name__ == "__main__":
     save(os.path.join(OUT, "sand.png"), make_sand())
     save(os.path.join(OUT, "gravel.png"), make_gravel())
     save(os.path.join(OUT, "asphalt.png"), make_asphalt())
-    print("Текстуры материалов рельефа готовы (бесшовные 512x512).")
+    print("Terrain material textures ready (seamless 512x512).")

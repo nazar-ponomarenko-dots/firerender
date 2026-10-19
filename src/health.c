@@ -1,14 +1,14 @@
 // ============================================================================
-//  health.c — здоровье (HP), см. health.h
+//  health.c — health (HP), see health.h
 // ============================================================================
 #include "health.h"
 
 #include <SDL3/SDL.h>
 
 #define HEALTH_DEFAULT_MAX      100.0f
-#define HEALTH_DEFAULT_REGEN    6.0f    // ед/с
-#define HEALTH_REGEN_DELAY      4.0f    // с без урона до начала регена
-#define HEALTH_RESPAWN_DELAY    2.0f    // с от смерти до респавна
+#define HEALTH_DEFAULT_REGEN    6.0f    // units/s
+#define HEALTH_REGEN_DELAY      4.0f    // s without damage before regen starts
+#define HEALTH_RESPAWN_DELAY    2.0f    // s from death to respawn
 
 void health_init(Health *h, float max)
 {
@@ -18,7 +18,7 @@ void health_init(Health *h, float max)
     h->hp = max;
     h->regen = HEALTH_DEFAULT_REGEN;
     h->regen_delay = HEALTH_REGEN_DELAY;
-    h->since_hurt = h->regen_delay;    // старт без «свежего» урона
+    h->since_hurt = h->regen_delay;    // start with no "fresh" damage
     h->god = 0;
     h->dead = 0;
     h->respawn_t = 0.0f;
@@ -51,7 +51,7 @@ float health_damage(Health *h, float amount)
     float before = h->hp;
     h->hp -= amount;
     h->since_hurt = 0.0f;
-    // Вспышка урона: сильнее при крупном уроне, но с потолком.
+    // Damage flash: stronger for large damage, but capped.
     float f = amount / (h->max > 0.0f ? h->max : 1.0f);
     h->hurt_flash += f * 1.5f;
     if (h->hurt_flash > 1.0f) h->hurt_flash = 1.0f;
@@ -82,7 +82,7 @@ void health_update(Health *h, float dt, int *respawn_ready)
 {
     if (respawn_ready) *respawn_ready = 0;
     if (!h) return;
-    // Затухание экранной вспышки урона (~2.5 ед/с).
+    // Decay of the on-screen damage flash (~2.5 units/s).
     if (h->hurt_flash > 0.0f) {
         h->hurt_flash -= dt * 2.5f;
         if (h->hurt_flash < 0.0f) h->hurt_flash = 0.0f;
@@ -92,7 +92,7 @@ void health_update(Health *h, float dt, int *respawn_ready)
         if (h->respawn_t <= 0.0f && respawn_ready) *respawn_ready = 1;
         return;
     }
-    // Регенерация — только спустя regen_delay без урона.
+    // Regeneration — only after regen_delay without damage.
     h->since_hurt += dt;
     if (h->regen > 0.0f && h->since_hurt >= h->regen_delay && h->hp < h->max) {
         h->hp += h->regen * dt;

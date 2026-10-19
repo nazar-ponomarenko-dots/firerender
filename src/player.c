@@ -1,5 +1,5 @@
 // ============================================================================
-//  player.c — состояние игрока (см. player.h)
+//  player.c — player state (see player.h)
 // ============================================================================
 #include "player.h"
 
@@ -12,7 +12,7 @@ void player_init(Player *p)
     memset(p, 0, sizeof *p);
     p->spawn_yaw = 3.14159f;
     p->spawn_pitch = -0.5f;
-    health_init(&p->hp, 0.0f);   // 0 -> дефолтный максимум (100)
+    health_init(&p->hp, 0.0f);   // 0 -> default maximum (100)
 }
 
 void player_set_spawn(Player *p, const float pos[3], float yaw, float pitch)
@@ -38,9 +38,9 @@ void player_teleport(Player *p, Camera *cam, const float pos[3],
     cam->pitch = pitch;
     cam->vx = cam->vy = cam->vz = 0.0f;
     cam->fly = 0;
-    // Цели сглаживания мыши — к новому взгляду: иначе m_smooth тянет камеру
-    // обратно к старой точке (заметно при загрузке/спавне с малой дельтой,
-    // не доходящей до эвристики «>3 рад» в camera_update).
+    // Mouse-smoothing targets move to the new look direction: otherwise m_smooth
+    // drags the camera back to the old point (visible on load/spawn with a small
+    // delta that never reaches the ">3 rad" heuristic in camera_update).
     camera_sync_look(cam);
     SDL_Log("Teleport: %.1f %.1f %.1f yaw=%.2f pitch=%.2f",
             pos[0], pos[1], pos[2], yaw, pitch);

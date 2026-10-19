@@ -1,25 +1,29 @@
 // ============================================================================
-//  cmdreg.c — ЕДИНЫЙ реестр консольных команд (см. cmdreg.h)
+//  cmdreg.c — SINGLE registry of console commands (see cmdreg.h)
 // ----------------------------------------------------------------------------
-//  Все статические команды движка описаны здесь — в одной таблице с_cmds.
-//  cmdreg_register_all() (единственная регистрация) вызывается из boot_init
-//  один раз после console_init. Порядок = порядок в таблице.
+//  All static engine commands are described here — in one table, s_cmds.
+//  cmdreg_register_all() (the only registration point) is called from boot_init
+//  once after console_init. Order = order in the table.
 //
-//  Обработчики лежат в своих модулях (commands.c, fx.c), матрица действия
-//  (g_act) — в actions.c, но определение команд собрано здесь, чтобы не
-//  раскидывать console_add_command по полдюжине файлов.
+//  Handlers live in their own modules (commands.c, fx.c), the action matrix
+//  (g_act) — in actions.c, but the command definitions are gathered here so
+//  console_add_command isn't scattered across half a dozen files.
 // ============================================================================
 #include "cmdreg.h"
 
 #include "actions.h"     // g_act + ActionId
+#include "audio.h"       // cmd_snd_occlude
 #include "attach.h"      // cmd_attach / cmd_sprite
-#include "commands.h"    // команды-действия
-#include "material.h"    // (cmd_matlist в commands.c)
-#include "fx.h"          // команды эффектов
+#include "commands.h"    // action commands
+#include "material.h"    // (cmd_matlist in commands.c)
+#include "fx.h"          // effect commands
 #include "glb.h"         // cmd_glb
-#include "glb_anim.h"    // cmd_glbanim + auto-выбор в cmd_glb
+#include "glb_anim.h"    // cmd_glbanim + auto-select in cmd_glb
+#include "ecs.h"         // cmd_ecs_*
+#include "ecs_scene.h"   // cmd_ecs_verify
+#include "phys_body.h"   // cmd_phys_sphere/box/props/bodies
 
-// --- +/- команды действия (ставят флаг g_act) ---------------------------------
+// --- +/- action commands (set the g_act flag) ---------------------------------
 #define DEF_ACTION(id, name)                                                    \
     static void a_##name##_on(const char *a)                                    \
     { (void)a; action_set(ACTION_SRC_BIND, id, true); }                         \
@@ -36,11 +40,11 @@ DEF_ACTION(A_SPEED,   speed)
 DEF_ACTION(A_DUCK,    duck)
 DEF_ACTION(A_USE,     use)
 
-// --- Центральная таблица команд -------------------------------------------------
-// Добавить новую команду = добавить одну строку здесь (и реализовать
-// обработчик в своём модуле). Никаких console_add_command в инициализациях.
+// --- Central command table -------------------------------------------------
+// Adding a new command = adding one row here (and implementing
+// the handler in its own module). No console_add_command calls in init code.
 static const ConCmdDesc s_cmds[] = {
-    // Движение (+/- команды, читает camera.c)
+    // Movement (+/- commands, read by camera.c)
     { "+forward",  "движение вперёд",        a_forward_on },
     { "-forward",  "",                       a_forward_off },
     { "+back",     "движение назад",         a_back_on },
@@ -60,7 +64,7 @@ static const ConCmdDesc s_cmds[] = {
     { "+use",      "взаимодействие (E)",     a_use_on },
     { "-use",      "",                       a_use_off },
 
-    // Эффекты частиц (fx.c)
+    // Particle effects (fx.c)
     { "fx",        "эффект: fx <имя> [x y z]", cmd_fx },
     { "fx_burst",  "fx_burst <имя> <x> <y> <z> [count]", cmd_fx_burst },
     { "fx_emit",   "fx_emit <имя> <x> <y> <z> <rate> [life]", cmd_fx_emit },
@@ -69,7 +73,7 @@ static const ConCmdDesc s_cmds[] = {
     { "fx_list",   "fx_list — список пресетов", cmd_fx_list },
     { "weather",   "weather <пресет> [rate] | off — погода за игроком", cmd_weather },
 
-    // Команды-действия (commands.c) — доступны сразу, в т.ч. в меню
+    // Action commands (commands.c) — available immediately, incl. in the menu
     { "toggle_map",    "показать/скрыть мини-карту", cmd_toggle_map },
     { "toggle_debug",  "показать/скрыть дебаг-панель", cmd_toggle_debug },
     { "toggle_crosshair","показать/скрыть прицел",   cmd_toggle_crosshair },
@@ -88,7 +92,12 @@ static const ConCmdDesc s_cmds[] = {
     { "firstperson",   "вид от первого лица",        cmd_firstperson },
     { "ent_create",    "ent_create <класс> [x y z]", cmd_ent_create },
     { "ent_list",      "список сущностей",           cmd_ent_list },
+    { "ecs_list",      "список ECS-сущностей/компонентов/систем", cmd_ecs_list },
+    { "ecs_stats",     "счётчики ECS: сущности, компоненты, системы, мост", cmd_ecs_stats },
+    { "ecs_test",      "самотест ядра ECS (провалы -> FAIL в консоли)", cmd_ecs_test },
+    { "ecs_verify",    "проверка связности моста сцена<->ECS", cmd_ecs_verify },
     { "snd_test",      "проиграть все звуки подряд", cmd_snd_test },
+    { "snd_occlude",   "snd_occlude <x> <y> <z> — множитель глушения от слушателя до точки", cmd_snd_occlude },
     { "screenshot",    "сохранить кадр в PNG (F12)", cmd_screenshot },
     { "save",          "сохранить позицию игрока (F5)", cmd_save },
     { "load",          "загрузить сохранение (F9)",  cmd_load },
@@ -103,6 +112,10 @@ static const ConCmdDesc s_cmds[] = {
     { "phys_push",     "phys_push [сила] — толкнуть конец верёвки",   cmd_phys_push },
     { "phys_clear",    "phys_clear — убрать физический мир",          cmd_phys_clear },
     { "phys_ragdoll",  "phys_ragdoll [hang] [kick] — рэгдолл на аним-модели", cmd_phys_ragdoll },
+    { "phys_sphere",   "phys_sphere [радиус] — сфера у камеры (тела вкл)", cmd_phys_sphere },
+    { "phys_box",      "phys_box [размер] — ящик у камеры (тела вкл)",   cmd_phys_box },
+    { "phys_props",    "phys_props [n] — стопка ящиков (<=32) перед камерой", cmd_phys_props },
+    { "phys_bodies",   "статистика тел: сколько, где, сон",              cmd_phys_bodies },
     { "glb",           "glb <glb> [x y z] [scale] — меш (.glb), скиннинг если есть", cmd_glb },
     { "glbanim",       "glbanim <glb> [x y z] [scale] — анимир. меш (skinning)", cmd_glbanim },
     { "glbclips",      "glbclips [имя-узла] — список клипов анимации", cmd_glbclips },

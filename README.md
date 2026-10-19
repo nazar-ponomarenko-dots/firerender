@@ -47,6 +47,14 @@ map packing. OpenGL functions are loaded at runtime via
 itself picks GLX/EGL/WGL/CGL. Lua 5.4 and miniz are vendored in
 `third_party/`, so the build depends on no system libraries.
 
+Running the game needs a driver that compiles the engine's shader dialect:
+**GLSL 330 core (desktop OpenGL 3.3)** for `make`, **GLSL 300 es (OpenGL ES
+3.0)** for `make gles`. If the driver cannot, every shader fails and there is
+nothing to draw — so the engine probes the dialect at startup and tells the
+player (log line, window title, native dialog) and refuses to load a map,
+instead of showing a black window at 200 fps. Test the path with
+`FR_GL_PROBE_FAIL=1` ([docs/testing.md](docs/testing.md)).
+
 ```sh
 make BAKE=0 && ./build/firerender            # run
 FR_CONSOLE=1 ./build/firerender              # start with the console open

@@ -1,29 +1,29 @@
 // ============================================================================
-//  sky.h — небосвод (Skybox3D) из панорамы img/skybox.png
+//  sky.h — skybox (Skybox3D) built from the panorama img/skybox.png
 // ----------------------------------------------------------------------------
-//  Полноэкранный треугольник; направление луча на каждый пиксель неба
-//  восстанавливает фрагментный шейдер из базиса камеры (см. sky.fs).
-//  Модуль также считает цвет тумана из середины панорамы — горизонт
-//  сходится с небом (sky_fog_color использует рельеф и растительность).
+//  Full-screen triangle; the ray direction for every sky pixel is
+//  reconstructed by the fragment shader from the camera basis (see sky.fs).
+//  The module also computes the fog color from the middle of the panorama —
+//  the horizon matches the sky (sky_fog_color uses terrain and vegetation).
 // ============================================================================
 #ifndef SKY_H
 #define SKY_H
 #include "render_ctx.h"
 #include "scene.h"
 
-// Создаёт узел Sky (компилирует шейдеры, грузит панораму). NULL при ошибке.
+// Creates the Sky node (compiles shaders, loads the panorama). NULL on error.
 SceneNode *sky_make_node(const RendererContext *rc);
 
 void sky_node_render(SceneNode *n, float dt);
 
-// Цвет тумана (среднее по полосе горизонта панорамы неба). out[3].
+// Fog color (average over a horizon band of the sky panorama). out[3].
 void sky_fog_color(float out[3]);
 
-// Текстура панорамы неба + её тон (для GI: свет неба на промахах лучей).
-// 0, если небо ещё не создано (меню) — GI красит промахи градиентом из тумана.
+// Sky panorama texture + its tint (for GI: sky light on ray misses).
+// 0 if the sky isn't created yet (menu) — GI tints misses with a fog gradient.
 GLuint sky_panorama(float tint[3]);
 
-// Освобождает GL-ресурсы узла (программа, текстура, VAO/VBO).
+// Frees the node's GL resources (program, texture, VAO/VBO).
 void sky_cleanup(SceneNode *n);
 
 #endif

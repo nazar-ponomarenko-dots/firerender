@@ -1,77 +1,78 @@
 // ============================================================================
-//  veg_common.glsl — общая геометрия растительности
+//  veg_common.glsl — shared vegetation geometry
 // ----------------------------------------------------------------------------
-//  Подключается из wheat.vs (цветной проход) и shadowveg.vs (карта теней).
-//  Раньше оба шейдера содержали ПОБИТОВО ОДИНАКОВЫЕ блоки прогиба под игроком;
-//  любое расхождение приводило к тому, что тень уезжала от растения. Теперь
-//  числа живут в одном месте.
+//  Included from wheat.vs (color pass) and shadowveg.vs (shadow map).
+//  Both shaders used to contain BYTE-FOR-IDENTICAL bending blocks for the
+//  player; any divergence made the shadow slide off the plant. Now the
+//  numbers live in a single place.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-//  1) ПОЛЕЗНАЯ ВЫСОТА КВАДА (оптимизация без изменения картинки)
+//  1) USEFUL HEIGHT OF THE QUAD (optimization without changing the picture)
 // ---------------------------------------------------------------------------
-//  У всех спрайтов растительности ВЕРХ картинки прозрачный, а низ обрезан по
-//  последнему непрозрачному пикселю (в grass.png пусты первые 41 строка из
-//  128, в wheat_lod0 — 18 из 178). Квад строился на полную картинку, поэтому
-//  верхние 32% его площади растеризовались только чтобы уйти в discard.
+//  On all vegetation sprites the TOP of the image is transparent and the
+//  bottom is cropped at the last opaque pixel (in grass.png the first 41 rows
+//  of 128 are empty, in wheat_lod0 — 18 of 178). The quad was built at full
+//  image size, so the top 32% of its area rasterized only to hit discard.
 //
-//  veg_content_frac() даёт долю непрозрачной части по высоте. Умножая на неё
-//  локальную высоту вершины (ay = aPos.y * cf), квад укорачивается ровно до
-//  видимого содержимого: те же пиксели на экране, минус ~30% фрагментов травы
-//  и ~10% пшеницы. Низ спрайта при этом остаётся на основании растения —
-//  прозрачных полей внизу у картинок нет.
+//  veg_content_frac() returns the opaque fraction by height. Multiplying the
+//  local vertex height by it (ay = aPos.y * cf) shortens the quad exactly to
+//  the visible content: same pixels on screen, minus ~30% of grass fragments
+//  and ~10% of wheat. The sprite bottom stays at the plant base —
+//  the images have no transparent rows at the bottom.
 //
-//  Замеры по альфе PNG (порог 0.5), строки first..last:
-//    grass.png      41..127 из 128 -> 87/128
+//  Measurements over PNG alpha (threshold 0.5), rows first..last:
+//    grass.png      41..127 of 128 -> 87/128
 //    grass1.png     42..127        -> 86/128
 //    grass2.png     37..127        -> 91/128
 //    dandelions.png 26..127        -> 102/128
-//    wheat_lod0     18..177 из 178 -> 160/178
+//    wheat_lod0     18..177 of 178 -> 160/178
 //    wheat_lod1     10..177        -> 168/178
 //    wheat_lod2     12..177        -> 166/178
 float veg_content_frac(float layer)
 {
-    if (layer < 3.5) {                       // трава и одуванчик: слой целый
+    if (layer < 3.5) {                       // grass and dandelion: whole layer
         if (layer < 0.5) return 87.0  / 128.0;
         if (layer < 1.5) return 86.0  / 128.0;
         if (layer < 2.5) return 91.0  / 128.0;
         return 102.0 / 128.0;
     }
-    // Пшеница: слой НЕПРЕРЫВЕН (4..6, crossfade между LOD) — интерполируем,
-    // иначе высота колоса прыгала бы на переходе.
+    // Wheat: the layer is CONTINUOUS (4..6, crossfade between LODs) — interpolate,
+    // otherwise the ear height would jump at the transition.
     float t = clamp(layer - 4.0, 0.0, 2.0);
     return t < 1.0 ? mix(160.0 / 178.0, 168.0 / 178.0, t)
                    : mix(168.0 / 178.0, 166.0 / 178.0, t - 1.0);
 }
 
 // ---------------------------------------------------------------------------
-//  2) ПРОГИБ ПОД ИГРОКОМ
+//  2) BENDING UNDER THE PLAYER
 // ---------------------------------------------------------------------------
-//  Прежняя версия сдвигала вершину на МЕТРЫ (до 1.35 * scale), из-за чего
-//  высокая трава уезжала в сторону дальше собственной длины: квад ложился
-//  плашмя и «растопыривался» веером. Здесь задаётся УГОЛ наклона, а вершина
-//  едет по дуге вокруг основания — длина стебля сохраняется.
-#define BEND_MAX_A  0.8    // максимальный угол от вертикали, рад (~46°)
-#define BEND_R_IN   0.30   // радиус полной силы, м (тело игрока)
-#define BEND_R_FLY  0.75   // радиус затухания в полёте, м
-#define BEND_R_WALK 1.15   // радиус затухания при ходьбе, м
-// Податливость по высоте: ЧЕМ ВЫШЕ РАСТЕНИЕ, ТЕМ СИЛЬНЕЕ ОНО ОТГИБАЕТСЯ.
-// Низкая жёсткая щётка под ногой почти не шевелится, высокий стебель кланяется
-// полностью — так ведёт себя и настоящая растительность.
-#define BEND_H_LO   0.10   // ниже этой высоты (м) — минимум реакции
-#define BEND_H_HI   0.80   // выше этой высоты — полная реакция
-#define BEND_H_MIN  0.12   // остаточная реакция у самых низких растений
-// Вертикальный гейт: у ног полная сила, выше BEND_V_FAR реакции нет. Без него
-// пролёт в 50 м над полем всё равно приминал траву (тест был чисто 2D).
+//  The previous version shifted the vertex by METERS (up to 1.35 * scale),
+//  so tall grass slid sideways further than its own length: the quad lay
+//  flat and "splayed" into a fan. This defines a TILT ANGLE, and the vertex
+//  travels along an arc around the base — the stem length is preserved.
+#define BEND_MAX_A  0.8    // maximum angle from vertical, rad (~46°)
+#define BEND_R_IN   0.30   // full-strength radius, m (player body)
+#define BEND_R_FLY  0.75   // falloff radius while flying, m
+#define BEND_R_WALK 1.15   // falloff radius while walking, m
+// Flexibility by height: THE TALLER THE PLANT, THE STRONGER IT BENDS.
+// The low stiff brush under the foot barely moves, a tall stem bows
+// completely — that is how real vegetation behaves.
+#define BEND_H_LO   0.10   // below this height (m) — minimum reaction
+#define BEND_H_HI   0.80   // above this height — full reaction
+#define BEND_H_MIN  0.12   // residual reaction for the shortest plants
+// Vertical gate: full strength at the feet, no reaction above BEND_V_FAR. Without
+// it, flying 50 m over the field would still trample the grass (the test was
+// purely 2D).
 #define BEND_V_NEAR 1.2
 #define BEND_V_FAR  2.6
 
-// Угол отклонения растения от вертикали для данной вершины.
-//   inst_xz/inst_y — основание растения (мир), cam — игрок,
-//   vis            — ВИДИМАЯ высота растения, м (влияет на податливость),
-//   ay             — локальная высота вершины 0..1 (0 = основание),
-//   walk           — 1 при ходьбе, 0 в полёте.
-// Возвращает 0, если реакции нет: вызывающая сторона пропускает поворот.
+// Deflection angle of the plant from vertical for this vertex.
+//   inst_xz/inst_y — plant base (world), cam — player,
+//   vis            — VISIBLE plant height, m (affects flexibility),
+//   ay             — local vertex height 0..1 (0 = base),
+//   walk           — 1 when walking, 0 when flying.
+// Returns 0 if there is no reaction: the caller skips the rotation.
 float veg_bend_angle(vec2 inst_xz, float inst_y, vec3 cam, float vis, float ay,
                      float walk, out vec2 dir)
 {

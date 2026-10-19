@@ -1,13 +1,13 @@
 // ============================================================================
-//  voxfog.c — воксельный объёмный туман
+//  voxfog.c — voxel volumetric fog
 // ----------------------------------------------------------------------------
-//  Каскады: 3D-текстуры GL_R8 (плотность на метр) вокруг камеры, центры
-//  привязаны к мировой сетке вокселей (пересчёт только при смене ячейки).
-//  Плотность: дымка у земли + плотный тёплый туман над полем пшеницы.
+//  Cascades: GL_R8 3D textures (density per meter) around the camera, centers
+//  snapped to the world voxel grid (recomputed only when the cell changes).
+//  Density: haze near the ground + warm dense fog over the wheat field.
 //
-//  Рендер — деферред: один полноэкранный проход читает цвет+глубину сцены,
-//  реконструирует мировую точку, марширует луч к ней по каскадам (шаг
-//  растёт с дистанцией, джиттер убирает полосы) и складывает туман.
+//  Render is deferred: one fullscreen pass reads scene color+depth,
+//  reconstructs the world point, marches a ray to it through the cascades (step
+//  grows with distance, dithering removes banding) and accumulates fog.
 //  ============================================================================
 #include "voxfog.h"
 
@@ -32,25 +32,25 @@ static float  s_center[VF_CASCADES][3];
 static const float s_box[VF_CASCADES] = { VF_BOX0, VF_BOX1, VF_BOX2 };
 static const int   s_res[VF_CASCADES] = { VF_RES0, VF_RES1, VF_RES2 };
 static int    s_on = 0;
-static MapFog s_cfg;   // настройки из map/map.json (fog = { ... })
-static const WorldState *s_world;   // рельеф и поле (плотность тумана)
-static float  s_wcol[3] = { 0.05f, 0.15f, 0.22f };   // тон тумана над водой
+static MapFog s_cfg;   // settings from map/map.json (fog = { ... })
+static const WorldState *s_world;   // terrain and field (fog density)
+static float  s_wcol[3] = { 0.05f, 0.15f, 0.22f };   // fog tint over water
 
-static GLuint s_fbo = 0, s_tex = 0;   // приёмник композита bloom (полный экран)
-static GLuint s_fbo_half = 0, s_tex_half = 0;  // марш тумана в полразмера
-// Временное накопление (анти-мерцание джиттера): ping-pong истории полразмера
-static GLuint s_prog_temp = 0;                 // смешивание cur+prev (fog_temporal.fs)
+static GLuint s_fbo = 0, s_tex = 0;   // bloom composite receiver (full screen)
+static GLuint s_fbo_half = 0, s_tex_half = 0;  // fog march at half resolution
+// Temporal accumulation (anti-flicker of the dithering): half-res history ping-pong
+static GLuint s_prog_temp = 0;                 // blending cur+prev (fog_temporal.fs)
 static GLuint s_tex_hist[2] = { 0, 0 }, s_fbo_hist = 0;
-static int    s_hist_idx = 0;                  // индекс DST-текстуры кадра
-static int    s_hist_valid = 0;                // 0 = истории нет (телепорт/старт)
+static int    s_hist_idx = 0;                  // index of the frame's DST texture
+static int    s_hist_valid = 0;                // 0 = no history (teleport/startup)
 static GLint  u_temp_blend = -1;
-static GLuint s_prog_comp = 0;         // композит тумана на экране
+static GLuint s_prog_comp = 0;         // fog composite on screen
 static GLint u_comp_scene = -1, u_comp_fog = -1;
 static GLint u_fogonly = -1, u_fogonly2d = -1;
 static GLuint s_prog = 0, s_vao = 0, s_vbo = 0;
-// Аналитический туман режима «Простой» (shaders/fog2d.fs): без 3D-текстур
-// и марша — высота рельефа из карты высот в 4 точках луча, замкнутые
-// интегралы. Один и тот же FBO/конвейер, что у объёмного.
+// Analytical fog of the «Simple» mode (shaders/fog2d.fs): no 3D textures
+// and no march — terrain height from the heightmap at 4 ray points, closed
+// form integrals. Same FBO/pipeline as the volumetric one.
 static GLuint s_prog2d = 0;
 static GLint u2d_invvp, u2d_campos, u2d_z, u2d_sundir, u2d_fogcol,
              u2d_fogcolsun, u2d_skycolor, u2d_glare, u2d_raystr, u2d_wetness,
@@ -63,22 +63,22 @@ static GLint u_fogcol, u_fogcolsun, u_glare, u_raystr;
 static GLint u_wetness, u_skycolor;
 static GLint u_heightmap, u_worldsize, u_hmin, u_hmax, u_time;
 static GLint u_haze, u_hazeh;
-static GLint u_noise;   // img/noise.png (unit 12) — неравномерность дымки
-static GLint u_wcol;    // цвет тумана над водой (средний цвет водоёмов)
+static GLint u_noise;   // img/noise.png (unit 12) — haze unevenness
+static GLint u_wcol;    // fog color over water (average color of water bodies)
 static GLuint s_noise_tex = 0;
 static GLint u_shadowmap[SHADOW_CASCADES], u_shadowmatrix[SHADOW_CASCADES], u_shadowbias[SHADOW_CASCADES];
 static GLint u_shadowgrad[SHADOW_CASCADES], u_shadowon;
-static GLint u_shadowbox;   // uShadowBox[4] — границы каскадов (god rays)
+static GLint u_shadowbox;   // uShadowBox[4] — cascade bounds (god rays)
 
-// Режим тумана: 0 = выкл, 1 = объёмный (полное разрешение),
-// 2 = «дешёвый» объёмный в полном разрешении: марш только по грубому каскаду
+// Fog mode: 0 = off, 1 = volumetric (full resolution),
+// 2 = «cheap» volumetric at full resolution: march only the coarse cascade
 static int s_mode = 1;
 
-// s_world выставляется только в voxfog_init, а он вызывается лишь на
-// desktop-GL (в GLES-профиле рендерер объёмный туман не инициализирует).
-// Поэтому s_world == NULL — надёжный признак «подсистема не готова»: в этом
-// состоянии туман считается выключенным, и ни один проход, дёргающий
-// рельеф/шейдеры тумана, не запускается (иначе NULL-разыменование).
+// s_world is set only in voxfog_init, and it is called only on
+// desktop GL (in the GLES profile the renderer does not initialize volumetric fog).
+// Hence s_world == NULL is a reliable sign "the subsystem is not ready": in this
+// state fog counts as off, and no pass touching
+// terrain/fog shaders ever runs (otherwise NULL dereference).
 int voxfog_is_on(void)          { return s_on && s_world != NULL; }
 void voxfog_toggle(void)        { s_on = !s_on; }
 void voxfog_set(int on)         { s_on = on; if (s_mode != 1) s_mode = on ? 1 : 0; }
@@ -93,26 +93,26 @@ int voxfog_mode(void)           { return s_mode; }
 GLuint voxfog_texture(void)     { return s_tex; }
 GLuint voxfog_fbo(void)         { return s_fbo; }
 
-// Плотность тумана в точке мира (на метр пути) — из map.json.
-// Возвращает базовую плотность (земля/поле) и пишет в *wout плотность
-// тумана над водоёмами (уровень воды, цвет — из water.c).
+// Fog density at a world point (per meter of path) — from map.json.
+// Returns the base density (ground/field) and writes into *wout the fog
+// density over water bodies (water level, color — from water.c).
 static float vf_density(float x, float y, float z, float *wout)
 {
     *wout = 0.0f;
     float h = sample_height(s_world, x, z);
     float up = y - h;
-    if (up < -1.0f) return 0.0f;              // под рельефом — тумана нет
+    if (up < -1.0f) return 0.0f;              // below terrain — no fog
     float d = 0.0f;
-    // лёгкая дымка у земли (низины, склоны) — лёгкая, не стена
+    // light haze near the ground (lowlands, slopes) — light, not a wall
     if (up < s_cfg.ground_height)
         d += s_cfg.density_ground * (1.0f - up / s_cfg.ground_height);
-    // тёплый туман над полем пшеницы
+    // warm fog over the wheat field
     if (x >= s_world->field_x0 && x <= s_world->field_x0 + s_world->field_w &&
         z >= s_world->field_z0 && z <= s_world->field_z0 + s_world->field_d)
         if (up < s_cfg.field_height)
             d += s_cfg.density_field * (1.0f - up / s_cfg.field_height);
-    // туман над водоёмом: слой у поверхности воды (цвет — из водоёма,
-    // подаётся в шейдер отдельно). Тоньше слоя — плотнее.
+    // fog over a water body: a layer at the water surface (color comes from the
+    // water body, fed to the shader separately). Thinner layer — denser fog.
     if (s_cfg.density_water > 0.0f && s_cfg.water_height > 0.1f) {
         float ws = water_surface_at(s_world, x, z);
         if (ws > -1e8f) {
@@ -128,8 +128,8 @@ static float vf_density(float x, float y, float z, float *wout)
     return d;
 }
 
-// Перестроить каскад c (центр закреплён к мировой сетке вокселей).
-// Формат RG8: R = базовая плотность, G = плотность тумана над водой.
+// Rebuild cascade c (center snapped to the world voxel grid).
+// RG8 format: R = base density, G = fog density over water.
 static void vf_rebuild(int c)
 {
     float cell = s_box[c] / s_res[c];
@@ -155,8 +155,8 @@ static void vf_rebuild(int c)
     free(buf);
 }
 
-// Проги создаются СНАРУЖИ (init / reshade: refcount балансируется там).
-// Здесь — только uniform'ы для ТЕКУЩЕГО id (s_prog).
+// Programs are created OUTSIDE (init / reshade: refcount is balanced there).
+// Here — only the uniform locations for the CURRENT id (s_prog).
 static void voxfog_prog_init(void)
 {
     if (!s_prog) return;
@@ -216,15 +216,15 @@ static void voxfog_prog_init(void)
     glUniform1i(u_tex3d[1], 3);
     glUniform1i(u_tex3d[2], 4);
     for (int c = 0; c < SHADOW_CASCADES; c++)
-        glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
-    glUniform1i(u_heightmap, 10);                // карта высот (дымка у земли)
-    glUniform1i(u_noise, 12);                    // img/noise.png (шум дымки)
-    glUniform3f(u_wcol, s_wcol[0], s_wcol[1], s_wcol[2]);   // тон тумана над водой
+        glUniform1i(u_shadowmap[c], 5 + c);      // CSM on units 5-9
+    glUniform1i(u_heightmap, 10);                // heightmap (haze near ground)
+    glUniform1i(u_noise, 12);                    // img/noise.png (haze noise)
+    glUniform3f(u_wcol, s_wcol[0], s_wcol[1], s_wcol[2]);   // fog tint over water
     glUseProgram(0);
 }
 
-// Hot-reload: replace балансирует refcount (release старого + новая ссылка);
-// 0 — пара не собралась, остаётся прежний id.
+// Hot-reload: replace balances the refcount (release old + new reference);
+// 0 — the pair failed to build, the previous id stays.
 static void voxfog_reshade(void)
 {
     GLuint prog = resources_program_replace(s_prog, "shaders/postfx.vs",
@@ -263,8 +263,8 @@ void voxfog_init(const WorldState *w, int vw, int vh)
 {
     s_world = w;
     mapdata_fog(&s_cfg);
-    // Тон тумана над водоёмами: средний тон всех водоёмов карты (взвешенный
-    // по радиусу/ширине, чтобы море не перекрашивало туман над лужей).
+    // Fog tint over water bodies: the average tint of all map water bodies
+    // (weighted by radius/width so the sea does not repaint the fog over a puddle).
     {
         float sum[3] = { 0, 0, 0 }, tw = 0.0f;
         int nw = mapdata_water_count();
@@ -278,20 +278,20 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         }
         if (tw > 0.0f) {
             for (int k = 0; k < 3; k++) s_wcol[k] = sum[k] / tw;
-            // туман чуть светлее и мягче чистой воды — не стена, а испарение
+            // fog slightly lighter and softer than pure water — not a wall but evaporation
             float l = 0.5f * (s_wcol[0] + s_wcol[1] + s_wcol[2]) / 3.0f + 0.25f;
             for (int k = 0; k < 3; k++) s_wcol[k] = s_wcol[k] * 0.6f + 0.4f * l;
         }
     }
-    // Шум дымки: img/noise.png (REPEAT), общая текстура ресурсов
+    // Haze noise: img/noise.png (REPEAT), shared resource texture
     if (!s_noise_tex)
         s_noise_tex = resources_texture("img/noise.png", 3, GL_REPEAT, 1);
-    // Режим — из cvar'а r_fog_mode (config.cfg/меню/консоль), а НЕ дефолт
-    // карты: sync_cvars в main.c срабатывает только на ИЗМЕНЕНИЕ cvar'а,
-    // поэтому при старте с r_fog_mode 0 из config.cfg туман иначе остался
-    // бы включённым до первого ручного переключения.
+    // Mode — from the cvar r_fog_mode (config.cfg/menu/console), NOT the map
+    // default: sync_cvars in main.c fires only on a cvar CHANGE,
+    // so at startup with r_fog_mode 0 from config.cfg the fog would otherwise
+    // stay on until the first manual toggle.
     int mode = (int)cvar_get("r_fog_mode");
-    if (mode < 0 || mode > 2) mode = s_cfg.enabled ? 1 : 0;   // запасной вариант
+    if (mode < 0 || mode > 2) mode = s_cfg.enabled ? 1 : 0;   // fallback
     s_mode = mode;
     s_on = mode > 0;
     for (int c = 0; c < VF_CASCADES; c++) {
@@ -307,10 +307,10 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         memset(s_center[c], 0, sizeof s_center[c]);
     }
 
-    // Программа тумана (replace: old==0 после cleanup => plain-загрузка)
+    // Fog program (replace: old==0 after cleanup => plain load)
     s_prog = resources_program_replace(s_prog, "shaders/postfx.vs",
                                        "shaders/volumetric.fs");
-    // Аналитический туман «Простого» режима
+    // Analytical fog of the «Simple» mode
     s_prog2d = resources_program_replace(s_prog2d, "shaders/postfx.vs",
                                          "shaders/fog2d.fs");
     if (s_prog2d) {
@@ -336,7 +336,7 @@ void voxfog_init(const WorldState *w, int vw, int vh)
         glUniform1i(u2d_heightmap, 10);
         glUseProgram(0);
     }
-    // Композит тумана на экран (после полразмерного марша)
+    // Fog composite onto the screen (after the half-res march)
     if (!s_prog_comp) {
         s_prog_comp = resources_program("shaders/postfx.vs",
                                         "shaders/fog_comp.fs");
@@ -349,8 +349,8 @@ void voxfog_init(const WorldState *w, int vw, int vh)
             glUseProgram(0);
         }
     }
-    voxfog_prog_init();    // uniform'ы (для hot-reload)
-    // Временное накопление тумана (анти-мерцание джиттера марша)
+    voxfog_prog_init();    // uniforms (for hot-reload)
+    // Temporal fog accumulation (anti-flicker of the march dithering)
     if (!s_prog_temp) {
         s_prog_temp = resources_program("shaders/postfx.vs",
                                         "shaders/fog_temporal.fs");
@@ -366,7 +366,7 @@ void voxfog_init(const WorldState *w, int vw, int vh)
                      "временное накопление объёмного тумана (анти-мерцание)");
     cvar_register_ex("r_fog_accum_blend", 0.8f, 0.0f, 0.95f, CVAR_ARCHIVE,
                      "вес истории тумана (0.8 = ~5 кадров усреднения)");
-    s_hist_valid = 0;      // новая карта — истории нет
+    s_hist_valid = 0;      // new map — no history
     if (!s_prog) return;
     u_scenedepth = glGetUniformLocation(s_prog, "uSceneDepth");
     u_invviewproj = glGetUniformLocation(s_prog, "uInvViewProj");
@@ -422,14 +422,14 @@ void voxfog_init(const WorldState *w, int vw, int vh)
     glUniform1i(u_tex3d[1], 3);
     glUniform1i(u_tex3d[2], 4);
     for (int c = 0; c < SHADOW_CASCADES; c++)
-        glUniform1i(u_shadowmap[c], 5 + c);      // CSM на юнитах 5-9
-    glUniform1i(u_heightmap, 10);                // карта высот (дымка у земли)
-    glUniform1i(u_noise, 12);                    // img/noise.png (шум дымки)
+        glUniform1i(u_shadowmap[c], 5 + c);      // CSM on units 5-9
+    glUniform1i(u_heightmap, 10);                // heightmap (haze near ground)
+    glUniform1i(u_noise, 12);                    // img/noise.png (haze noise)
     glUseProgram(0);
 
     shader_on_reshade(voxfog_reshade);
 
-    // Полноэкранный треугольник
+    // Fullscreen triangle
     glGenVertexArrays(1, &s_vao);
     glBindVertexArray(s_vao);
     glGenBuffers(1, &s_vbo);
@@ -472,8 +472,8 @@ void voxfog_resize(int vw, int vh)
         s_fbo_hist = 0;
     }
     s_hist_valid = 0;
-    // Марш тумана в ПОЛРАЗМЕРЕ: RGBA8 (цвет тумана + trans в альфе).
-    // Гладкий туман билинейный апскейл не выдаёт, а фрагментов вчетверо меньше.
+    // Fog march at HALF RESOLUTION: RGBA8 (fog color + trans in alpha).
+    // Smooth fog does not show bilinear upscale artifacts, with 4x fewer fragments.
     glGenTextures(1, &s_tex_half);
     glBindTexture(GL_TEXTURE_2D, s_tex_half);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -487,7 +487,7 @@ void voxfog_resize(int vw, int vh)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, s_tex_half, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    // Ping-pong истории временного накопления — тот же полразмер, RGBA8
+    // Temporal accumulation history ping-pong — same half size, RGBA8
     glGenFramebuffers(1, &s_fbo_hist);
     for (int i = 0; i < 2; i++) {
         glGenTextures(1, &s_tex_hist[i]);
@@ -503,7 +503,7 @@ void voxfog_resize(int vw, int vh)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, s_tex_hist[0], 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    // Полный экран: сюда bloom пишет композит, туман ложится поверх
+    // Full screen: bloom writes its composite here, fog layers on top
     glGenTextures(1, &s_tex);
     glBindTexture(GL_TEXTURE_2D, s_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -521,9 +521,9 @@ void voxfog_resize(int vw, int vh)
 
 void voxfog_update(const float cam_pos[3])
 {
-    if (!s_on || !s_world) return;   // не инициализирован (GLES) — ничего не строим
-    // Режим 2 (аналитический): 3D-каскады не нужны вовсе — и память, и
-    // CPU-перестройки при движении камеры не тратятся.
+    if (!s_on || !s_world) return;   // not initialized (GLES) — build nothing
+    // Mode 2 (analytical): 3D cascades are not needed at all — neither memory
+    // nor CPU rebuilds on camera movement are spent.
     if (s_mode == 2) return;
     for (int c = 0; c < VF_CASCADES; c++) {
         float cell = s_box[c] / s_res[c];
@@ -538,7 +538,7 @@ void voxfog_update(const float cam_pos[3])
     }
 }
 
-// Обратная матрица 4x4 (column-major) — для реконструкции мировой точки
+// Inverse 4x4 matrix (column-major) — for world point reconstruction
 static void mat4_invert(const float *m, float *o)
 {
     float inv[16];
@@ -580,9 +580,9 @@ static void mat4_invert(const float *m, float *o)
     for (int i = 0; i < 16; i++) o[i] = inv[i] * det;
 }
 
-// Рендер объёмного тумана в заданный FBO (0 = экран) и viewport.
-// Общий для режимов 1 (все каскады) и 2 (только грубый каскад) — оба
-// проходят в полном разрешении экрана.
+// Render volumetric fog into the given FBO (0 = screen) and viewport.
+// Shared by modes 1 (all cascades) and 2 (only the coarse cascade) — both
+// run at full screen resolution.
 static void render_volumetric(int vw, int vh, GLuint target_fbo,
                               const RendererContext *rc,
                               GLuint scene_tex, GLuint scene_depth,
@@ -596,10 +596,10 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
     glBindFramebuffer(GL_FRAMEBUFFER, target_fbo);
     glViewport(0, 0, vw, vh);
 
-    // --- Режим 2 «Простой»: аналитический туман (fog2d.fs) ----------------
-    // Замкнутые интегралы + 4 сэмпла карты высот вдоль луча — поведение
-    // объёмного (туман в лощинах, ореол у солнца, дождевая дымка) без
-    // 3D-текстур, марша и теневых запросов.
+    // --- Mode 2 «Simple»: analytical fog (fog2d.fs) ------------------------
+    // Closed-form integrals + 4 heightmap samples along the ray — volumetric-like
+    // behavior (fog in hollows, halo around the sun, rain haze) without
+    // 3D textures, marching and shadow lookups.
     if (s_mode == 2 && s_prog2d) {
         glUseProgram(s_prog2d);
         if (u_fogonly2d >= 0) glUniform1f(u_fogonly2d, fogonly ? 1.0f : 0.0f);
@@ -627,8 +627,8 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         glUniform2f(u2d_worldsize, s_world->world_w, s_world->world_d);
         glUniform1f(u2d_hmin, s_world->min_height);
         glUniform1f(u2d_hmax, s_world->max_height);
-        // x: плотность у земли, y: высота спада, z: сила, w: дальность
-        // (как FOG_MAX у объёмного — 96 м)
+        // x: density near ground, y: falloff height, z: strength, w: distance
+        // (like FOG_MAX of the volumetric one — 96 m)
         glUniform4f(u2d_fogp, s_cfg.density_ground, s_cfg.ground_height,
                     s_cfg.strength, 96.0f);
         glBindVertexArray(s_vao);
@@ -648,8 +648,8 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         glBindTexture(GL_TEXTURE_3D, s_tex3d[c]);
     }
     glUniformMatrix4fv(u_invviewproj, 1, GL_FALSE, invvp);
-    // Позиция ВИДОВОЙ камеры: лучи строятся из invviewproj, а в 3-м лице
-    // камера (глаз) стоит сзади персонажа — не совпадает с cam_pos.
+    // Position of the VIEW camera: rays are built from invviewproj, and in 3rd
+    // person the camera (eye) stands behind the character — not cam_pos.
     glUniform3f(u_campos, rc->view_pos[0], rc->view_pos[1], rc->view_pos[2]);
     glUniform1f(u_znear, rc->znear);
     glUniform1f(u_zfar, rc->zfar);
@@ -657,24 +657,24 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
                 rc->light_dir[0][2]);
     glUniform1f(u_strength, 1.0f);
     glUniform1f(u_fogmode, s_mode == 2 ? 1.0f : 0.0f);
-    // цвета и лучи из map/map.json (fog = { color, color_sun, glare, ... })
+    // colors and rays from map/map.json (fog = { color, color_sun, glare, ... })
     glUniform3f(u_fogcol, s_cfg.color[0], s_cfg.color[1], s_cfg.color[2]);
     glUniform3f(u_fogcolsun, s_cfg.color_sun[0], s_cfg.color_sun[1],
                 s_cfg.color_sun[2]);
     glUniform1f(u_glare, s_cfg.glare);
     glUniform1f(u_raystr, s_cfg.ray_strength);
-    // Дождь: туман светится от неба (uSkyColor), не от солнца — мокрость
-    // и цвет неба приходят из кадрового контекста.
+    // Rain: fog glows from the sky (uSkyColor), not from the sun — wetness
+    // and sky color come from the frame context.
     glUniform1f(u_wetness, rc->wetness);
     glUniform3f(u_skycolor, rc->sky_color[0], rc->sky_color[1],
                 rc->sky_color[2]);
-    // Дымка над землёй (дождь): серая, ~0.5 м, с шумом. Сила растёт с
-    // мокротой; толщина слоя постоянна (0.5 м). Время — дрейф шума.
+    // Haze over ground (rain): gray, ~0.5 m, with noise. Strength grows with
+    // wetness; layer thickness is constant (0.5 m). Time — noise drift.
     glUniform2f(u_worldsize, s_world->world_w, s_world->world_d);
     glUniform1f(u_hmin, s_world->min_height);
     glUniform1f(u_hmax, s_world->max_height);
     glUniform1f(u_time, (float)(SDL_GetTicks() % 600000) / 1000.0f);
-    // Приземная дымка отключена (убрана по запросу). uHaze = 0 — низ чистый.
+    // Ground-level haze is disabled (removed on request). uHaze = 0 — clean low areas.
     glUniform1f(u_haze, 0.0f);
     glUniform1f(u_hazeh, 1.0f);
     GLuint htex = world_height_tex();
@@ -684,17 +684,17 @@ static void render_volumetric(int vw, int vh, GLuint target_fbo,
         glActiveTexture(GL_TEXTURE12);
         glBindTexture(GL_TEXTURE_2D, s_noise_tex);
     } else {
-        glUniform1f(u_haze, 0.0f);   // нет карты высот — дымку не рисуем
+        glUniform1f(u_haze, 0.0f);   // no heightmap — no haze
     }
     for (int c = 0; c < VF_CASCADES; c++) {
         glUniform3f(u_center[c], s_center[c][0], s_center[c][1], s_center[c][2]);
         glUniform1f(u_box[c], s_box[c]);
         glUniform1f(u_res[c], (float)s_res[c]);
     }
-    // CSM-тени солнца для god rays: матрицы, bias и градиент — из rc
+    // Sun CSM shadows for god rays: matrices, bias and gradient — from rc
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         glUniformMatrix4fv(u_shadowmatrix[c], 1, GL_FALSE, rc->shadow_matrix[c]);
-        // bias ВДВОЕ меньше, чем у сцены: лучи резче (тоньше полутень)
+        // bias TWICE smaller than the scene's: sharper rays (thinner penumbra)
         glUniform1f(u_shadowbias[c], rc->shadow_bias_veg[c] * 0.5f);
         glUniform1f(u_shadowgrad[c], 5.0f / rc->shadow_depth[c]);
         if (rc->shadow_tex[c]) {
@@ -715,18 +715,19 @@ void voxfog_render(int scene_w, int scene_h, int out_w, int out_h,
 {
     if (!s_on || !s_world) return;
     if (!s_prog || !s_fbo) return;
-    // Марш тумана в ПОЛРАЗМЕРЕ (цвет тумана + trans в альфе RGBA8),
-    // композит на экране — один сэмпл тумана и один сцены. Картинка та же
-    // (гладкий туман), фрагментов марша вчетверо меньше.
+    // Fog march at HALF RESOLUTION (fog color + trans in RGBA8 alpha),
+    // composited on screen — one fog sample and one scene sample. The picture
+    // is the same (smooth fog), with 4x fewer march fragments.
     if (s_fbo_half && s_prog_comp) {
         GLint prev_fbo = 0;
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
         render_volumetric((scene_w + 1) / 2, (scene_h + 1) / 2, s_fbo_half,
                           rc, scene_tex, scene_depth, 1);
-        // Временное накопление: прошлый кадр тумана гасит покадровое зерно
-        // анимированного джиттера марша. Кламп в AABB соседей текущего кадра
-        // не даёт шлейфа при движении. Гейт — r_fog_accum; режим 2 (аналитический
-        // fog2d) без джиттера — накопление не нужно.
+        // Temporal accumulation: the previous fog frame damps the per-frame
+        // grain of the animated march dithering. Clamping into the AABB of the
+        // current frame's neighbors prevents streaks on movement. Gate —
+        // r_fog_accum; mode 2 (analytical fog2d) has no dithering — accumulation
+        // is not needed.
         GLuint fog_tex = s_tex_half;
         int hw = (scene_w + 1) / 2, hh = (scene_h + 1) / 2;
         if (s_mode != 2 && s_prog_temp && cvar_get("r_fog_accum") > 0.5f) {
@@ -749,7 +750,7 @@ void voxfog_render(int scene_w, int scene_h, int out_w, int out_h,
             glBindVertexArray(s_vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             glActiveTexture(GL_TEXTURE0);
-            s_hist_idx = 1 - cur;   // следующий кадр пишет в другую половину
+            s_hist_idx = 1 - cur;   // the next frame writes to the other half
             s_hist_valid = 1;
             fog_tex = s_tex_hist[cur];
         }
@@ -770,8 +771,8 @@ void voxfog_render(int scene_w, int scene_h, int out_w, int out_h,
         glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
         return;
     }
-    // Один и тот же проход в ПОЛНОМ разрешении экрана. Режим 2 отличается
-    // только выборкой каскада (uFogMode): марш по одному грубому каскаду.
+    // The same pass at FULL screen resolution. Mode 2 differs only
+    // in cascade selection (uFogMode): marching a single coarse cascade.
     render_volumetric(out_w, out_h, 0, rc, scene_tex, scene_depth, 0);
 }
 
@@ -816,5 +817,5 @@ void voxfog_cleanup(void)
     s_prog2d = 0;
     s_noise_tex = 0;
     s_on = 0;
-    s_world = NULL;   // мир выгружен — до следующего voxfog_init подсистема мертва
+    s_world = NULL;   // world unloaded — subsystem dead until the next voxfog_init
 }

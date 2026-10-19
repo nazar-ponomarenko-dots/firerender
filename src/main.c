@@ -1,28 +1,28 @@
 // ============================================================================
-//  firerender — 3D-проект на чистом C (SDL3 + OpenGL)
+//  firerender — a 3D project in pure C (SDL3 + OpenGL)
 // ----------------------------------------------------------------------------
-//  Точка входа: инициализация SDL/GL, меню, загрузка мира и главный цикл.
-//  Логика разнесена по модулям:
-//    game.c      — состояние мира в структуре Game + жизненный цикл/обновление;
-//    commands.c  — консольные команды (регистрация — здесь, в main);
-//    renderer.c  — оркестрация рендера (сцена, bloom, туман, оверлеи);
-//    input.c     — события главного цикла и режим мыши;
-//    world.c     — данные мира (WorldState): высоты, размеры, поле.
+//  Entry point: SDL/GL init, menu, world loading and the main loop.
+//  Logic is split across modules:
+//    game.c      — world state in the Game struct + lifecycle/update;
+//    commands.c  — console commands (registration happens here, in main);
+//    renderer.c  — render orchestration (scene, bloom, fog, overlays);
+//    input.c     — main-loop events and mouse mode;
+//    world.c     — world data (WorldState): heights, sizes, field.
 //
-//  Состояние приложения — ЯВНЫЕ ФАЗЫ (см. app.h): APP_BOOT (поднять системы,
-//  один раз в главном цикле) -> APP_MENU/APP_PLAY/APP_PAUSE.
+//  Application state — EXPLICIT PHASES (see app.h): APP_BOOT (bring systems up,
+//  once in the main loop) -> APP_MENU/APP_PLAY/APP_PAUSE.
 //
-//  Мир (карта, рельеф, растительность) грузится ЛЕНИВО — только после
-//  нажатия "НОВАЯ ИГРА"/"ПРОДОЛЖИТЬ". В меню работает только шрифт,
-//  фон-картинка (img/menu.png) и консоль — 3D не грузится и не рисуется.
-//  При выходе в главное меню мир выгружается (память освобождается).
+//  The world (map, terrain, vegetation) is loaded LAZILY — only after
+//  pressing "NEW GAME"/"CONTINUE". In the menu only the font, the background
+//  image (img/menu.png) and the console work — 3D is neither loaded nor drawn.
+//  On return to the main menu the world is unloaded (memory freed).
 // ============================================================================
 
 #include <SDL3/SDL.h>
-#include <math.h>        // SDL3: окна, события, таймеры, GL-контекст
-#include <SDL3/SDL_main.h>   // Переносимый main(): на Windows закрывает
-                             // собой WinMain, на Android — точку входа
-                             // из Java-обёртки SDLActivity.
+#include <math.h>        // SDL3: windows, events, timers, GL context
+#include <SDL3/SDL_main.h>   // Portable main(): on Windows it replaces
+                             // WinMain; on Android it is the entry point
+                             // called from the SDLActivity Java wrapper.
 
 #include "gl_loader.h"
 #include "world.h"
@@ -34,7 +34,7 @@
 #include "buildnum.h"
 #include "input.h"
 #include "lua_engine.h"
-#include "shader.h"   // shader_hot_reload (см. reload_shaders)
+#include "shader.h"   // shader_hot_reload (see reload_shaders)
 #include "android.h"
 #include "app.h"
 #include "console.h"
@@ -50,13 +50,16 @@
 #include "actions.h"
 #include "cmdreg.h"
 #include "shadow.h"          // FR_TEST: shadow_toggle, g_shadow_*
-#include "vegetation.h"      // FR_TEST: veg_* тумблеры
+#include "vegetation.h"      // FR_TEST: veg_* toggles
+#include "ecs.h"             // ECS core: ecs_enable cvar, commands, selftest
+#include "ecs_scene.h"       // scene<->ECS bridge: init/enable at boot
+#include "phys_body.h"       // rigid bodies: step, commands, selftest
 #include "voxfog.h"          // FR_TEST: voxfog_set
 #include "terrain.h"         // sync_cvars: terrain_shadows_bake
 #include "sun.h"             // (SunParams*)g->sun_node->params
-#include "material.h"        // материал: реестр по имени
-#include "physics.h"         // мини-физика (Verlet): шаг в фикс-тике
-#include "glb_anim.h"        // рэгдолл: шаг физики скелетов
+#include "material.h"        // material: registry by name
+#include "physics.h"         // mini physics (Verlet): step in the fixed tick
+#include "glb_anim.h"        // ragdoll: skeleton physics step
 
 #include <stdio.h>           // printf (FPS)
 #include <stdlib.h>          // getenv
@@ -154,13 +157,17 @@ static void bench_frame(FrameBench *b, double frame_s)
 #  include <unistd.h>        // chdir
 #endif
 
-// --- Константы окна -----------------------------------------------------------
-#define WIN_W 1280          // Ширина окна в пикселях
-#define WIN_H 720           // Высота окна в пикселях
+// --- Window constants -------------------------------------------------------
+#define WIN_W 1280          // Window width in pixels
+#define WIN_H 720           // Window height in pixels
 
 static SDL_Window *g_win = NULL;
 
-// --- Cvar'ы -> системы ---------------------------------------------------------
+// Set once at boot when the driver cannot compile the engine's GLSL dialect:
+// drawing and map loading are pointless then, only the message to the player is.
+static int g_gl_fatal = 0;
+
+// --- Cvar's -> systems --------------------------------------------------------
 static float s_sync_shadows = -1.0f, s_sync_fog = -1.0f;
 static float s_sync_fs = -1.0f, s_sync_vsync = -1.0f, s_sync_wire = -1.0f;
 static void sync_cvars(Game *g)
@@ -168,12 +175,12 @@ static void sync_cvars(Game *g)
     float sh = cvar_get("r_shadows_mode");
     if (sh != s_sync_shadows) {
         s_sync_shadows = sh;
-        // CSM рендерится в режимах 1 (только динамика) и 2 (динамика вблизи
-        // игрока, статика — по всему миру)
+        // CSM renders in modes 1 (dynamic only) and 2 (dynamic near the
+        // player, static across the whole world)
         shadow_set(sh == 1.0f || sh == 2.0f);
-        // Статические: пересчитываем карту теней ТОЛЬКО если нет запечённого
-        // лайтмапа. Есть готовый (map/baked) — режим 2 читает его, а CPU-бейк
-        // был бы 2+ сек впустую (его результат шейдер игнорирует).
+        // Static: recompute the shadow map ONLY if there is no baked
+        // lightmap. If a ready one exists (map/baked) — mode 2 reads it, and a
+        // CPU bake would waste 2+ s (the shader ignores its result).
         if (sh == 2.0f && g->world_loaded && !terrain_baked_light_have())
             terrain_shadows_bake(&g->world, (SunParams *)g->sun_node->params);
         SDL_Log("Shadows mode: %d", (int)sh);
@@ -196,58 +203,97 @@ static void sync_cvars(Game *g)
     }
     float wr = cvar_get("r_wireframe");
     if (wr != s_sync_wire) {
-        s_sync_wire = wr;   // применяется в renderer_frame (3D-проход)
+        s_sync_wire = wr;   // applied in renderer_frame (3D pass)
         renderer_set_wireframe(wr > 0.5f);
     }
 }
 
-// --- Фаза APP_BOOT: инициализация систем (выполняется один раз) ---------------
-// Поднимает системы в любом порядке (console_add_command работает и до
-// console_init — см. console.c), регистрирует ВСЕ статические команды через
-// ЕДИНЫЙ реестр cmdreg.c, грузит config.cfg и переводит состояние в APP_MENU
-// (или APP_PLAY при FR_TEST).
+// --- Phase APP_BOOT: system initialization (runs once) ----------------------
+// Brings systems up in any order (console_add_command works even before
+// console_init — see console.c), registers ALL static commands through
+// the SINGLE registry cmdreg.c, loads config.cfg and switches the state to
+// APP_MENU (or APP_PLAY under FR_TEST).
 static void boot_init(Game *g)
 {
-    resources_init();            // кеш ресурсов — до любых загрузок
-    console_init();              // cvar'ы, команды, вывод SDL_Log в консоль
-    audio_init();                // звук: устройство + каналы
-    binds_init();                // дефолтные привязки клавиш (HL-стиль)
-    fx_init_console();           // пресеты эффектов (команды fx_* — у cmdreg)
-    // Все статические команды — из одного центрального реестра (cmdreg.c).
+    resources_init();            // resource cache — before any loads
+    console_init();              // cvar's, commands, SDL_Log mirrored to console
+    audio_init();                // audio: device + channels
+    binds_init();                // default key binds (HL style)
+    fx_init_console();           // effect presets (fx_* commands — in cmdreg)
+    // ECS: the bridge registers its components; the cvar is the master
+    // switch for the layer.
+    ecs_scene_init();
+    cvar_register("ecs_enable", 0.0f,
+                  "ECS-слой: синхронизация сцены и системы (0=выключен)");
+    phys_body_init();                // rigid bodies: cvar's + empty registry
+    // All static commands — from one central registry (cmdreg.c).
     cmdreg_register_all();
-    hud_shared_init();           // шрифт/атласы + рендер текста для меню и консоли
-    app_init();                  // фон img/menu.png
-    console_autoload();          // config.cfg: cvar'ы и бинды пользователя
-    game_map_config_load(g);     // + выбранная карта
-    lua_engine_init();           // скрипты Lua (после консоли и cvar'ов)
-    app_set_state(APP_MENU);     // фаза закончена: меню
+    hud_shared_init();           // font/atlas + text rendering for menu and console
+    app_init();                  // background img/menu.png
+    console_autoload();          // config.cfg: user cvar's and binds
+    game_map_config_load(g);     // + selected map
+    lua_engine_init();           // Lua scripts (after console and cvar's)
+    app_set_state(APP_MENU);     // phase done: menu
 }
 
-// --- FR_TEST — тест производительности / самопроверка (после boot_init) --------
-// Флаги: x — селфтест консоли; s — тени; v/p/q/c/e/f — выкл. подсистем;
-// o — воксельный туман; t/k — без рельефа/неба; m — burst частиц у игрока
-// (пресет "fire"); d — декаль; a — дождь-эмиттер; n — снег-эмиттер;
-// y — взрыв. Требует мир: грузим сразу и входим в игру. 0 — успех,
-// -1 — мир не загрузился.
+// --- FR_TEST — performance test / self-check (after boot_init) ---------------
+// Flags: x — console selftest; s — shadows; v/p/q/c/e/f — disable subsystems;
+// o — voxel fog; t/k — no terrain/sky; m — particle burst at the player
+// (preset "fire"); d — decal; a — rain emitter; n — snow emitter;
+// y — explosion; E — enable the ECS layer and run ecs_test at startup;
+// V — ECS bridge + connectivity verify on the first tick;
+// u — rigid-body selftest; U — enable bodies and spawn a crate stack;
+// O — disable positional-sound occlusion (A/B pair for snd_occlusion 1);
+// Z — sound occlusion selftest on a synthetic wall;
+// Needs the world: load it immediately and enter the game. 0 — success,
+// -1 — world failed to load.
 static int fr_test_apply(Game *g)
 {
     const char *fr_test = getenv("FR_TEST");
     if (!fr_test) return 0;
     if (strchr(fr_test, 'x')) console_selftest();
-    if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B-кадры)
-    if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // кэш статических каскадов off
+    if (strchr(fr_test, 'r')) cvar_set("r_ssr", 0.0f);   // SSR off (A/B frames)
+    if (strchr(fr_test, 'O')) cvar_set("snd_occlusion", 0.0f);  // sound muting off (A/B)
+    if (strchr(fr_test, 'Z')) {
+        int fails = audio_selftest();
+        SDL_Log("FR_TEST Z: audio_selftest %s (%d fails)",
+                fails ? "FAIL" : "OK", fails);
+    }
+    if (strchr(fr_test, 'C')) g_shadow_cache = 0;        // static cascade cache off
     if (strchr(fr_test, 'v')) veg_set_visible_test(0);
     if (strchr(fr_test, 'p')) g_shadow_terrain = 0;
     if (strchr(fr_test, 'q')) g_shadow_veg = 0;
     if (strchr(fr_test, 'c')) g_shadow_cull = 0;
     if (strchr(fr_test, 'e')) veg_set_static_main(0);
     if (strchr(fr_test, 'f')) veg_set_dyn_main(0);
+    if (strchr(fr_test, 'E')) {
+        cvar_set("ecs_enable", 1.0f);   // ECS layer active from the first tick
+        int fails = ecs_selftest();
+        SDL_Log("FR_TEST E: ecs_selftest %s (%d fails)",
+                fails ? "FAIL" : "OK", fails);
+        ecs_scene_new_generation();     // clean generation after the test
+    }
+    if (strchr(fr_test, 'V')) {
+        cvar_set("ecs_enable", 1.0f);
+        ecs_scene_verify_once();        // bridge verify on the very first tick
+    }
+    if (strchr(fr_test, 'u')) {
+        cvar_set("phys_bodies", 1.0f);
+        int fails = phys_body_selftest();
+        SDL_Log("FR_TEST u: phys_body_selftest %s (%d fails)",
+                fails ? "FAIL" : "OK", fails);
+        phys_body_kill_all(physics_world());   // the test leaves nothing behind
+    }
+    if (g_gl_fatal) {
+        SDL_Log("FR_TEST: map load refused — " FR_GLSL_DIALECT " unsupported");
+        return -1;
+    }
     if (game_load_world(g) != 0) {
         SDL_Log("FR_TEST: world load failed");
         return -1;
     }
-    // FR_POS="x,z[,yaw_deg]" — телепорт игрока после загрузки мира
-    // (скриншоты графики в разных точках карты: FR_POS="300,500" FR_TEST=S)
+    // FR_POS="x,z[,yaw_deg]" — teleport the player after world load
+    // (graphics screenshots at different map points: FR_POS="300,500" FR_TEST=S)
     {
         const char *pos = getenv("FR_POS");
         if (pos && *pos) {
@@ -255,26 +301,36 @@ static int fr_test_apply(Game *g)
             if (sscanf(pos, "%f,%f,%f,%f", &fx, &fz, &fyaw, &fpitch) >= 2) {
                 g->cam->cam.pos[0] = fx;
                 g->cam->cam.pos[2] = fz;
-                // Глаз 2.4 м: чуть выше пшеницы — точки обзора для тестов
+                // Eye at 2.4 m: slightly above the wheat — view points for tests
                 g->cam->cam.pos[1] = sample_height(&g->world, fx, fz) + 2.4f;
                 g->cam->cam.vy = 0;
-                // noclip: камера не падает и pitch не ограничен ходьбой
-                // (удобно смотреть на небо/вниз для скриншотов)
+                // noclip: the camera does not fall and pitch is not limited
+                // by walking (convenient to look at the sky/down for screenshots)
                 g->cam->cam.fly = 1;
                 if (fyaw != 0.0f) g->cam->cam.yaw = fyaw * 3.14159f / 180.0f;
                 g->cam->cam.pitch = fpitch * 3.14159f / 180.0f;
-                // Цели сглаживания мыши — к новому взгляду (иначе m_smooth
-                // потащит камеру обратно к спавну)
+                // Mouse smoothing targets — snap to the new look (otherwise
+                // m_smooth drags the camera back to spawn)
                 camera_sync_look(&g->cam->cam);
-                SDL_Log("FR_POS: телепорт %.0f,%.0f yaw=%.2f pitch=%.2f",
+                SDL_Log("FR_POS: teleport %.0f,%.0f yaw=%.2f pitch=%.2f",
                         fx, fz, g->cam->cam.yaw, g->cam->cam.pitch);
             }
         }
     }
-    // t/k — отключить рельеф/небо (нужны узлы, поэтому после load_world)
+    // Z — after load_world/FR_POS: listener and map are ready, there is something to measure.
+    if (strchr(fr_test, 'Z')) audio_selftest_world(&g->world, g->cam->cam.pos);
+    // U — a crate stack in front of the camera. Must come after load_world
+    // and FR_POS: the body is placed relative to the camera, and the camera
+    // spawns (and teleports) only there; otherwise the "stack" hangs in the
+    // void until the player spawns.
+    if (strchr(fr_test, 'U')) {
+        cvar_set("phys_bodies", 1.0f);  // bodies active from the first tick
+        cmd_phys_props("8");
+    }
+    // t/k — disable terrain/sky (needs nodes, hence after load_world)
     if (strchr(fr_test, 't')) g->terr_node->render = NULL;
     if (strchr(fr_test, 'k')) g->sky_node->render = NULL;
-    // m — burst "fire" у игрока; d — декаль под игроком
+    // m — "fire" burst at the player; d — decal under the player
     if (strchr(fr_test, 'm')) {
         const float *cp = g->cam->cam.pos;
         fx_burst("fire", cp[0], cp[1] + 1.0f, cp[2], 0);
@@ -284,22 +340,22 @@ static int fr_test_apply(Game *g)
         decal_place(cp[0], cp[2], 3.0f, 3.0f, 0.0f, "img/particle.png",
                     0.15f, 0.4f, 0.8f, 0.85f);
     }
-    // a/n — погода (дождь/снег следует за игроком); y — взрыв
+    // a/n — weather (rain/snow follows the player); y — explosion
     if (strchr(fr_test, 'a')) {
         float ext[3] = { 20.0f, 10.0f, 20.0f };
         fx_weather_start("rain", 12.0f, ext, 150.0f, 0.0f);
     }
-    // w — мокрость=1 БЕЗ частиц дождя (чистый тест мокрого SSR, A/B-кадры)
+    // w — wetness=1 WITHOUT rain particles (clean wet-SSR test, A/B frames)
     if (strchr(fr_test, 'w')) fx_force_wetness(1.0f);
-    // D — демо-полёт (headless-скриншоты красивой точки обзора, FR_TEST=SD)
+    // D — demo flight (headless screenshots of a nice viewpoint, FR_TEST=SD)
     if (strchr(fr_test, 'D')) game_demo_toggle(g);
-    // g — glb-машина в 6 м перед камерой НА ЗЕМЛЕ (тест автопостановки
-    // cmd_glb без координат и теней моделей): FR_TEST=Sg
+    // g — glb car 6 m in front of the camera ON THE GROUND (tests auto-
+    // placement of cmd_glb without coordinates and model shadows): FR_TEST=Sg
     if (strchr(fr_test, 'g')) {
         cmd_glb("models/vaz-2105.glb");
     }
-    // l — анимированная модель в 3 м перед камерой (тест UV лица и теней
-    // скиннинга): FR_TEST=Sl. y=0 → автопостановка на рельеф.
+    // l — animated model 3 m in front of the camera (tests face UV and
+    // skinning shadows): FR_TEST=Sl. y=0 → auto-placement onto the terrain.
     if (strchr(fr_test, 'l')) {
         const float *cp = g->cam->cam.pos;
         float fwd[3] = { 0, 0, 1 };
@@ -309,12 +365,12 @@ static int fr_test_apply(Game *g)
                  "models/handpaint_-_girl_01.glb %.2f 0 %.2f 1",
                  cp[0] + fwd[0] * 3.0f, cp[2] + fwd[2] * 3.0f);
         cmd_glbanim(args);
-        g->cam->cam.pitch = -0.26f;      // вниз — лицо крупным планом
+        g->cam->cam.pitch = -0.26f;      // down — face in close-up
         camera_sync_look(&g->cam->cam);
     }
-    // R — Verlet-верёвка перед камерой (тест мини-физики): FR_TEST=SR
+    // R — Verlet rope in front of the camera (mini-physics test): FR_TEST=SR
     if (strchr(fr_test, 'R')) cmd_phys_rope("16");
-    // H — женщина + рэгдолл с толчком (тест физики скелета): FR_TEST=SH
+    // H — woman + ragdoll with a push (skeleton physics test): FR_TEST=SH
     if (strchr(fr_test, 'H')) {
         const float *cp = g->cam->cam.pos;
         float fwd[3] = { 0, 0, 1 };
@@ -326,7 +382,7 @@ static int fr_test_apply(Game *g)
         cmd_glbanim(args);
         g->cam->cam.pitch = -0.25f;
         camera_sync_look(&g->cam->cam);
-        cmd_phys_ragdoll("0 0");   // без толчка: обмякнуть и упасть
+        cmd_phys_ragdoll("0 0");   // without a push: go limp and fall
     }
     if (strchr(fr_test, 'n')) {
         float ext[3] = { 20.0f, 8.0f, 20.0f };
@@ -343,49 +399,29 @@ static int fr_test_apply(Game *g)
     return 0;
 }
 
-// Колбэк высоты рельефа для мини-физики (physics.c):Verlet-частицы
-// сталкиваются с той же землёй, по которой ходит игрок.
+// Terrain height callback for the mini physics (physics.c): Verlet particles
+// collide with the same ground the player walks on.
 static float phys_ground(float x, float z)
 {
     Game *g = game_instance();
     return (g && g->world_loaded) ? sample_height(&g->world, x, z) : 0.0f;
 }
 
-int main(int argc, char *argv[])
+// Determine the base resources directory (where map/, shaders/, img/ live).
+// Priority: CWD (if map/ exists) -> exe folder -> parent folder of the exe.
+// Calls resources_set_base_dir() and chdirs into it — config.cfg and logs are
+// written next to the data, not in an arbitrary CWD.
+static void boot_resolve_base_dir(void)
 {
-    (void)argc; (void)argv;
-
-    // 1) Инициализация SDL — должна быть ДО любых SDL_* вызовов
-    //    (включая SDL_GetPrefPath/SDL_LoadFile в fr_android_prepare на Android)
-    //    Раньше стояла после — на девайсе падал с SIGSEGV до показа окна.
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
-        // SDL ещё не поднялась — пишем в stderr
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-    srand((unsigned)SDL_GetTicks());
-
-    // Android: распаковать APK-assets в хранилище и перейти туда (до base_dir).
-    // Вызываем ПОСЛЕ SDL_Init — на Android здесь уже есть JNI/env и AAssetManager.
-    if (!fr_android_prepare()) {
-#ifdef __ANDROID__
-        SDL_Log("android: подготовка ресурсов не удалась");
-        SDL_Quit();
-        return 1;
-#endif
-    }
-
-    // Определяем базовую директорию ресурсов (где лежат map/, shaders/, img/).
-    // Приоритет: CWD (если есть map/) -> папка exe -> родительская папка exe.
     static char base_dir[512];
     FILE *probe = fopen("map/map.json", "rb");
     if (probe) {
         fclose(probe);
-        snprintf(base_dir, sizeof base_dir, ".");   // CWD — это корень проекта
+        snprintf(base_dir, sizeof base_dir, ".");   // CWD is the project root
     } else {
         const char *base = SDL_GetBasePath();
         if (base && base[0]) {
-            // Проверяем папку exe
+            // Check the exe folder
             char test_path[512];
             snprintf(test_path, sizeof test_path, "%smap/map.json", base);
             probe = fopen(test_path, "rb");
@@ -393,7 +429,7 @@ int main(int argc, char *argv[])
                 fclose(probe);
                 snprintf(base_dir, sizeof base_dir, "%s", base);
             } else {
-                // Проверяем родительскую папку (проект при запуске из build/)
+                // Check the parent folder (project launched from build/)
                 snprintf(test_path, sizeof test_path, "%s../map/map.json", base);
                 probe = fopen(test_path, "rb");
                 if (probe) {
@@ -409,11 +445,11 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Устанавливаем базовую директорию ДО resources_init()
+    // Set the base directory BEFORE resources_init()
     resources_set_base_dir(base_dir);
 
-    // Если в текущей папке нет данных — переходим в папку исполняемого файла
-    // (для config.cfg, логов и т.п.)
+    // If the current folder has no data — chdir to the executable's folder
+    // (for config.cfg, logs, etc.)
     if (strcmp(base_dir, ".") != 0) {
 #ifdef _WIN32
         _chdir(base_dir);
@@ -421,12 +457,142 @@ int main(int argc, char *argv[])
         chdir(base_dir);
 #endif
     }
+}
 
-    // 2) Окно и контекст -------------------------------------------------------
-    // Выбор бэкенда на этапе компиляции: make vulkan / make metal дают окна
-    // БЕЗ GL-контекста (Vulkan/Metal-девайс поднимает sr_create()). Пока
-    // рендер-пайплайн на этих API не портирован — девайс поднимается,
-    // статус логируется, движок завершается корректно.
+// Cascade of GL context versions. The window is already created at call time,
+// DOUBLEBUFFER/DEPTH attributes are set.
+static SDL_GLContext boot_gl_context(void)
+{
+#ifdef USE_GLES_PATH
+    // GLES 3.0; if the driver refuses — try whatever version is available.
+    static const int ctx_try[][3] = {
+        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES }, { 0, 0, 0 },
+    };
+#else
+    // GL 4.5 CORE: needed for GPU-driven grass rendering (compute-cull +
+    // indirect draw, GL 4.3+). A superset of 3.3, old shaders work as
+    // before. If the driver won't give 4.5, vegetation.c falls back to the
+    // instanced path on its own (g_gl_gpu_driven == 0).
+    // Old GLX drivers (Mesa <= 3.1, NVIDIA legacy 340/470) do NOT downgrade
+    // the request, they fail with GLXBadFBConfig — hence we iterate versions
+    // downward and recreate the context: SDL re-reads the attributes on each call.
+    static const int ctx_try[][3] = {
+        { 4, 5, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 4, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 3, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 3, 1, SDL_GL_CONTEXT_PROFILE_CORE },
+        { 0, 0, 0 },
+    };
+#endif
+    SDL_GLContext ctx = NULL;
+    for (unsigned ci = 0; ci < sizeof ctx_try / sizeof ctx_try[0] && !ctx; ci++) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, ctx_try[ci][0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, ctx_try[ci][1]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
+        ctx = SDL_GL_CreateContext(g_win);
+        if (!ctx && ctx_try[ci][0] > 0)
+            SDL_Log("GL context %d.%d not available (%s); trying lower",
+                    ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
+    }
+    return ctx;
+}
+
+// FR_SHOT — save the frame to PPM (render debugging without Wayland).
+// The value is the frame number to shoot (FR_SHOT=60), empty = 60.
+// A range (FR_SHOT=60-65) shoots every frame in it as /tmp/fr_shot_<n>.ppm:
+// frames of ONE run differ by at most one logic tick, so comparing them is
+// how temporal instability (flicker, z-fighting) is measured headlessly.
+static void loop_fr_shot(void)
+{
+    static int inited = 0;
+    static int target = 0, last = 0, frame = 0;
+    const char *fs = getenv("FR_SHOT");
+    if (!fs) return;
+    if (!inited) {
+        inited = 1;
+        target = atoi(fs);
+        if (target < 1) target = 60;
+        const char *dash = strchr(fs, '-');
+        last = dash ? atoi(dash + 1) : target;
+        if (last < target) last = target;
+    }
+    frame++;
+    if (frame < target || frame > last) return;
+    {
+        char path[64];
+        if (last > target)
+            snprintf(path, sizeof path, "/tmp/fr_shot_%d.ppm", frame);
+        else
+            snprintf(path, sizeof path, "/tmp/fr_shot.ppm");
+        unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
+        // glReadPixels into a NULL buffer is not a "no screenshot" — it is a crash
+        if (!px) {
+            SDL_Log("FR_SHOT: no memory for %dx%d readback",
+                    renderer_vw(), renderer_vh());
+            return;
+        }
+        renderer_read_pixels(px, renderer_vw(), renderer_vh());
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());
+            for (int y = 0; y < renderer_vh(); y++)
+                fwrite(px + (size_t)(renderer_vh() - 1 - y) * renderer_vw() * 3, 1,
+                       (size_t)renderer_vw() * 3, f);
+            fclose(f);
+            SDL_Log("FR_SHOT: %s (%dx%d) console=%d",
+                    path, renderer_vw(), renderer_vh(), console_active());
+        }
+        free(px);
+    }
+}
+
+// host_framerate — FPS cap (delay before the next frame)
+static void loop_framerate_limit(Uint64 frame_start)
+{
+    float hf = cvar_get("host_framerate");
+    if (hf <= 0.0f) return;
+    Uint64 target = (Uint64)(SDL_GetPerformanceFrequency() / hf);
+    Uint64 elapsed = SDL_GetPerformanceCounter() - frame_start;
+    if (elapsed < target) {
+        Uint32 ms = (Uint32)((target - elapsed) * 1000 /
+                             SDL_GetPerformanceFrequency());
+        if (ms > 0 && ms < 100) SDL_Delay(ms);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    // 1) SDL initialization — must happen BEFORE any SDL_* calls
+    //    (including SDL_GetPrefPath/SDL_LoadFile in fr_android_prepare on Android).
+    //    It used to sit later — on the device it crashed with SIGSEGV before the
+    //    window was shown.
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        // SDL is not up yet — write to stderr
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    srand((unsigned)SDL_GetTicks());
+
+    // Android: unpack APK assets into storage and chdir there (before base_dir).
+    // Called AFTER SDL_Init — on Android JNI/env and AAssetManager exist by then.
+    if (!fr_android_prepare()) {
+#ifdef __ANDROID__
+        SDL_Log("android: resource preparation failed");
+        SDL_Quit();
+        return 1;
+#endif
+    }
+
+    // Base resources directory + chdir into it (map/, shaders/, img/).
+    boot_resolve_base_dir();
+
+    // 2) Window and context ----------------------------------------------------
+    // Backend selection at compile time: make vulkan / make metal create windows
+    // WITHOUT a GL context (the Vulkan/Metal device is brought up by sr_create()).
+    // Until the render pipeline is ported to these APIs — the device is created,
+    // the status is logged, the engine exits cleanly.
     int ww = WIN_W, wh = WIN_H;
     {
         const char *ew = getenv("FR_W"), *eh = getenv("FR_H");
@@ -447,8 +613,8 @@ int main(int argc, char *argv[])
         SrDevice *dev = sr_create();
         if (dev) {
             const SrCaps *c = sr_caps(dev);
-            SDL_Log("Backend %s: device OK (%s %s), но рендер-пайплайн на этот "
-                    "API ещё не портирован (sr_* заглушки) — завершение.",
+            SDL_Log("Backend %s: device OK (%s %s), but the render pipeline for "
+                    "this API is not ported yet (sr_* stubs) — exiting.",
                     sr_api_name(
 #ifdef FR_BACKEND_VULKAN
                         SR_API_VULKAN
@@ -459,7 +625,7 @@ int main(int argc, char *argv[])
                     c->vendor, c->version);
             sr_destroy(dev);
         } else {
-            SDL_Log("Backend %s: sr_create() не удался",
+            SDL_Log("Backend %s: sr_create() failed",
                     sr_api_name(
 #ifdef FR_BACKEND_VULKAN
                         SR_API_VULKAN
@@ -473,57 +639,27 @@ int main(int argc, char *argv[])
         return 0;
     }
 #endif
-#ifdef USE_GLES_PATH
-    // GLES 3.0; если драйвер не отдаёт — пробуем любой, что есть.
-    static const int ctx_try[][3] = {
-        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES }, { 0, 0, 0 },
-    };
-#else
-    // GL 4.5 CORE: нужен для GPU-driven рендера травы (compute-cull +
-    // indirect draw, GL 4.3+). Суперсет 3.3, старые шейдеры работают как
-    // раньше. Если драйвер не даст 4.5, vegetation.c сам откатится на
-    // инстансный путь (g_gl_gpu_driven == 0).
-    // Старые GLX-драйверы (Mesa <= 3.1, NVIDIA legacy 340/470) НЕ понижают
-    // запрос, а падают с GLXBadFBConfig — поэтому перебираем версии вниз и
-    // пересоздаём контекст: SDL перечитывает атрибуты на каждом вызове.
-    static const int ctx_try[][3] = {
-        { 4, 5, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 4, 3, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 3, 3, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 3, 1, SDL_GL_CONTEXT_PROFILE_CORE },
-        { 0, 0, 0 },
-    };
-#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
     g_win = SDL_CreateWindow("firerender", ww, wh,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_win) { SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError()); SDL_Quit(); return 1; }
-    SDL_GLContext ctx = NULL;
-    for (unsigned ci = 0; ci < sizeof ctx_try / sizeof ctx_try[0] && !ctx; ci++) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, ctx_try[ci][0]);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, ctx_try[ci][1]);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, ctx_try[ci][2]);
-        ctx = SDL_GL_CreateContext(g_win);
-        if (!ctx && ctx_try[ci][0] > 0)
-            SDL_Log("Контекст GL %d.%d не доступен (%s); пробую ниже",
-                    ctx_try[ci][0], ctx_try[ci][1], SDL_GetError());
-    }
+    SDL_GLContext ctx = boot_gl_context();
     if (!ctx) { SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
                 SDL_DestroyWindow(g_win); SDL_Quit(); return 1; }
     SDL_GL_MakeCurrent(g_win, ctx);
 
-    // 4) Загрузка функций GL и vsync -------------------------------------------
+    // 4) Loading GL functions and vsync ----------------------------------------
     if (load_gl_funcs() != 0) {
         SDL_GL_DestroyContext(ctx); SDL_DestroyWindow(g_win); SDL_Quit(); return 1;
     }
     SDL_GL_SetSwapInterval(0);
 
-    // 5) Состояние мира: системы (консоль/звук/шрифт/команды) поднимает
-    //    фаза APP_BOOT — boot_init() в главном цикле ---------------------------
+    // 5) World state: systems (console/audio/font/commands) are brought up by
+    //    the APP_BOOT phase — boot_init() in the main loop ---------------------
     Game game;
-    game_init(&game);            // единственный экземпляр состояния мира
+    game_init(&game);            // the single instance of the world state
 
     SDL_Log("Video driver: %s", SDL_GetCurrentVideoDriver());
 #ifdef USE_GLES_PATH
@@ -531,13 +667,36 @@ int main(int argc, char *argv[])
 #else
     SDL_Log("Renderer profile: DESKTOP GL");
 #endif
-    sr_api_report();   // статус рендерных API (GL/GLES + заготовки Vulkan/Metal)
+    sr_api_report();   // render API status (GL/GLES + Vulkan/Metal stubs)
     SDL_Log("Graphics API: %s", glGetString(GL_VERSION));
     SDL_Log("GPU-driven veg (compute+indirect): %s",
             g_gl_gpu_driven ? "ENABLED" : "disabled (instanced fallback)");
     SDL_Log("firerender build #%d", ENGINE_BUILD_NUM);
 
-    // 6) Вьюпорт = реальный размер окна в пикселях -----------------------------
+    // A driver that cannot compile this engine's GLSL dialect renders NOTHING:
+    // every shader fails, scene_build refuses the world, and the loop keeps
+    // running at 200 fps over a black window with the reason buried in the log
+    // (Intel HD 2000 / GL 2.1 refuses "#version 330 core" outright). Tell the
+    // player in every channel that still works — log, window title, native
+    // dialog — and refuse to load a map that cannot be drawn.
+    g_gl_fatal = !shader_dialect_supported();
+    if (g_gl_fatal) {
+        SDL_Log("%s is not supported by this driver — no world can render. "
+                "Update the graphics driver.", FR_GLSL_DIALECT);
+        SDL_SetWindowTitle(g_win,
+            "firerender — видеодрайвер не поддерживает шейдеры игры "
+            "(" FR_GLSL_DIALECT "); обновите драйвер");
+        const char *drv = SDL_GetCurrentVideoDriver();
+        if (!getenv("FR_TEST") && drv && strcmp(drv, "offscreen") &&
+            strcmp(drv, "dummy")) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "firerender",
+                "Видеодрайвер не поддерживает " FR_GLSL_DIALECT " — игра не сможет "
+                "ничего отрисовать.\n\nОбновите драйвер видеокарты. "
+                "Подробности — в логе запуска.", g_win);
+        }
+    }
+
+    // 6) Viewport = actual window size in pixels -------------------------------
     int vw = ww, vh = wh;
     SDL_GetWindowSizeInPixels(g_win, &vw, &vh);
     SDL_Log("Drawable: %dx%d (requested %dx%d)", vw, vh, ww, wh);
@@ -546,18 +705,18 @@ int main(int argc, char *argv[])
     glViewport(0, 0, vw, vh);
     renderer_set_viewport(vw, vh);
 
-    // 7) Отсечение задних граней, блендинг -------------------------------------
+    // 7) Back-face culling, blending --------------------------------------------
     glEnable(GL_CULL_FACE);
     glFrontFace(GL_CCW);
     glCullFace(GL_BACK);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // 8) Ввод: привязка мыши/клавиш к окну. Режим мыши и cvar-синки
-    //    применяет главный цикл (после boot_init). ------------------------------
+    // 8) Input: mouse/keyboard grab to the window. Mouse mode and cvar syncs
+    //    are applied by the main loop (after boot_init). ------------------------
     input_init(g_win, &game);
 
-    // 9) Главный цикл: фаза APP_BOOT (boot_init) -> MENU/PLAY/PAUSE -------------
+    // 9) Main loop: phase APP_BOOT (boot_init) -> MENU/PLAY/PAUSE --------------
     FrameBench bench = {0};
     bench.active = getenv("FR_BENCH") != NULL;
     if (getenv("FR_BENCH_GPU")) bench_gpu_init(&bench);
@@ -576,8 +735,8 @@ int main(int argc, char *argv[])
         float inst_fps = 1.0f / (frame_dt > 0.000001f ? frame_dt : 0.000001f);
         if (game.hud) game.hud->fps = game.hud->fps * 0.95f + inst_fps * 0.05f;
 
-        // FR_STAGES — временная инструметация кадра: средние по стадиям
-        // печатаются в лог при выходе (поиск CPU-хотспотов движка).
+        // FR_STAGES — temporary frame instrumentation: per-stage averages are
+        // printed to the log at exit (hunting engine CPU hotspots).
         static int s_stages = -1;
         static double s_st_in = 0, s_st_logic = 0, s_st_sync = 0,
                       s_st_render = 0, s_st_end = 0, s_st_swap = 0,
@@ -590,7 +749,7 @@ int main(int argc, char *argv[])
         if (s_stages < 0) s_stages = getenv("FR_STAGES") ? 1 : 0;
 #define ST_ACC(v) do { st_p = SDL_GetPerformanceCounter(); v += (st_p - st_t) / st_f; st_t = st_p; } while (0)
 
-        input_process();                    // события: консоль, бинды, ресайз
+        input_process();                    // events: console, binds, resize
         if (input_quit()) running = false;
         if (input_take_resumed()) {
             last = SDL_GetPerformanceCounter();
@@ -605,31 +764,31 @@ int main(int argc, char *argv[])
         }
         ST_ACC(s_st_in);
 
-        // Фаза APP_BOOT: поднять системы один раз (в конце — APP_MENU/PLAY)
+        // APP_BOOT phase: bring systems up once (ends with APP_MENU/PLAY)
         if (app_state() == APP_BOOT) {
             boot_init(&game);
             if (bench.active) {
                 const char *preset = getenv("FR_BENCH_PRESET");
                 app_apply_benchmark_preset(preset ? atoi(preset) : 0);
             }
-            if (fr_test_apply(&game) != 0) goto fail;   // FR_TEST: мир
+            if (fr_test_apply(&game) != 0) goto fail;   // FR_TEST: the world
 
-            if (getenv("FR_CONSOLE")) console_toggle();   // консоль при старте
-            // Ресинк подсистем с cvar'ами ПОСЛЕ загрузки мира. shadow_init/
-            // voxfog_init читают режим в начале game_load_world, но map_apply,
-            // графические пресеты и скрипт карты могут сменить r_shadows_mode/
-            // r_fog_mode уже ПОСЛЕ инициализации. Раньше мы лишь пресеедили
-            // трекеры текущим значением — и sync_cvars, не видя «изменения»,
-            // НИКОГДА не приводил g_shadow_on/туман в соответствие: CSM оставался
-            // включён в режиме blob/выкл (карта теней рисовалась впустую), а
-            // туман застревал в режиме из инициализации. Теперь принудительно
-            // синхронизируем состояние с итоговым режимом.
+            if (getenv("FR_CONSOLE")) console_toggle();   // console at startup
+            // Resync subsystems with cvars AFTER the world loads. shadow_init/
+            // voxfog_init read the mode at the start of game_load_world, but
+            // map_apply, graphics presets and the map script may change
+            // r_shadows_mode/r_fog_mode already AFTER initialization. We used
+            // to only reseed the trackers with the current value — and sync_cvars,
+            // seeing no "change", NEVER brought g_shadow_on/fog in line with the
+            // mode: CSM stayed enabled in blob/off mode (the shadow map was
+            // rendered for nothing), and fog got stuck in the mode from
+            // initialization. Now we forcibly sync the state with the final mode.
             s_sync_shadows = cvar_get("r_shadows_mode");
             shadow_set(s_sync_shadows == 1.0f || s_sync_shadows == 2.0f);
             s_sync_fog = cvar_get("r_fog_mode");
             voxfog_set_mode((int)s_sync_fog);
-            // FR_TEST 's'/'o' переключают подсистему ПОВЕРХ режима (A/B-кадры) —
-            // применяем после ресинка, иначе shadow_init/voxfog_init их затирали.
+            // FR_TEST 's'/'o' toggle the subsystem ON TOP of the mode (A/B frames) —
+            // apply after the resync, otherwise shadow_init/voxfog_init wiped them.
             {
                 const char *ft = getenv("FR_TEST");
                 if (ft && strchr(ft, 's')) shadow_toggle();
@@ -637,7 +796,7 @@ int main(int argc, char *argv[])
             }
         }
 
-        // В APK assets неизменяемы, а периодические stat() только будят storage.
+        // In the APK assets are immutable, and periodic stat() calls only wake up storage.
 #ifndef __ANDROID__
         {
             static double s_reload_at = 0.0;
@@ -651,10 +810,10 @@ int main(int argc, char *argv[])
 #endif
         ST_ACC(s_st_reload);
 
-        game_demo_tick(&game, dt, inst_fps); // демо-сцена (Q): автополёт + FPS
+        game_demo_tick(&game, dt, inst_fps); // demo scene (Q): auto-fly + FPS
         ST_ACC(s_st_demo);
 
-        // Фиксированный тик логики/физики: 100 Гц десктоп, 60 Гц на телефоне (экономия CPU)
+        // Fixed logic/physics tick: 100 Hz on desktop, 60 Hz on the phone (CPU saving)
         {
 #ifdef __ANDROID__
             const float step = 1.0f / 60.0f;
@@ -667,14 +826,16 @@ int main(int argc, char *argv[])
             if (sim_acc >= 0.25f) sim_acc = 0.25f;
             for (int ticks = 0; sim_acc >= step && ticks < max_ticks; ticks++) {
                 if (app_state() == APP_PLAY) {
-                    game_update(&game, step);   // мир: узлы, триггеры/use, туман
+                    game_update(&game, step);   // world: nodes, triggers/use, fog
                     ST_ACC(s_st_gu);
                     physics_set_ground(phys_ground);
-                    physics_step(physics_world(), step);   // мини-физика (Verlet)
-                    glb_anim_ragdoll_step_all(step);       // рэгдоллы аним-моделей
+                    phys_body_enable(cvar_get("phys_bodies") != 0.0f);
+                    phys_body_step(physics_world(), step);  // bodies+ropes,
+                                        // physics layered over physics_step (phys_body.c)
+                    glb_anim_ragdoll_step_all(step);       // ragdolls of animated models
                     ST_ACC(s_st_phys);
-                    audio_update();             // фоновые петли и 3D-источники
-                    lua_engine_update(step);    // per-frame колбэк скрипта
+                    audio_update();             // background loops and 3D sources
+                    lua_engine_update(step);    // per-frame script callback
                     ST_ACC(s_st_aux);
                 }
                 sim_acc -= step;
@@ -691,8 +852,9 @@ int main(int argc, char *argv[])
         sync_cvars(&game);
         input_sync_mode();
 
-        // FR_CVAR="name value;name value" — переопределить cvar'ы для
-        // headless-тестов ПОСЛЕ config.cfg (иначе архивные значения перетрут).
+        // FR_CVAR="name value;name value" — override cvar's for
+        // headless tests AFTER config.cfg (otherwise archived values would
+        // overwrite them).
         {
             static int s_fr_cvar_done = 0;
             const char *fc = getenv("FR_CVAR");
@@ -710,9 +872,9 @@ int main(int argc, char *argv[])
             }
         }
 
-        // FR_TEST 'H': автонаведение камеры на рэгдолл каждый кадр —
-        // головной тест физики не должен зависеть от того, куда уползла
-        // модель (без этого она уезжает из кадра и баг не видно).
+        // FR_TEST 'H': auto-aim the camera at the ragdoll every frame — the
+        // ragdoll physics test must not depend on where the model crawled to
+        // (otherwise it leaves the frame and the bug is invisible).
         if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'H') &&
             game.world_loaded && app_state() == APP_PLAY) {
             float aim[3];
@@ -731,8 +893,8 @@ int main(int argc, char *argv[])
             }
         }
 
-        // FR_TEST 'K': убить игрока за ~1.2 c до снимка (headless FR_TEST=SK) —
-        // проверка экрана смерти, «завала» камеры и заморозки ввода.
+        // FR_TEST 'K': kill the player ~1.2 s before the shot (headless FR_TEST=SK) —
+        // checks the death screen, camera "fall" and input freeze.
         if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'K') &&
             game.world_loaded && app_state() == APP_PLAY &&
             !health_is_dead(&game.player.hp)) {
@@ -742,13 +904,13 @@ int main(int argc, char *argv[])
                               SDL_Log("FR_TEST K: player killed"); }
         }
 
-        // Отложенные события (events_emit_deferred) — безопасная точка после
-        // всех тиков, до рендера: колбэки не могут переиспользовать списки
-        // слушателей посреди итерации.
+        // Deferred events (events_emit_deferred) — a safe point after all
+        // ticks, before render: callbacks must not reuse listener lists
+        // mid-iteration.
         events_flush_deferred();
         ST_ACC(s_st_sync);
 
-        // Рендер: сцена -> bloom/туман -> оверлеи (см. renderer.c)
+        // Render: scene -> bloom/fog -> overlays (see renderer.c)
         bench_gpu_begin(&bench);
         renderer_begin();
         renderer_frame(&game, dt, game.world_loaded &&
@@ -760,10 +922,10 @@ int main(int argc, char *argv[])
             s_rd_prev = s_st_render;
             if (rd_frame > s_st_render_max) s_st_render_max = rd_frame;
         }
-        // FR_TEST 'S': автоскриншот на 450-м кадре и выход на 480-м —
-        // headless-проверка картинки + стабильный прогрев для профайлера.
-        // Запрос ставится до renderer_end, чтобы чтение было в том же кадре:
-        // некоторые EGL backbuffer'ы после overlay draw уже discard-нуты.
+        // FR_TEST 'S': auto-screenshot at frame 450 and exit at frame 480 —
+        // headless picture check + stable warmup for the profiler.
+        // The request is set before renderer_end so the readback happens in the
+        // same frame: some EGL backbuffers are already discarded after overlay draw.
         if (strchr(getenv("FR_TEST") ? getenv("FR_TEST") : "", 'S')) {
             static int s_frames = 0, s_shot_at = -1;
             if (s_shot_at < 0) {
@@ -771,43 +933,55 @@ int main(int argc, char *argv[])
                 s_shot_at = fs ? atoi(fs) : 450;
             }
             if (++s_frames == s_shot_at) cmd_screenshot(NULL);
-            // FR_BENCH живёт десятки секунд (прогрев + замер) — выход только
-            // по bench.done; снимок всё равно делается на s_shot_at.
+            // FR_BENCH lives tens of seconds (warmup + measurement) — exit only
+            // on bench.done; the shot still happens at s_shot_at.
             if (s_frames >= s_shot_at + 30 && !bench.active) running = false;
         }
-        // FR_BAKE: офлайн-компиляция света карты (make mapbake). Прогреваем
-        // несколько кадров (солнце/CSM/rc устаканиваются), печём RGB-люксель
-        // рельефа + сетку зондов в map/baked/ и выходим. Движок потом только
-        // ЧИТАЕТ их (после make mapzip кладёт baked/ в zip карты).
+        // FR_BAKE: offline light baking of the map (make mapbake). Warm up a few
+        // frames (sun/CSM/rc settle), bake the terrain RGB texel + probe grid
+        // into map/baked/ and exit. The engine afterwards only READS them (after
+        // make mapzip puts baked/ into the map zip).
         if (getenv("FR_BAKE") && game.world_loaded &&
             app_state() == APP_PLAY && game.sun_node) {
             static int s_bake_warm = 0;
             if (++s_bake_warm == 30) {
-                SDL_Log("FR_BAKE: запекаю свет карты...");
+                SDL_Log("FR_BAKE: baking the map light...");
                 terrain_light_bake(&game.world,
                                    (SunParams *)game.sun_node->params,
                                    renderer_context());
-                SDL_Log("FR_BAKE: готово. Свет в map/baked/ — запусти make mapzip.");
+                SDL_Log("FR_BAKE: done. Light in map/baked/ — run make mapzip.");
                 running = false;
             }
         }
         renderer_end(&game, dt);
         ST_ACC(s_st_end);
 
-        // Меню (главное/пауза/настройки) — поверх замороженной сцены
+        // Menu (main/pause/settings) — over the frozen scene
         if (app_state() != APP_PLAY) {
             int act = app_menu(renderer_vw(), renderer_vh());
             if (act == APP_ACT_START || act == APP_ACT_RESUME) {
+                // A map is pointless when the driver rejected the shader dialect
+                // — the load would only bury the reason under 500 compile errors.
+                if (g_gl_fatal) {
+                    static int s_fatal_warned = 0;
+                    if (!s_fatal_warned) {
+                        s_fatal_warned = 1;
+                        SDL_Log("Map load refused: %s not supported", FR_GLSL_DIALECT);
+                        console_print("драйвер не поддерживает шейдеры игры — "
+                                      "обновите видеодрайвер");
+                    }
+                    continue;
+                }
                 if (!game.world_loaded && game_load_world(&game) != 0) {
-                    SDL_Log("World load failed — остаёмся в меню");
+                    SDL_Log("World load failed — staying in the menu");
                     console_print("ошибка загрузки карты");
-                    // не выходим из приложения, даём шанс выбрать другую карту
+                    // do not exit the app, give a chance to pick another map
                     continue;
                 }
                 app_set_state(APP_PLAY);
                 if (act == APP_ACT_START) {
-                    // Новая игра: камера на спавн, сброс демо.
-                    // (если это load из save — телепорт вместо спавна)
+                    // New game: camera to spawn, reset demo.
+                    // (if this is a load from save — teleport instead of spawn)
                     if (game.player.pending_spawn) {
                         game_apply_spawn(&game, game.player.save_pos,
                                          game.player.save_yaw,
@@ -829,47 +1003,20 @@ int main(int argc, char *argv[])
                     SDL_Log("Game resumed");
                 }
             } else if (act == APP_ACT_MAIN) {
-                if (game.world_loaded) game_unload_world(&game);  // в меню
+                if (game.world_loaded) game_unload_world(&game);  // to menu
                 app_set_state(APP_MENU);
             } else if (act == APP_ACT_QUIT) {
                 g_quit_request = 1;
             }
         }
-        commands_shot_take(renderer_vw(), renderer_vh());     // скриншот (F12)
+        commands_shot_take(renderer_vw(), renderer_vh());     // screenshot (F12)
         if (app_state() == APP_PLAY)
-            touch_hud_draw(renderer_vw(), renderer_vh());     // виртуальный джойстик
-        console_drain();                                      // отложенные wait-команды
-        console_render(renderer_vw(), renderer_vh());         // консоль — поверх всего (`)
+            touch_hud_draw(renderer_vw(), renderer_vh());     // virtual joystick
+        console_drain();                                      // deferred wait-commands
+        console_render(renderer_vw(), renderer_vh());         // console — over everything (`)
         bench_gpu_end(&bench);
 
-        // FR_SHOT — сохранить кадр в PPM (отладка рендера без Wayland).
-        // Значение — номер кадра для снимка (FR_SHOT=60), пустое = 60.
-        {
-            static int shot_frame = 0;
-            const char *fs = getenv("FR_SHOT");
-            if (fs && shot_frame != -1) {
-                int target = atoi(fs);
-                if (target < 1) target = 60;
-                if (shot_frame == 0) shot_frame = 1;
-                else if (shot_frame < target) shot_frame++;
-                if (shot_frame == target) {
-                    unsigned char *px = malloc((size_t)renderer_vw() * renderer_vh() * 3);
-                    renderer_read_pixels(px, renderer_vw(), renderer_vh());
-                    FILE *f = fopen("/tmp/fr_shot.ppm", "wb");
-                    if (f) {
-                        fprintf(f, "P6\n%d %d\n255\n", renderer_vw(), renderer_vh());
-                        for (int y = 0; y < renderer_vh(); y++)
-                            fwrite(px + (size_t)(renderer_vh() - 1 - y) * renderer_vw() * 3, 1,
-                                   (size_t)renderer_vw() * 3, f);
-                        fclose(f);
-                        SDL_Log("FR_SHOT: /tmp/fr_shot.ppm (%dx%d) console=%d",
-                                renderer_vw(), renderer_vh(), console_active());
-                    }
-                    free(px);
-                    shot_frame = -1;
-                }
-            }
-        }
+        loop_fr_shot();
 
         SDL_GL_SwapWindow(g_win);
         ST_ACC(s_st_swap);
@@ -879,19 +1026,7 @@ int main(int argc, char *argv[])
             if (fr > s_st_frame_max) s_st_frame_max = fr;
         }
 
-        // host_framerate — лимит FPS (задержка до следующего кадра)
-        {
-            float hf = cvar_get("host_framerate");
-            if (hf > 0.0f) {
-                Uint64 target = (Uint64)(SDL_GetPerformanceFrequency() / hf);
-                Uint64 elapsed = SDL_GetPerformanceCounter() - now;
-                if (elapsed < target) {
-                    Uint32 ms = (Uint32)((target - elapsed) * 1000 /
-                                         SDL_GetPerformanceFrequency());
-                    if (ms > 0 && ms < 100) SDL_Delay(ms);
-                }
-            }
-        }
+        loop_framerate_limit(now);
 
         if (g_quit_request) {
             g_quit_request = 0;
@@ -899,11 +1034,11 @@ int main(int argc, char *argv[])
         }
 
         if (!running && s_stages && s_st_n > 0) {
-            SDL_Log("FR_STAGES (среднее по %d кадрам, мс): input %.3f | "
+            SDL_Log("FR_STAGES (average over %d frames, ms): input %.3f | "
                     "logic %.3f [reload %.3f | demo %.3f | game_update %.3f | "
                     "phys %.3f | audio+lua %.3f]"
                     " | sync %.3f | render %.3f | end %.3f | "
-                    "swap %.3f | СУММА %.3f",
+                    "swap %.3f | TOTAL %.3f",
                     s_st_n, s_st_in * 1000.0 / s_st_n,
                     s_st_logic * 1000.0 / s_st_n,
                     s_st_reload * 1000.0 / s_st_n,
@@ -915,8 +1050,8 @@ int main(int argc, char *argv[])
                     s_st_swap * 1000.0 / s_st_n,
                     (s_st_in + s_st_logic + s_st_sync + s_st_render +
                      s_st_end + s_st_swap) * 1000.0 / s_st_n);
-            SDL_Log("FR_STAGES max (мс): кадр %.1f | game_update %.1f | "
-                    "render %.1f  (boot-кадр портит reload-среднее — не смотри туда)",
+            SDL_Log("FR_STAGES max (ms): frame %.1f | game_update %.1f | "
+                    "render %.1f  (the boot frame skews the reload average — ignore it)",
                     s_st_frame_max * 1000.0, s_st_gu_max * 1000.0,
                     s_st_render_max * 1000.0);
         }
@@ -939,14 +1074,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 11) Очистка --------------------------------------------------------------
+    // 11) Cleanup --------------------------------------------------------------
     bench_gpu_cleanup(&bench);
-    console_save_config();       // config.cfg: cvar'ы на диск
-    game_map_config_save(&game); // + выбранная карта
-    game_unload_world(&game);    // выгрузить мир (если загружен)
-    audio_cleanup();             // звук: каналы и кеш
-    hud_shared_cleanup();        // шрифт/атласы/рендер текста
-    resources_shutdown();        // кеш ресурсов
+    console_save_config();       // config.cfg: cvar's to disk
+    game_map_config_save(&game); // + selected map
+    game_unload_world(&game);    // unload the world (if loaded)
+    audio_cleanup();             // audio: channels and cache
+    hud_shared_cleanup();        // font/atlas/text render
+    resources_shutdown();        // resource cache
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(g_win);
     SDL_Quit();

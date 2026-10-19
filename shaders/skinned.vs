@@ -1,31 +1,31 @@
 // ============================================================================
-//  Skinned — вершинный шейдер скелетной анимации (glTF skinned mesh)
+//  Skinned — vertex shader for skeletal animation (glTF skinned mesh)
 // ----------------------------------------------------------------------------
-//  Кожа (skinning) считается на GPU: каждая вершина несёт до 4 костей
-//  (aBoneIndices: 4×ubyte) и их веса (aBoneWeights: 4×float). Матрицы костей
-//  (jointMatrix = world[joint] * inverseBind[joint]) передаются массивом
-//  uBones[64]. На выходе те же vWorldPos/vNormal/vUV, что ждёт mesh.fs —
-//  поэтому скиннинг использует тот же фрагментный шейдер, что и статика.
+//  Skinning is computed on the GPU: each vertex carries up to 4 bones
+//  (aBoneIndices: 4xubyte) and their weights (aBoneWeights: 4xfloat). Bone
+//  matrices (jointMatrix = world[joint] * inverseBind[joint]) are passed
+//  as the uBones[64] array. Output is the same vWorldPos/vNormal/vUV that
+//  mesh.fs expects — so skinning reuses the same fragment shader as statics.
 // ============================================================================
 
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aUV;
-// Индексы костей держим ВЕЩЕСТВЕННЫМИ (vec4), хотя на CPU это байты: так
-// их можно подать обычным glVertexAttribPointer (GL_FLOAT) в общем
-// interleaved-буфере рядом с pos/normal/uv/weights, без отдельного
-// glVertexAttribIPointer. Значения целые (0..255) — int() точен.
+// Keep bone indices as REAL numbers (vec4) even though they are bytes on the
+// CPU: then they can be supplied with a plain glVertexAttribPointer (GL_FLOAT)
+// in the shared interleaved buffer next to pos/normal/uv/weights, without a
+// separate glVertexAttribIPointer. Values are integral (0..255) — int() is exact.
 layout (location = 3) in vec4 aBoneIndices;
 layout (location = 4) in vec4 aBoneWeights;
-layout (location = 5) in float aSnow;    // per-vertex "открыто небу сверху" (снег)
+layout (location = 5) in float aSnow;    // per-vertex "exposed to sky from above" (snow)
 
 uniform mat4 uViewProj;
-uniform mat4 uModel;            // перенос + масштаб объекта
+uniform mat4 uModel;            // object translation + scale
 uniform vec2 uUvTile;
 
 #define MAX_BONES 64
 uniform mat4 uBones[MAX_BONES];
-uniform int uHasSkin;           // 0 — не скиннинг (просто мат. трансформ)
+uniform int uHasSkin;           // 0 — not skinning (plain matrix transform)
 
 out vec3 vWorldPos;
 out vec3 vNormal;
@@ -47,7 +47,7 @@ void main() {
                 wsum += w;
             }
         }
-        // нормализация: если сумма весов близка к нулю — оставить как есть
+        // normalization: if the weight sum is near zero — leave it as is
         if (wsum > 0.001) sk /= wsum;
         pos = vec3(sk * vec4(aPos, 1.0));
         nrm = mat3(sk) * aNormal;

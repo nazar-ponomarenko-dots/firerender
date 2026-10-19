@@ -1,11 +1,11 @@
 // ============================================================================
-//  ssr.c — Screen Space Reflections (отражения в экранном пространстве)
+//  ssr.c — Screen Space Reflections
 // ----------------------------------------------------------------------------
-//  Пост-проход ПОСЛЕ сцены, ДО bloom/тумана: читает цвет+глубину сцены,
-//  реконструирует мировые позиции/нормали из глубины, маршит отражённый
-//  луч по экрану (растущий шаг + бинарное уточнение). Промах — кубомап
-//  неба (renderer_refl_cubemap), гейтится мокротой и маской рельефа
-//  (terrain_wetness_mask). Результат — сцена+отражение в своём FBO.
+//  Post pass AFTER the scene, BEFORE bloom/fog: reads scene color+depth,
+//  reconstructs world positions/normals from depth, marches the reflected
+//  ray across the screen (growing step + binary refinement). On a miss — the
+//  sky cubemap (renderer_refl_cubemap), gated by wetness and the terrain mask
+//  (terrain_wetness_mask). Result — scene+reflection in its own FBO.
 // ============================================================================
 #include "ssr.h"
 
@@ -19,7 +19,7 @@
 
 #include <stddef.h>
 
-static SsrParams *s_ssr_p = NULL;   // для hot-reload (shader_on_reshade)
+static SsrParams *s_ssr_p = NULL;   // for hot-reload (shader_on_reshade)
 static void ssr_prog_init(SsrParams *s);
 static void ssr_reshade(void);
 
@@ -138,7 +138,7 @@ void ssr_resize(SsrParams *s, int vw, int vh)
     make_target(&s->fbo[0], &s->tex[0], vw, vh);
     make_target(&s->fbo[1], &s->tex[1], vw, vh);
     s->cur = s->last = 0;
-    s->frames = 0;   // темпоральная история сброшена — мерцания старта нет
+    s->frames = 0;   // temporal history reset — no startup flicker
 }
 
 void ssr_render(SsrParams *s, GLuint scene_tex, GLuint scene_depth,
@@ -146,24 +146,24 @@ void ssr_render(SsrParams *s, GLuint scene_tex, GLuint scene_depth,
 {
     if (!s->fbo[0]) return;
     float strength = cvar_get("r_ssr_strength");
-    if (strength > 1.0f) strength = 1.0f;   // config.cfg мог задать >1 без зажима
+    if (strength > 1.0f) strength = 1.0f;   // config.cfg could set >1 without clamping
     float wet = rc->wetness > cvar_get("r_ssr_wet") ? rc->wetness
                                                     : cvar_get("r_ssr_wet");
     if (cvar_get("r_ssr") < 0.5f || strength <= 0.0f || wet <= 0.001f)
-        return;   // SSR выключен / сухо — используем сцену как есть
+        return;   // SSR off / dry — use the scene as is
 
     float invvp[16];
     mat4_invert(invvp, rc->viewproj);
     const WorldState *w = &game_instance()->world;
     int wetmask = cvar_get("r_ssr_mask") > 0.5f && terrain_wetness_mask_have();
-    // Темпоральное сглаживание: смешиваем текущий кадр с результатом кадра
-    // назад (uPrev) — марш по экрану дискретен, поэтому без этого шага
-    // отражение «дрожит» на каждом пикселе. uBlend=0 на первом кадре
-    // (история ещё мусор) и после ресайза (s->frames==0).
+    // Temporal smoothing: blend the current frame with the result one frame
+    // back (uPrev) — the screen-space march is discrete, so without this step
+    // the reflection "jitters" on every pixel. uBlend=0 on the first frame
+    // (history is still garbage) and after a resize (s->frames==0).
     float blend = cvar_get("r_ssr_temporal");
     if (blend > 0.95f) blend = 0.95f;
     if (s->frames == 0) blend = 0.0f;
-    int cur = s->cur ^ 1;           // ping-pong: пишем в другой буфер
+    int cur = s->cur ^ 1;           // ping-pong: write into the other buffer
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -179,22 +179,30 @@ void ssr_render(SsrParams *s, GLuint scene_tex, GLuint scene_depth,
     glUniform1i(s->u_depth, 1);
     glActiveTexture(GL_TEXTURE2);
     GLuint cube = renderer_refl_cubemap();
-    glBindTexture(GL_TEXTURE_CUBE_MAP, cube ? cube : scene_tex);
+    // renderer always creates a cubemap at init (renderer.c:213-222 — from
+    // cubemaps/ files, else a solid-color one), so in practice `cube` is never 0
+    // (measured: cube=48 on map1). The old fallback still bound the 2D scene
+    // texture to GL_TEXTURE_CUBE_MAP, which is INVALID_OPERATION — a texture
+    // cannot be bound to a target it was not created for. If the cubemap ever
+    // goes away, binding nothing is the honest fallback: the samplerCube reads
+    // (0,0,0,1), so a puddle reflects a dark sky instead of the driver rejecting
+    // the pass.
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
     glUniform1i(s->u_cube, 2);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, wetmask ? terrain_wetness_mask_tex() : scene_depth);
     glUniform1i(s->u_wetmask, 3);
-    glActiveTexture(GL_TEXTURE4);                    // прошлый кадр (антимерцание)
-    glBindTexture(GL_TEXTURE_2D, s->tex[s->cur]);    // cur ещё не писали — читаем старый
+    glActiveTexture(GL_TEXTURE4);                    // previous frame (anti-flicker)
+    glBindTexture(GL_TEXTURE_2D, s->tex[s->cur]);    // cur not written yet — read the old one
     glUniform1i(s->u_prev, 4);
     glUniformMatrix4fv(s->u_viewproj, 1, GL_FALSE, rc->viewproj);
     glUniformMatrix4fv(s->u_invviewproj, 1, GL_FALSE, invvp);
-    // viewproj прошлого кадра для репроекции (антимерцание); на первом кадре
-    // — текущий (uBlend всё равно 0)
+    // viewproj of the previous frame for reprojection (anti-flicker); on the first
+    // frame — the current one (uBlend is 0 anyway)
     glUniformMatrix4fv(s->u_prevviewproj, 1, GL_FALSE,
                        s->have_prev ? s->prev_vp : rc->viewproj);
-    // Позиция ВИДОВОЙ камеры (совпадает с viewproj, из которого ssr.fs
-    // восстанавливает мировые точки): в 3-м лице это камера за персонажем.
+    // Position of the VIEW camera (matches viewproj, from which ssr.fs
+    // recovers world points): in 3rd person this is the camera behind the character.
     glUniform3f(s->u_campos, rc->view_pos[0], rc->view_pos[1], rc->view_pos[2]);
     glUniform2f(s->u_texel, 1.0f / (float)s->vw, 1.0f / (float)s->vh);
     glUniform2f(s->u_worldsize, w->world_w, w->world_d);
@@ -220,7 +228,7 @@ void ssr_render(SsrParams *s, GLuint scene_tex, GLuint scene_depth,
 
 GLuint ssr_tex(const SsrParams *s)
 {
-    return s->tex[s->cur];   // последний записанный кадр
+    return s->tex[s->cur];   // the most recently written frame
 }
 
 void ssr_cleanup(SsrParams *s)

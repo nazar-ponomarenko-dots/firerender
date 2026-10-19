@@ -1,30 +1,30 @@
 // ============================================================================
-//  Mesh — фрагментный шейдер статичного меша (.obj prop_static)
+//  Mesh — fragment shader for the static mesh (.obj prop_static)
 // ----------------------------------------------------------------------------
-//  Как object.fs, но нормаль — НАСТОЯЩАЯ вершинная, поэтому полноценный
-//  Ламбертов диффуз + лёгкий спекуляр. Тени CSM, туман, tint — как у объектов.
+//  Like object.fs, but the normal is a REAL vertex normal, so full
+//  Lambertian diffuse + light specular. CSM shadows, fog, tint — same as objects.
 // ============================================================================
 
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
-in float vSnow;               // per-vertex "открыто небу сверху" (из aSnow)
+in float vSnow;               // per-vertex "open to the sky from above" (from aSnow)
 
 uniform sampler2D uTex;
 uniform vec3 uCamPos;
 uniform vec3 uTint;
 uniform int uBlend;
 uniform float uAlpha;
-uniform float uSpecular;       // сила спекуляра (0 = матовый)
-uniform float uWetness;        // мокрость 0..1 (fx.c)
-// Кубомап отражений воды (юнит 9, scene_uniforms_bind): мокрые меши
-// (GLB-модели, ящики) глянцуют и отражают окружение.
+uniform float uSpecular;       // specular strength (0 = matte)
+uniform float uWetness;        // wetness 0..1 (fx.c)
+// Water reflection cubemap (unit 9, scene_uniforms_bind): wet meshes
+// (GLB models, crates) get gloss and reflect the environment.
 uniform samplerCube uReflection;
-// Шум мокрости (img/noise.png, юнит 11): пятна "мокрее / почти сухо"
+// Wetness noise (img/noise.png, unit 11): patches "wetter / almost dry"
 uniform sampler2D uNoise;
 
-// Снежный покров: общий блок snow.glsl. uSnowCover/uSnowMask/uWorldSize
-// шлёт scene_uniforms_bind (маска unit 8); uNoise уже объявлен выше.
+// Snow cover: shared snow.glsl block. uSnowCover/uSnowMask/uWorldSize
+// come from scene_uniforms_bind (mask unit 8); uNoise is already declared above.
 uniform float uSnowCover;
 uniform sampler2D uSnowMask;
 uniform vec2 uWorldSize;
@@ -52,9 +52,9 @@ uniform int uSpotCount;
 uniform vec3 uAmbient;
 uniform vec3 uSkyColor;
 uniform vec3 uGroundColor;
-uniform vec3 uProbeAmb;          // запечённый ambient в точке меша (с переотражениями)
-uniform float uProbeSun;         // запечённая видимость солнца (0..1) от статичных преград
-uniform float uProbeOn;          // 1 = использовать запечённый свет
+uniform vec3 uProbeAmb;          // baked ambient at the mesh point (with bounce light)
+uniform float uProbeSun;         // baked sun visibility (0..1) against static occluders
+uniform float uProbeOn;          // 1 = use baked light
 uniform vec3 uFogColor;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -87,8 +87,8 @@ float sample_cascade(vec3 wp, int c) {
     return cascade_tap(uShadowMap3, uShadowBias[3], suv);
 }
 
-// границы каскадов — uShadowBox[4]: РАДИУС покрытия каскада (половина
-// стороны бокса; бокс центрирован на камере) = {4,8,48,256}.
+// cascade bounds — uShadowBox[4]: CASCADE COVERAGE RADIUS (half the box
+// side; the box is centered on the camera) = {4,8,48,256}.
 uniform float uShadowBox[4];
 
 float mesh_shadow(vec3 wp) {
@@ -118,24 +118,25 @@ void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vWorldPos);
     float wet = clamp(uWetness, 0.0, 1.0);
-    // Неоднородность мокрости: img/noise.png — мелкие пятна (тексель шума
-    // ≈ 6 м / 1.25 м), где-то мокро сильнее, где-то почти сухо.
+    // Wetness variation: img/noise.png — small patches (noise texel
+    // ≈ 6 m / 1.25 m), wet in some spots, almost dry in others.
     float noise = texture(uNoise, vWorldPos.xz / 1600.0).r * 0.7
                 + texture(uNoise, vWorldPos.xz / 320.0 + 0.6311).r * 0.3;
     wet *= mix(0.05, 1.8, noise * noise);
     c.rgb = mix(c.rgb, c.rgb * 0.6, wet * 0.7);
 
-    // двухсторонняя геометрия: переворачиваем нормаль к камере, чтобы
-    // внутренние грани (и дубли вершин без нормалей) не выглаживались в тьму
+    // two-sided geometry: flip the normal toward the camera so inner
+    // faces (and vertex duplicates without normals) are not shaded to black
     if (dot(N, V) < 0.0) N = -N;
 
-    // Снег на мешах/GLB. Мировая маска "видимость неба" не знает glb-модели
-    // (над машиной показывает "открыто"), поэтому сам снег гейтим двумя
-    // факторами: (1) vSnow — per-vertex "открыто небу сверху", посчитанный
-    // на загрузке луком строго вверх по геометрии модели. Крыша/капот/
-    // багажник — vSnow=1 (сверху чисто), пол/сиденья под крышей — vSnow=0.
-    // (2) up — только верх-ориентированные грани (N.y). Салон так не белеет.
-    {   // используем нормаль ДО переворота, т.к. vSnow уже отвечает за внутренности
+    // Snow on meshes/GLB. The world "sky visibility" mask does not know glb
+    // models (over a car it reports "open"), so the snow itself is gated by
+    // two factors: (1) vSnow — per-vertex "open to the sky from above",
+    // computed at load by raycasting straight up against the model geometry.
+    // Roof/hood/trunk — vSnow=1 (clearly from above), floor/seats under the
+    // roof — vSnow=0. (2) up — only up-facing faces (N.y). The interior does
+    // not whiten this way.
+    {   // use the normal BEFORE the flip, since vSnow already handles the interior
         float n_up = normalize(vNormal).y;
         float up = smoothstep(0.20, 0.52, n_up);
         float a = snow_amount(vWorldPos, up) * vSnow;
@@ -143,8 +144,8 @@ void main() {
     }
 
     vec3 amb = mix(uGroundColor, uSkyColor, N.y * 0.5 + 0.5) * uAmbient;
-    // запечённый свет: берём ambient из бейка (переотражения+AO), но сохраняем
-    // лёгкую полусферную направленность по нормали (верх чуть светлее низа).
+    // baked light: take ambient from the bake (bounce light + AO), but keep a
+    // slight hemispherical directionality from the normal (top a bit brighter than bottom).
     if (uProbeOn > 0.5) amb = uProbeAmb * (0.7 + 0.3 * (N.y * 0.5 + 0.5));
     float shadow = mesh_shadow(vWorldPos);
     float sunvis = (uProbeOn > 0.5) ? uProbeSun : 1.0;
@@ -154,14 +155,14 @@ void main() {
     for (int i = 0; i < uLightCount; i++) {
         vec3 L = normalize(-uLightDir[i]);
         float raw = dot(N, L);
-        // Солнце: мягкий терминатор (half-lambert) — переход свет/тень
-        // плавный, не режет силуэт жёстким чёрным срезом.
+        // Sun: soft terminator (half-lambert) — the light/shadow transition
+        // is smooth and does not cut the silhouette with a hard black edge.
         float half_ = raw * 0.5 + 0.5;
         float d = smoothstep(0.08, 1.0, half_) * (0.55 + 0.45 * max(raw, 0.0));
         float sh = (i == 0) ? shadow * sunvis : 1.0;
         light += uLightColor[i] * uLightIntensity[i] * d * sh;
         if (uSpecular > 0.001) {
-            // Двухступенчатый блик: узкий острый + мягкая широкая часть.
+            // Two-step highlight: narrow sharp + soft wide part.
             vec3 H = normalize(L + V);
             float ndh = max(dot(N, H), 0.0);
             spec += uLightColor[i] * uLightIntensity[i] * sh
@@ -191,7 +192,7 @@ void main() {
     light = min(light, vec3(1.0));
     vec3 col = c.rgb * uTint * light + spec * uSpecular;
 
-    // мокрость: добавить спекулярный блик на влажных поверхностях
+    // wetness: add a specular highlight on wet surfaces
     if (wet > 0.0 && uSpecular > 0.001) {
         float wet_spec = wet * uSpecular * 2.0;
         for (int i = 0; i < uLightCount; i++) {
@@ -202,7 +203,7 @@ void main() {
         }
     }
 
-    // мокрый глянец: кубомап отражений (растёт с мокротой и гляным углом)
+    // wet gloss: reflection cubemap (grows with wetness and grazing angle)
     if (wet > 0.001) {
         vec3 reflDir = reflect(-V, N);
         vec3 reflCol = texture(uReflection, reflDir).rgb;
@@ -211,7 +212,7 @@ void main() {
     }
 
     float dist = distance(uCamPos, vWorldPos);
-    // Rim: тонкая светлая кромка неба на силуэте (скользящие грани).
+    // Rim: thin bright sky edge on the silhouette (grazing faces).
     float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0);
     col += rim * uSkyColor * uAmbient * 0.30;
     if (uFogOn > 0.5) {

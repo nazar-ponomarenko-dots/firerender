@@ -1,12 +1,12 @@
 // ============================================================================
-//  PostFX — общий вершинный шейдер постобработки
+//  PostFX — shared vertex shader for post-processing
 // ----------------------------------------------------------------------------
-//  Полноэкранный треугольник: один draw с 3 вершинами покрывает весь экран
-//  (классический fullscreen quad-трюк). Позиции в NDC, uv сквозные.
+//  Fullscreen triangle: a single draw with 3 vertices covers the whole screen
+//  (the classic fullscreen quad trick). Positions in NDC, uv pass-through.
 // ============================================================================
 
 layout (location = 0) in vec2 aPos;   // NDC
-layout (location = 1) in vec2 aUV;    // uv текстуры
+layout (location = 1) in vec2 aUV;    // texture uv
 
 out vec2 vUV;
 

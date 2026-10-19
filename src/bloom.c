@@ -1,9 +1,9 @@
 // ============================================================================
-//  bloom.c — постобработка glow (bloom)
+//  bloom.c — glow postprocessing (bloom)
 // ----------------------------------------------------------------------------
-//  Пайплайн: сцена (FBO) -> bright (половинное разрешение) -> гаусс H -> V
-//  -> композит на экран. Сцена LDR (8 бит), поэтому порог яркости мягкий —
-//  светятся самые яркие участки (небо, колосья против солнца).
+//  Pipeline: scene (FBO) -> bright (half resolution) -> Gaussian H -> V
+//  -> composite to screen. The scene is LDR (8-bit), so the brightness threshold
+//  is soft — the brightest spots glow (sky, ears of grain against the sun).
 // ============================================================================
 #include "bloom.h"
 
@@ -15,13 +15,13 @@
 
 #include <stddef.h>
 
-static BloomParams *s_bloom_p = NULL;   // для hot-reload (shader_on_reshade)
-static void bloom_prog_init(BloomParams *b);   // uniform'ы (id уже готовы)
-static void bloom_reshade(void);               // ниже: replace + prog_init
+static BloomParams *s_bloom_p = NULL;   // for hot-reload (shader_on_reshade)
+static void bloom_prog_init(BloomParams *b);   // uniforms (ids already ready)
+static void bloom_reshade(void);               // below: replace + prog_init
 
-// --- Подводные эффекты (передаются в композит) ---------------------------------
-// renderer обновляет состояние каждый кадр (плавный вход/выход из воды);
-// bloom_render шлёт их в uniform'ы композита.
+// --- Underwater effects (passed into the composite) ---------------------------
+// The renderer updates the state every frame (smooth water entry/exit);
+// bloom_render forwards it to the composite uniforms.
 static float s_underwater = 0.0f;
 static float s_water_tint[3] = { 0.08f, 0.22f, 0.30f };
 static float s_under_time = 0.0f;
@@ -44,9 +44,9 @@ void bloom_set_underwater(float amount, const float tint[3], float time)
 
 static GLuint make_scene_tex(int w, int h, int ldr)
 {
-    // ldr (r_scene_ldr): RGBA8 вместо RGBA16F — на картошке нет bloom/GI/
-    // тумана, HDR не нужен, а запись филов и чтение композита — главный
-    // bandwidth на слабых iGPU
+    // ldr (r_scene_ldr): RGBA8 instead of RGBA16F — on low-end there is no bloom/GI/
+    // fog, HDR is unneeded, and writing fragments + reading the composite are the main
+    // bandwidth cost on weak iGPUs
     GLuint id;
     glGenTextures(1, &id);
     glBindTexture(GL_TEXTURE_2D, id);
@@ -65,7 +65,7 @@ static GLuint make_scene_tex(int w, int h, int ldr)
 
 static GLuint make_ldr_tex(int w, int h)
 {
-    // LDR-копия сцены для present-пути картошки: полбанды на запись/чтение
+    // LDR copy of the scene for the low-end present path: half the bandwidth on write/read
     GLuint id;
     glGenTextures(1, &id);
     glBindTexture(GL_TEXTURE_2D, id);
@@ -87,8 +87,8 @@ static GLuint make_color_tex(int w, int h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    // На LDR/GLES glow тоже RGBA8: bloom в low-end профиле выключен, но
-    // валидный таргет нужен для мгновенного переключения без unsupported RT.
+    // On LDR/GLES glow is RGBA8 too: bloom is off in the low-end profile, but
+    // a valid target is still needed for instant toggling without an unsupported RT.
     if (cvar_get("r_scene_ldr") > 0.5f)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -107,8 +107,8 @@ static void make_fbo(GLuint *fbo, GLuint *tex, GLuint *depth,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, *tex, 0);
     if (want_depth) {
-        // Глубина сцены — ТЕКСТУРА (GL_DEPTH_COMPONENT24), чтобы 3D-сцена
-        // тестировалась на глубину. Фильтр NEAREST — без сравнения.
+        // Scene depth as a TEXTURE (GL_DEPTH_COMPONENT24) so the 3D scene
+        // can be depth-tested against it. NEAREST filter — no comparison.
         glGenTextures(1, depth);
         glBindTexture(GL_TEXTURE_2D, *depth);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -125,8 +125,8 @@ static void make_fbo(GLuint *fbo, GLuint *tex, GLuint *depth,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// Проги создаются СНАРУЖИ (bloom_init / reshade: refcount там).
-// Здесь — только uniform'ы для ТЕКУЩИХ id.
+// Programs are created OUTSIDE (bloom_init / reshade: refcount lives there).
+// Here — only uniforms for the CURRENT ids.
 static void bloom_prog_init(BloomParams *b)
 {
     b->u_btex      = glGetUniformLocation(b->prog_bright, "uTex");
@@ -148,8 +148,8 @@ static void bloom_prog_init(BloomParams *b)
     b->u_time       = glGetUniformLocation(b->prog_composite, "uTime");
 }
 
-// Hot-reload: replace балансирует refcount (release старой + новая ссылка);
-// если пара не собралась — остаётся прежний id.
+// Hot-reload: replace balances the refcount (release old + new reference);
+// if the pair fails to link — the previous id stays.
 static void bloom_reshade(void)
 {
     BloomParams *b = s_bloom_p;
@@ -169,12 +169,12 @@ static void bloom_reshade(void)
     bloom_prog_init(b);
 }
 
-// --- MSAA сцены -------------------------------------------------------------
-// Сцена рисуется в мультисэмпл-FBO (RBO цвет+глубина, cvar r_msaa: 0/2/4/8/16),
-// затем bloom_resolve разворачивает его в обычные текстуры (цвет + глубина),
-// которые читают GI/SSR/туман/композит. Кромки геометрии сглаживаются
-// аппаратно, глубина для пост-эффектов остаётся резкой.
-// Смена r_msaa применяется в начале кадра (bloom_msaa_sync) — без перезапуска.
+// --- Scene MSAA -------------------------------------------------------------
+// The scene is drawn into a multisample FBO (RBO color+depth, cvar r_msaa: 0/2/4/8/16),
+// then bloom_resolve expands it into plain textures (color + depth)
+// that GI/SSR/fog/composite read. Geometry edges are smoothed
+// in hardware, while depth for post effects stays crisp.
+// Changing r_msaa applies at the start of the frame (bloom_msaa_sync) — no restart needed.
 
 static void msaa_free(BloomParams *b)
 {
@@ -187,9 +187,9 @@ static void msaa_free(BloomParams *b)
     b->msaa = 0;
 }
 
-// Желаемые сэмплы из cvar'а: только 0/4/16 (промежуточные modes убраны —
-// разница 2x/4x и 8x/16x на экране слабая, а цена заметная).
-// Активен ли MSAA-таргет сцены (для alpha-to-coverage на вырезанных краях).
+// Desired sample count from the cvar: only 0/4/16 (intermediate modes removed —
+// the 2x/4x and 8x/16x difference on screen is weak while the cost is noticeable).
+// Whether the scene MSAA target is active (for alpha-to-coverage on clipped edges).
 int bloom_msaa_active(void)
 {
     return s_bloom_p ? s_bloom_p->msaa : 0;
@@ -197,19 +197,20 @@ int bloom_msaa_active(void)
 
 static int msaa_wanted(void)
 {
-    // ПРИМ.: раньше при RGBA8-сцене (r_scene_ldr, «упрощённый»/КАРТОШКА) MSAA
-    // принудительно выключался — из-за этого кнопка «Сглаживание» в меню на
-    // КАРТОШКЕ не делала НИЧЕГО (Выкл=4x=16x по фпс). MSAA работает и с LDR:
-    // мультисэмпл-буфер RGBA16F разворачивается блитом в RGBA8-текстуру сцены
-    // (bloom_resolve вызывается каждый кадр, present читает уже развёрнутое).
-    // Оставляем выбор игроку: по умолчанию r_msaa=0 — картошка быстрая, но
-    // включённый 4x/16x теперь честно применяется (и честно стоит bandwidth).
+    // NOTE: previously, with an RGBA8 scene (r_scene_ldr, low-end preset) MSAA
+    // was force-disabled — which made the menu "antialiasing" button do NOTHING
+    // on the low-end preset (Off=4x=16x identical fps). MSAA works with LDR too:
+    // the multisample buffer is then allocated as RGBA8, the same format as the
+    // scene texture, so the resolve blit stays legal (see msaa_create) — and
+    // bloom_resolve runs every frame, present reads the already-resolved one.
+    // The choice is left to the player: r_msaa defaults to 0 — low-end stays fast, but
+    // enabled 4x/16x now applies honestly (and honestly costs bandwidth).
     static const int allowed[] = { 0, 4, 16 };
     float v = cvar_get("r_msaa");
     int s = (int)(v + 0.5f);
     if (s < 0) s = 0;
     if (s > 16) s = 16;
-    // ближайшее допустимое снизу
+    // nearest allowed value from below
     int best = 0;
     for (unsigned i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
         if (allowed[i] <= s) best = allowed[i];
@@ -222,13 +223,13 @@ static int msaa_wanted(void)
             for (unsigned i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
                 if (allowed[i] <= s && allowed[i] <= maxs) best = allowed[i];
         }
-        // Кэп по разрешению окна: на 4К 8-16 сэмплов — это десятки мс
-        // чистого bandwidth, а разница с 4x на такой плотности пикселей
-        // на глаз отсутствует
+        // Window-resolution cap: at 4K, 8-16 samples mean tens of ms
+        // of pure bandwidth, and the difference vs 4x at that pixel density
+        // is invisible to the eye
         extern int renderer_vw(void);
         extern int renderer_vh(void);
         long px = (long)renderer_vw() * renderer_vh();
-        if (px > 6500000 && best > 4) best = 4;    // ~4К и выше
+        if (px > 6500000 && best > 4) best = 4;    // ~4K and above
         else if (px > 3300000 && best > 8) best = 8; // ~1440p
     }
     return best;
@@ -242,8 +243,15 @@ static void msaa_create(BloomParams *b, int samples)
     glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_ms);
     glGenRenderbuffers(1, &b->rbo_color);
     glBindRenderbuffer(GL_RENDERBUFFER, b->rbo_color);
-    // RGBA16F — как у обычной сцены: HDR сохраняется до тонмаппинга
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA16F,
+    // Same internal format as the resolve target (b->tex). When SAMPLE_BUFFERS of
+    // the read framebuffer is > 0, glBlitFramebuffer requires IDENTICAL formats
+    // (GL ES 3.x and desktop GL 4.x: "the formats of read and draw are not
+    // identical" -> INVALID_OPERATION and the blit is dropped). NVIDIA 4.5 core
+    // tolerates RGBA16F->RGBA8 here (measured: no error, AA visible), a conforming
+    // GLES driver (Adreno/Mali) drops the resolve -> the scene stays black/stale.
+    // So LDR (r_scene_ldr) multisamples as RGBA8, HDR as RGBA16F.
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples,
+                                     b->scene_ldr ? GL_RGBA8 : GL_RGBA16F,
                                      b->vw, b->vh);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_RENDERBUFFER, b->rbo_color);
@@ -254,9 +262,9 @@ static void msaa_create(BloomParams *b, int samples)
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                               GL_RENDERBUFFER, b->rbo_depth);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        // Драйвер не даёт мультисэмпл-RGBA16F — честный фолбэк без MSAA.
-        // Запоминаем комбинацию, иначе sync пересоздавал этот FBO каждый кадр.
-        SDL_Log("MSAA %dx: FBO incomplete, выключаю (без сглаживания)", samples);
+        // The driver won't provide multisampled RGBA16F — honest fallback without MSAA.
+        // Remember the combination, otherwise sync would recreate this FBO every frame.
+        SDL_Log("MSAA %dx: FBO incomplete, disabling (no antialiasing)", samples);
         b->msaa_failed = samples;
         b->msaa_failed_ldr = b->scene_ldr;
         msaa_free(b);
@@ -277,24 +285,24 @@ void bloom_msaa_sync(BloomParams *b)
 
 void bloom_resolve(BloomParams *b, int want_depth)
 {
-    // Без MSAA единственная работа — копия глубины RBO->текстура. Если её
-    // никто не читает (КАРТОШКА: GI/SSR/voxfog выкл), пропускаем весь blit.
+    // Without MSAA the only job is the RBO->texture depth copy. If nobody
+    // reads it (low-end: GI/SSR/voxfog off), skip the whole blit.
     if (!b->msaa && (!b->rbo_depth_nm || !want_depth)) return;
     GLint readf = 0, drawf = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readf);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawf);
     GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-    glDisable(GL_SCISSOR_TEST);            // blit уважает ножницы — гасим
+    glDisable(GL_SCISSOR_TEST);            // blit respects the scissor — disable it
     if (b->msaa) {
-        // Цвет + глубина: пост-эффекты (GI/SSR/туман) читают развёрнутую
+        // Color + depth: post effects (GI/SSR/fog) read the resolved
         glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo_ms);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo_res);
         glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, b->vw, b->vh,
                           GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
                           GL_NEAREST);
     } else {
-        // Без MSAA цвет уже в текстуре; глубину копируем из RBO в текстуру
-        // (рендер в depth-текстуру отключает HiZ — см. bloom_resize).
+        // Without MSAA the color is already in a texture; copy depth from RBO to texture
+        // (rendering into a depth texture disables HiZ — see bloom_resize).
         glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo_res);
         glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, b->vw, b->vh,
@@ -308,9 +316,9 @@ void bloom_resolve(BloomParams *b, int want_depth)
 void bloom_init(BloomParams *b, int vw, int vh)
 {
     s_bloom_p = b;
-    // Параметры постобработки — из map/map.json (bloom = { ... }), как
-    // значения по умолчанию cvar'ов: меню «Графика» и консоль правят ими
-    // вживую (применяются в bloom_render каждый кадр).
+    // Postprocessing parameters — from map/map.json (bloom = { ... }), like
+    // cvar defaults: the "Graphics" menu and console edit them
+    // live (applied in bloom_render every frame).
     MapBloom bc;
     mapdata_bloom(&bc);
     cvar_register("r_bloom", 1.0f, "свечение (bloom) вкл/выкл");
@@ -326,7 +334,7 @@ void bloom_init(BloomParams *b, int vw, int vh)
     b->threshold = bc.threshold;
     b->intensity = bc.intensity;
     b->strength  = bc.strength;
-    // Программы постобработки (replace: old==0 после cleanup => plain-загрузка)
+    // Postprocessing programs (replace: old==0 after cleanup => plain load)
     b->prog_bright = resources_program_replace(b->prog_bright,
                                                "shaders/postfx.vs",
                                                "shaders/bright.fs");
@@ -336,11 +344,11 @@ void bloom_init(BloomParams *b, int vw, int vh)
     b->prog_composite = resources_program_replace(b->prog_composite,
                                                   "shaders/postfx.vs",
                                                   "shaders/composite.fs");
-    bloom_prog_init(b);    // uniform'ы (для hot-reload)
+    bloom_prog_init(b);    // uniforms (for hot-reload)
 
     shader_on_reshade(bloom_reshade);
 
-    // Полноэкранный треугольник: 3 вершины покрывают весь экран
+    // Fullscreen triangle: 3 vertices cover the whole screen
     glGenVertexArrays(1, &b->vao);
     glBindVertexArray(b->vao);
     glGenBuffers(1, &b->vbo);
@@ -389,7 +397,7 @@ void bloom_resize(BloomParams *b, int vw, int vh)
         glDeleteTextures(1, &b->tex_ldr);
     }
     b->scene_ldr = cvar_get("r_scene_ldr") > 0.5f;
-    // Цвет сцены: RGBA16F (HDR) или RGBA8 (картошка — HDR некому)
+    // Scene color: RGBA16F (HDR) or RGBA8 (low-end — nobody needs HDR)
     b->tex = make_scene_tex(vw, vh, b->scene_ldr);
     glGenFramebuffers(1, &b->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, b->fbo);
@@ -403,11 +411,11 @@ void bloom_resize(BloomParams *b, int vw, int vh)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, vw, vh, 0,
                  GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
-    // Глубину сцены храним в RBO, а не текстурой-аттачментом: рендер в
-    // depth-текстуру лишает драйвер HiZ-оптимизаций, и перерисовка травы
-    // (гигантский overdraw с discard) замедлялась ВТРОЕ (4.4 -> 1.5 мс
-    // при 1080p). RBO — fast path; для пост-эффектов (GI/SSR/туман)
-    // глубина копируется в текстуру одним blit в bloom_resolve.
+    // Store scene depth in an RBO rather than a texture attachment: rendering
+    // into a depth texture strips the driver of HiZ optimizations, and grass
+    // redraw (giant overdraw with discard) slowed THREEFOLD (4.4 -> 1.5 ms
+    // at 1080p). RBO is the fast path; for post effects (GI/SSR/fog)
+    // depth is copied into a texture with a single blit in bloom_resolve.
     glGenRenderbuffers(1, &b->rbo_depth_nm);
     glBindRenderbuffer(GL_RENDERBUFFER, b->rbo_depth_nm);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, vw, vh);
@@ -415,8 +423,8 @@ void bloom_resize(BloomParams *b, int vw, int vh)
                               GL_RENDERBUFFER, b->rbo_depth_nm);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         SDL_Log("Bloom FBO incomplete (%dx%d)!", vw, vh);
-    // Resolve-FBO: та же цветовая текстура + depth-текстура — сюда blit'ится
-    // глубина (и цвет MSAA-развёртки) перед пост-проходами.
+    // Resolve-FBO: same color texture + depth texture — depth (and the MSAA color
+    // resolve) is blitted here before the post passes.
     glGenFramebuffers(1, &b->fbo_res);
     glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_res);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -424,8 +432,8 @@ void bloom_resize(BloomParams *b, int vw, int vh)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_TEXTURE_2D, b->depth, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    // LDR-копия для present: композит (grade) рисуется в масштабе сцены,
-    // на экран — аппаратный blit (дешевле шейдерного фуллскрина)
+    // LDR copy for present: the composite (grade) renders at scene scale,
+    // to screen — a hardware blit (cheaper than a shader fullscreen pass)
     glGenFramebuffers(1, &b->fbo_ldr);
     glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_ldr);
     b->tex_ldr = make_ldr_tex(vw, vh);
@@ -434,7 +442,7 @@ void bloom_resize(BloomParams *b, int vw, int vh)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     make_fbo(&b->fbo_glow[0], &b->tex_glow[0], NULL, gw, gh, 0);
     make_fbo(&b->fbo_glow[1], &b->tex_glow[1], NULL, gw, gh, 0);
-    // MSAA-таргет под новый размер (или под сменившийся r_msaa)
+    // MSAA target for the new size (or for a changed r_msaa)
     msaa_create(b, msaa_wanted());
 }
 
@@ -457,20 +465,20 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
                   int out_w, int out_h)
 {
     if (!b->fbo) return;
-    // Настройки из cvar'ов (меню/консоль): применяются каждый кадр.
-    // r_bloom = 0 — bloom выключен: яркие пиксели и блюр НЕ считаются,
-    // рисуется только композит (сцена как есть, strength = 0).
+    // Settings from cvars (menu/console): applied every frame.
+    // r_bloom = 0 — bloom off: bright pixels and blur are NOT computed,
+    // only the composite is drawn (scene as-is, strength = 0).
     b->threshold = cvar_get("r_bloom_threshold");
     b->intensity = cvar_get("r_bloom_intensity");
     float strength = cvar_get("r_bloom_strength");
     if (cvar_get("r_bloom") < 0.5f) strength = 0.0f;
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glDisable(GL_BLEND);   // HUD мог оставить блендинг — постобработка пишет начисто
+    glDisable(GL_BLEND);   // the HUD may have left blending on — postprocessing writes fresh
     glBindVertexArray(b->vao);
 
     if (strength > 0.0f) {
-        // 1) яркие пиксели сцены -> glow0 (половинное разрешение)
+        // 1) bright scene pixels -> glow0 (half resolution)
         glBindFramebuffer(GL_FRAMEBUFFER, b->fbo_glow[0]);
         glViewport(0, 0, b->gw, b->gh);
         glUseProgram(b->prog_bright);
@@ -481,7 +489,7 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
         glUniform1f(b->u_intensity, b->intensity);
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        // 2) гаусс: H (glow0 -> glow1), V (glow1 -> glow0)
+        // 2) Gaussian: H (glow0 -> glow1), V (glow1 -> glow0)
         glUseProgram(b->prog_blur);
         glUniform1i(b->u_blurtex, 0);
         glUniform2f(b->u_texel, 1.0f / b->gw, 1.0f / b->gh);
@@ -495,12 +503,12 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    // 3) композит: сцена + glow в целевой FBO (0 = экран, иначе — FBO тумана).
-    // При strength <= 0 (bloom выключен) glow умножается на ноль — проход
-    // служит копией сцены на экран (один квад вместо четырёх).
+    // 3) composite: scene + glow into the target FBO (0 = screen, otherwise — the fog FBO).
+    // With strength <= 0 (bloom off) glow is multiplied by zero — the pass
+    // acts as a copy of the scene to screen (one quad instead of four).
     glBindFramebuffer(GL_FRAMEBUFFER, target_fbo);
-    // Размер ЦЕЛИ: экран нативен (апскейл сцены r_render_scale тут),
-    // fbo тумана — в масштабе сцены. b->vw тут был бы углом на экране.
+    // Size of the TARGET: the screen is native (scene upscale r_render_scale happens here),
+    // the fog fbo — in scene scale. b->vw here would be wrong on screen.
     glViewport(0, 0, out_w, out_h);
     glUseProgram(b->prog_composite);
     glActiveTexture(GL_TEXTURE0);
@@ -510,20 +518,20 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
     glBindTexture(GL_TEXTURE_2D, b->tex_glow[0]);
     glUniform1i(b->u_glowtex, 1);
     glUniform1f(b->u_strength, strength);
-    // Экспозиция HDR — из cvar'а r_exposure
+    // HDR exposure — from cvar r_exposure
     if (b->u_exposure >= 0)
         glUniform1f(b->u_exposure, cvar_get("r_exposure"));
-    // Гамма и цвето-коррекция (каждый кадр, из cvar'ов)
+    // Gamma and color correction (every frame, from cvars)
     if (b->u_gamma >= 0)
         glUniform1f(b->u_gamma, cvar_get("r_gamma"));
     if (b->u_sat >= 0)
         glUniform1f(b->u_sat, cvar_get("r_saturation"));
     if (b->u_contrast >= 0)
         glUniform1f(b->u_contrast, cvar_get("r_contrast"));
-    // Мокрота (дождь): в композите снижает цветастость
+    // Wetness (rain): lowers saturation in the composite
     if (b->u_wetness >= 0)
         glUniform1f(b->u_wetness, fx_wetness());
-    // Подводные эффекты (renderer обновляет состояние в bloom_set_underwater)
+    // Underwater effects (the renderer updates the state via bloom_set_underwater)
     if (b->u_underwater >= 0) {
         glUniform1f(b->u_underwater, s_underwater);
         glUniform3f(b->u_watertint, s_water_tint[0], s_water_tint[1],
@@ -533,9 +541,9 @@ void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
-// Present-путь (нет тумана): grade+тонмаппинг в масштабе сцены в RGBA8,
-// затем аппаратный blit-апскейл на экран — на слабых iGPU шейдерный
-// фуллскрин-апскейл стоит заметно дороже фиксированного blit.
+// Present path (no fog): grade+tonemapping at scene scale into RGBA8,
+// then a hardware blit upscale to screen — on weak iGPUs a shader-based
+// fullscreen upscale costs noticeably more than a fixed blit.
 void bloom_present(BloomParams *b, GLuint scene_tex, int out_w, int out_h)
 {
     if (!b->fbo_ldr) return;
@@ -546,11 +554,11 @@ void bloom_present(BloomParams *b, GLuint scene_tex, int out_w, int out_h)
     glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fbo_ldr);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-    glDisable(GL_SCISSOR_TEST);            // blit уважает ножницы — гасим
+    glDisable(GL_SCISSOR_TEST);            // blit respects the scissor — disable it
     glBlitFramebuffer(0, 0, b->vw, b->vh, 0, 0, out_w, out_h,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     if (scissor) glEnable(GL_SCISSOR_TEST);
-    // HUD/прицел рисуются следом: вернуть viewport ЦЕЛИ (натив) и FBO
+    // HUD/crosshair are drawn next: restore the TARGET viewport (native) and FBO
     glViewport(0, 0, out_w, out_h);
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
 }

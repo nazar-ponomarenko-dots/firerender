@@ -1,18 +1,19 @@
 // ============================================================================
-//  lights.c — кластерное освещение (Forward+): раскладка источников по фрокселям
+//  lights.c — clustered lighting (Forward+): assigning lights to froxels
 // ----------------------------------------------------------------------------
-//  См. lights.h. Раскладка идёт на CPU и стоит O(источники x задетые фроксели):
-//  для сферы влияния считается её экранный прямоугольник (проекция bounding
-//  sphere) и диапазон слоёв глубины — перебираются только они, а не вся сетка.
+//  See lights.h. Assignment runs on the CPU and costs O(lights x touched froxels):
+//  for each influence sphere its screen rectangle (projection of the bounding
+//  sphere) and depth-slice range are computed — only those are iterated, not the
+//  whole grid.
 //
-//  Формат SSBO источника (4 x vec4 = 64 байта, std430):
+//  SSBO light format (4 x vec4 = 64 bytes, std430):
 //    v0 = pos.xyz,   type
 //    v1 = color.rgb, intensity
 //    v2 = dir.xyz,   range
 //    v3.x = radius / half_len, v3.y = cos_outer, v3.z = cos_inner,
-//    v3.w = упакованные полуразмеры площадки (w в целой части, h в дробной)
-//    v4 = up.xyz, size.x  (пятый вектор нужен площадным/трубчатым)
-//  Итого 5 x vec4 = 80 байт на источник.
+//    v3.w = packed rect half-sizes (w in the integer part, h in the fraction)
+//    v4 = up.xyz, size.x  (the fifth vector is needed for rect/tube lights)
+//  Total 5 x vec4 = 80 bytes per light.
 // ============================================================================
 #include "lights.h"
 
@@ -24,29 +25,29 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LIGHT_VEC4 5                       // vec4 на источник в SSBO
+#define LIGHT_VEC4 5                       // vec4 per light in the SSBO
 
 static Light s_lights[LIGHT_MAX];
 static int s_count;
 
-// GPU-буферы: источники, индексы фрокселей, диапазоны (offset,count)
+// GPU buffers: lights, froxel indices, ranges (offset,count)
 static GLuint s_ssbo_lights, s_ssbo_index, s_ssbo_grid;
 static int s_have_ssbo;
 
-// CPU-стейджинг
+// CPU staging
 static float s_gpu_lights[LIGHT_MAX * LIGHT_VEC4 * 4];
 static unsigned int s_grid[CLUSTER_COUNT * 2];         // offset, count
 static unsigned int s_index[CLUSTER_INDEX_MAX];
 static int s_index_n;
 static int s_cluster_max;
 
-// Список источников на фроксель во время сборки (растёт в s_index)
+// Per-froxel light list during assembly (grows into s_index)
 static unsigned short s_bucket[CLUSTER_COUNT][24];
 static unsigned char s_bucket_n[CLUSTER_COUNT];
 
-// Параметры сетки этого кадра (нужны шейдеру)
+// Grid parameters for this frame (needed by the shader)
 static float s_znear = 0.1f, s_zfar = 1000.0f;
-static float s_scale, s_bias;          // log-раскладка слоёв глубины
+static float s_scale, s_bias;          // log distribution of depth slices
 static int s_vw = 1, s_vh = 1;
 
 int lights_count(void) { return s_count; }
@@ -195,9 +196,9 @@ int lights_add_tube(const float pos[3], const float axis[3],
     return lights_add(&l);
 }
 
-// --- Раскладка по фрокселям ----------------------------------------------------
-// Слой глубины: логарифмическая раскладка (как в Doom 2016):
-//   slice = floor(log(z / znear) * scale + bias), z в view-space (метры).
+// --- Assignment to froxels -----------------------------------------------------
+// Depth slices: logarithmic distribution (like Doom 2016):
+//   slice = floor(log(z / znear) * scale + bias), z in view space (meters).
 static int depth_slice(float z)
 {
     if (z <= s_znear) return 0;
@@ -212,7 +213,7 @@ void lights_build(const RendererContext *rc)
     s_index_n = 0;
     s_cluster_max = 0;
     if (!lights_active() || s_count == 0) {
-        // Пустая сетка: шейдер увидит count = 0 и пойдёт по быстрому пути.
+        // Empty grid: the shader sees count = 0 and takes the fast path.
         memset(s_grid, 0, sizeof s_grid);
         if (s_have_ssbo) {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, s_ssbo_grid);
@@ -230,8 +231,8 @@ void lights_build(const RendererContext *rc)
 
     memset(s_bucket_n, 0, sizeof s_bucket_n);
 
-    // Базис вида для перевода мира в view-space (без построения матрицы):
-    // z_view = dot(pos - cam, fwd), x/y — через right/up.
+    // View basis to transform world into view space (without building a matrix):
+    // z_view = dot(pos - cam, fwd), x/y — via right/up.
     const float *cam = rc->view_pos;
     const float *fwd = rc->view_fwd;
     const float *right = rc->view_right;
@@ -241,7 +242,7 @@ void lights_build(const RendererContext *rc)
 
     for (int i = 0; i < s_count; i++) {
         const Light *l = &s_lights[i];
-        // Сфера влияния: центр + радиус (у площадных/трубчатых расширяем).
+        // Influence sphere: center + radius (expanded for rect/tube lights).
         float cx = l->pos[0] - cam[0];
         float cy = l->pos[1] - cam[1];
         float cz = l->pos[2] - cam[2];
@@ -254,19 +255,19 @@ void lights_build(const RendererContext *rc)
         else if (l->type == LT_TUBE)
             r += l->size[0];
 
-        // Полностью за камерой или дальше far — пропуск
+        // Fully behind the camera or beyond far — skip
         if (vz + r < s_znear || vz - r > s_zfar) continue;
 
-        // Диапазон слоёв глубины
+        // Depth slice range
         int z0 = depth_slice(vz - r);
         int z1 = depth_slice(vz + r);
 
-        // Экранный прямоугольник сферы: консервативно через ближнюю точку
+        // Screen rectangle of the sphere: conservatively via the near point
         float zc = vz - r;
         if (zc < s_znear) zc = s_znear;
-        float half_h = tan_half * zc;          // половина высоты фрустума на zc
+        float half_h = tan_half * zc;          // half frustum height at zc
         float half_w = half_h * aspect;
-        // NDC-охват сферы (расширяем радиусом, спроецированным на zc)
+        // NDC extent of the sphere (expanded by the radius projected at zc)
         float px0 = (vx - r) / half_w, px1 = (vx + r) / half_w;
         float py0 = (vy - r) / half_h, py1 = (vy + r) / half_h;
         if (px1 < -1.0f || px0 > 1.0f || py1 < -1.0f || py0 > 1.0f) continue;
@@ -283,12 +284,12 @@ void lights_build(const RendererContext *rc)
             for (int y = ty0; y <= ty1; y++)
                 for (int x = tx0; x <= tx1; x++) {
                     int c = (z * CLUSTER_Y + y) * CLUSTER_X + x;
-                    if (s_bucket_n[c] >= 24) continue;   // фроксель переполнен
+                    if (s_bucket_n[c] >= 24) continue;   // froxel overflowed
                     s_bucket[c][s_bucket_n[c]++] = (unsigned short)i;
                 }
     }
 
-    // Плоские буферы: grid[(offset,count)] + сплошной список индексов
+    // Flat buffers: grid[(offset,count)] + one contiguous index list
     for (int c = 0; c < CLUSTER_COUNT; c++) {
         int n = s_bucket_n[c];
         if (n > s_cluster_max) s_cluster_max = n;
@@ -298,7 +299,7 @@ void lights_build(const RendererContext *rc)
             s_index[s_index_n++] = s_bucket[c][k];
     }
 
-    // Упаковка источников в SSBO
+    // Pack lights into the SSBO
     for (int i = 0; i < s_count; i++) {
         const Light *l = &s_lights[i];
         float *v = &s_gpu_lights[i * LIGHT_VEC4 * 4];
@@ -308,7 +309,7 @@ void lights_build(const RendererContext *rc)
         v[5] = l->color[1] * l->intensity;
         v[6] = l->color[2] * l->intensity;
         v[7] = l->intensity;
-        // Направление нормируем здесь — шейдер получает готовое
+        // Normalize the direction here — the shader gets it ready-made
         float dl = sqrtf(l->dir[0] * l->dir[0] + l->dir[1] * l->dir[1] +
                          l->dir[2] * l->dir[2]);
         if (dl < 1e-5f) dl = 1.0f;
@@ -340,8 +341,8 @@ void lights_build(const RendererContext *rc)
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
-// --- Привязка к программе -------------------------------------------------------
-// Кеш хендлов: у каждой программы свои локации, но набор один и тот же.
+// --- Binding to a program -------------------------------------------------------
+// Handle cache: each program has its own locations, but the same set of them.
 #define LOC_CACHE 32
 static struct {
     GLuint prog;
@@ -382,8 +383,8 @@ void lights_bind(GLuint prog)
     if (s_locs[i].u_on >= 0)
         glUniform1f(s_locs[i].u_on, on ? 1.0f : 0.0f);
     if (!on) return;
-    // SSBO-блоки шейдера -> точки привязки 3/4/5 (0..2 заняты veg-cull'ом,
-    // но тот работает в своей программе, конфликта нет).
+    // Shader SSBO blocks -> binding points 3/4/5 (0..2 are taken by veg-cull,
+    // but that one runs in its own program, so there is no conflict).
     if (!s_locs[i].bound_blocks && p_glGetProgramResourceIndex &&
         p_glShaderStorageBlockBinding) {
         GLuint bl = p_glGetProgramResourceIndex(prog, GL_SHADER_STORAGE_BLOCK,

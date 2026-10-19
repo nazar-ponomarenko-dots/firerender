@@ -1,8 +1,8 @@
 // ============================================================================
-//  Field — фрагментный шейдер рамки поля пшеницы
+//  Field — fragment shader for the wheat field frame
 // ============================================================================
 
-uniform vec3 uColor;                  // цвет рамки
+uniform vec3 uColor;                  // frame color
 
 out vec4 FragColor;
 

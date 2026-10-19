@@ -1,36 +1,37 @@
 // ============================================================================
-//  gi.h — динамическое глобальное освещение (аналог Lumen)
+//  gi.h — dynamic global illumination (Lumen analogue)
 // ----------------------------------------------------------------------------
-//  Экранное диффузное GI + ambient occlusion, посчитанные ТРАССИРОВКОЙ по
-//  буферу глубины, с темпоральным накоплением и билатеральным денойзом.
-//  Работает без предвычислений: свет меняется — GI меняется в том же кадре
-//  (как Lumen в UE5, только в screen-space, без voxel/SDF-кэша мира).
+//  Screen-space diffuse GI + ambient occlusion computed by RAY-TRACING over
+//  the depth buffer, with temporal accumulation and bilateral denoising.
+//  Works without precomputation: light changes — GI changes in the same frame
+//  (like Lumen in UE5, but screen-space, without a world voxel/SDF cache).
 //
-//  Место в кадре (см. renderer_frame):
-//      3D-сцена (FBO) -> [GI] -> SSR -> bloom/composite -> туман -> HUD
-//  GI работает раньше SSR: отражения должны видеть уже подсвеченную сцену.
+//  Place in the frame (see renderer_frame):
+//      3D scene (FBO) -> [GI] -> SSR -> bloom/composite -> fog -> HUD
+//  GI runs before SSR: reflections must see the already-lit scene.
 //
-//  Пайплайн:
-//    1) gi.fs        — трассировка лучей (полразрешения, RGBA16F: rgb = свет,
-//                      a = затенение), уточнение контакта делением интервала,
-//                      косинус на принимающей стороне, LOD по дистанции,
-//                      темпоральное накопление с клампом истории;
-//                      ПРОМАХ ЛУЧА = свет РЕАЛЬНОГО неба (панорама sky.c, тот
-//                      же маппинг, что в sky.fs): тени подсвечиваются цветом
-//                      небосвода (синий зенит/тёплый закат/серое пасмурно) —
-//                      главный «люменовский» ингредиент. Ниже горизонта —
-//                      отскок от земли за кадром. Весь свет попаданий (включая
-//                      лампы/прожекторы сцены) переотражается с альбедо < 1;
-//    2) gi_blur.fs   — билатеральный денойз в 2 прохода (H, V) с весом по
-//                      касательной плоскости: складывает разные наборы лучей
-//                      соседних пикселей (IGN), не протекая через изломы;
-//                      радиус растёт с дистанцией (вдали шум крупнее);
-//    3) gi_apply.fs  — joint bilateral upsample на полное разрешение и
-//                      наложение на сцену; потолок добавки — по ЛОКАЛЬНОЙ
-//                      яркости окрестности, а не одного пикселя: рефлекс
-//                      лампы в тени легален, глобальное свечение — нет.
+//  Pipeline:
+//    1) gi.fs        — ray tracing (half resolution, RGBA16F: rgb = light,
+//                      a = occlusion), contact refinement by interval bisection,
+//                      cosine on the receiving side, distance-based LOD,
+//                      temporal accumulation with history clamping;
+//                      RAY MISS = light of the REAL sky (sky.c panorama, the
+//                      same mapping as in sky.fs): shadows get lit by the sky
+//                      color (blue zenith / warm sunset / gray overcast) —
+//                      the main "Lumen-ish" ingredient. Below the horizon —
+//                      ground bounce within the frame. All hit light (including
+//                      scene lamps/spotlights) is re-reflected with albedo < 1;
+//    2) gi_blur.fs   — bilateral denoise in 2 passes (H, V) weighted by the
+//                      tangent plane: combines different ray sets of neighboring
+//                      pixels (IGN) without leaking across edges;
+//                      the radius grows with distance (noise is coarser far away);
+//    3) gi_apply.fs  — joint bilateral upsample to full resolution and
+//                      application to the scene; the cap on the addition is by
+//                      the LOCAL brightness of the neighborhood, not of a single
+//                      pixel: a lamp reflection in shadow is legal, global
+//                      glow is not.
 //
-//  Cvar'ы: r_gi, r_gi_strength, r_gi_ao, r_gi_rays, r_gi_steps, r_gi_radius,
+//  Cvars: r_gi, r_gi_strength, r_gi_ao, r_gi_rays, r_gi_steps, r_gi_radius,
 //  r_gi_ao_radius, r_gi_sky, r_gi_skylight, r_gi_clamp, r_gi_bounce,
 //  r_gi_reflect, r_gi_spread, r_gi_temporal, r_gi_blur, r_gi_scale,
 //  r_gi_debug.
@@ -42,40 +43,40 @@
 
 typedef struct {
     GLuint prog_trace, prog_blur, prog_apply;
-    GLuint vao, vbo;                 // полноэкранный треугольник
-    // Трассировка + накопление: ping-pong (пишем в один, читаем прошлый)
+    GLuint vao, vbo;                 // full-screen triangle
+    // Tracing + accumulation: ping-pong (write to one, read the previous)
     GLuint fbo_gi[2], tex_gi[2];
-    int cur;                         // индекс текущего буфера
-    // Денойз: промежуточный таргет того же размера
+    int cur;                         // index of the current buffer
+    // Denoise: intermediate target of the same size
     GLuint fbo_tmp, tex_tmp;
-    // Итоговая сцена с GI (полный размер) — её отдаём дальше в SSR/bloom
+    // Final scene with GI (full size) — handed on to SSR/bloom
     GLuint fbo_out, tex_out;
-    int gw, gh;                      // размер GI-таргета (полкадра)
-    int vw, vh;                      // размер экрана
-    float prev_vp[16];               // viewproj прошлого кадра (репроекция)
+    int gw, gh;                      // GI target size (half frame)
+    int vw, vh;                      // screen size
+    float prev_vp[16];               // previous frame's viewproj (reprojection)
     int have_prev;
     int frames;
-    // uniform-хендлы
+    // uniform handles
     GLint t_scene, t_depth, t_prev, t_viewproj, t_invviewproj, t_prevviewproj;
     GLint t_campos, t_texel, t_params, t_params2, t_params3;
     GLint t_groundcolor, t_snowcover, t_clamp, t_blend;
-    GLint t_sky, t_skytint, t_skyfog, t_skylight;   // небо на промахах лучей
+    GLint t_sky, t_skytint, t_skyfog, t_skylight;   // sky on ray misses
     GLint b_gi, b_depth, b_invviewproj, b_campos, b_texel, b_dir, b_z, b_radius;
     GLint a_scene, a_gi, a_depth, a_gitexel, a_z, a_strength, a_ao, a_debug;
 } GiParams;
 
-// Создаёт программы, FBO и регистрирует cvar'ы. vw/vh — размер окна.
+// Creates programs and FBOs and registers cvars. vw/vh — window size.
 void gi_init(GiParams *g, int vw, int vh);
 
-// Пересоздаёт таргеты при смене размера окна (или r_gi_scale).
+// Recreates targets when the window size (or r_gi_scale) changes.
 void gi_resize(GiParams *g, int vw, int vh);
 
-// Считает GI и накладывает его на сцену. Возвращает текстуру результата
-// (или scene_tex без изменений, если GI выключен/недоступен).
+// Computes GI and applies it to the scene. Returns the result texture
+// (or scene_tex unchanged if GI is disabled/unavailable).
 GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
                  const RendererContext *rc);
 
-// 1, если GI включён cvar'ом и готов рисовать (для профайлера/HUD).
+// 1 if GI is enabled via cvar and ready to render (for the profiler/HUD).
 int gi_is_on(void);
 
 void gi_cleanup(GiParams *g);

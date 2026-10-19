@@ -1,5 +1,5 @@
 // ============================================================================
-//  minimap.c — мини-карта: карта + точка игрока + направление взгляда
+//  minimap.c — minimap: map + player dot + view direction
 // ============================================================================
 #include "minimap.h"
 
@@ -45,7 +45,7 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
     p->prog = prog;
     p->vao = vao;
     p->vbo = vbo;
-    p->tex_base = tex_base;                 // цвет карты (для мини-карты)
+    p->tex_base = tex_base;                 // map base color (for the minimap)
     p->world = w;
     p->rc = rc;
     p->u_basemap = glGetUniformLocation(prog, "uBasemap");
@@ -53,15 +53,15 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
     p->u_usetex  = glGetUniformLocation(prog, "uUseTex");
     p->u_usemarker = glGetUniformLocation(prog, "uUseMarker");
     p->visible = 1;
-    // Маркер игрока (img/player.png): стрелка, крутится на yaw каждый кадр.
-    // Текстура — через кеш ресурсов.
+    // Player marker (img/player.png): an arrow, rotated by yaw every frame.
+    // The texture comes through the resource cache.
     p->tex_marker = resources_texture("img/player.png", 4,
                                       GL_CLAMP_TO_EDGE, 1);
     glUseProgram(prog);
-    glUniform1i(p->u_basemap, 0);        // карта — на текстурном юните 0
-    glUniform1i(glGetUniformLocation(prog, "uMarker"), 1);  // маркер — юнит 1
+    glUniform1i(p->u_basemap, 0);        // map bound to texture unit 0
+    glUniform1i(glGetUniformLocation(prog, "uMarker"), 1);  // marker — unit 1
     glUseProgram(0);
-    const float pos[3] = { 16, 16, 0 };         // отступ от края окна
+    const float pos[3] = { 16, 16, 0 };         // inset from the window edge
     const float size[3] = { 220, 220 * w->world_d / w->world_w, 0 };
     SceneNode *node = node_new("Minimap", "CanvasItem2D", pos, size, p,
                                NULL, minimap_node_render);
@@ -77,29 +77,30 @@ SceneNode *minimap_make_node(const WorldState *w, GLuint tex_base,
 
 void minimap_node_render(SceneNode *n, float dt)
 {
-    (void)dt;   // обновление привязано к кадру, не ко времени
-    // Рисуем КАЖДЫЙ кадр: сцена перерисовывается целиком, пропуск кадров
-    // (было «раз в 3») приводил к мерцанию — карта исчезала на пропущенных.
-    // Квад с перезаливкой 16 вершин копеечный, экономить нечего.
+    (void)dt;   // the update is tied to the frame, not to time
+    // Draw EVERY frame: the whole scene is redrawn, and skipping frames
+    // (it used to be "once every 3") caused flickering — the map vanished on
+    // skipped frames. Re-uploading a 16-vertex quad costs nothing, no point
+    // saving on it.
     MinimapParams *p = n->params;
-    if (!p->visible) return;        // клавиша G — карта скрыта
+    if (!p->visible) return;        // G key — map hidden
     const RendererContext *rc = p->rc;
-    if (rc->pass == RP_SHADOW) return;      // в карты теней 2D не пишет
+    if (rc->pass == RP_SHADOW) return;      // 2D must not write into shadow maps
     int vw = p->vw, vh = p->vh;
     if (vw <= 0 || vh <= 0) return;
-    glDisable(GL_DEPTH_TEST);   // 2D поверх 3D-сцены
+    glDisable(GL_DEPTH_TEST);   // 2D on top of the 3D scene
 
-    // Экранный квад в верхнем левом углу. Координаты в NDC считаем прямо
-    // из размеров окна — при ресайзе мини-карта масштабируется сама.
+    // Screen quad in the top-left corner. NDC coordinates are computed
+    // directly from the window size — on resize the minimap scales by itself.
     float mm_w = n->size[0];
     float mm_h = n->size[1];
     float mx0 = 16.0f, my0 = vh - 16.0f - mm_h;
     float nx0 = -1.0f + 2.0f * mx0 / vw;
     float nx1 = -1.0f + 2.0f * (mx0 + mm_w) / vw;
-    float ny1 =  1.0f - 2.0f * my0 / vh;              // верх (v=0)
-    float ny0 =  1.0f - 2.0f * (my0 + mm_h) / vh;     // низ  (v=1)
+    float ny1 =  1.0f - 2.0f * my0 / vh;              // top (v=0)
+    float ny0 =  1.0f - 2.0f * (my0 + mm_h) / vh;     // bottom  (v=1)
 
-    // Позиция игрока в uv карты (x/WORLD_W, z/WORLD_D), прижата к краям
+    // Player position in map uv (x/WORLD_W, z/WORLD_D), clamped to the edges
     const WorldState *w = p->world;
     float u = rc->cam_pos[0] / w->world_w;
     float v = rc->cam_pos[2] / w->world_d;
@@ -108,26 +109,26 @@ void minimap_node_render(SceneNode *n, float dt)
     if (v < 0) v = 0;
     if (v > 1) v = 1;
     float px = nx0 + u * (nx1 - nx0);
-    float py = ny1 - v * (ny1 - ny0);   // z растёт вниз по карте
+    float py = ny1 - v * (ny1 - ny0);   // z grows downwards on the map
 
-    // Штрих направления взгляда (12 м вперёд) + жёлтая линия направления
-    // на солнце (от игрока, 60 м).
+    // View-direction tick (12 m ahead) + yellow line pointing at the sun
+    // (from the player, 60 m).
     float lx = sinf(rc->cam_yaw) * 12.0f / w->world_w * (nx1 - nx0);
     float ly = -cosf(rc->cam_yaw) * 12.0f / w->world_d * (ny1 - ny0);
-    // Направление на солнце (первый направленный источник)
+    // Direction towards the sun (the first directional light)
     float sx = sinf(atan2f(rc->light_dir[0][0], rc->light_dir[0][2])) * 60.0f / w->world_w * (nx1 - nx0);
     float sy = -cosf(atan2f(rc->light_dir[0][0], rc->light_dir[0][2])) * 60.0f / w->world_d * (ny1 - ny0);
 
-    // Маркер игрока: img/player.png, повёрнут на yaw — стрелка смотрит
-    // туда, куда смотрит игрок. forward = (sin yaw, 0, cos yaw); на карте
-    // +x вправо, +z вниз -> направление взгляда на экране (sin yaw, -cos yaw),
-    // угол поворота текстуры θ = yaw + π (текстура смотрит "на север").
-    float rh = 11.0f;                       // полмаркера, px
+    // Player marker: img/player.png rotated by yaw — the arrow points where
+    // the player looks. forward = (sin yaw, 0, cos yaw); on the map
+    // +x is right, +z is down -> the view direction on screen is (sin yaw, -cos yaw),
+    // texture rotation angle θ = yaw + π (the texture points "north").
+    float rh = 11.0f;                       // half-marker size, px
     float ux = sinf(rc->cam_yaw) * 2.0f * rh / vw;
     float uy = -cosf(rc->cam_yaw) * 2.0f * rh / vh;
     float px2 = cosf(rc->cam_yaw) * 2.0f * rh / vw;
     float py2 = sinf(rc->cam_yaw) * 2.0f * rh / vh;
-    // Вершины: 0-5 карта, 6-11 маркер, 12-13 линия взгляда, 14-15 солнце
+    // Vertices: 0-5 map, 6-11 marker, 12-13 view line, 14-15 sun
     float verts[16][4] = {
         {nx0, ny0, 0, 1}, {nx1, ny0, 1, 1}, {nx0, ny1, 0, 0},
         {nx0, ny1, 0, 0}, {nx1, ny0, 1, 1}, {nx1, ny1, 1, 0},
@@ -151,28 +152,28 @@ void minimap_node_render(SceneNode *n, float dt)
     glUniform3f(p->u_color, 1.0f, 1.0f, 1.0f);
     glUniform1f(p->u_usetex, 1.0f);
     glUniform1f(p->u_usemarker, 0.0f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);       // сама карта
-    // маркер игрока: текстура со своей альфой (блендинг — только здесь)
+    glDrawArrays(GL_TRIANGLES, 0, 6);       // the map itself
+    // player marker: texture with its own alpha (blending — only here)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUniform1f(p->u_usetex, 0.0f);
     glUniform1f(p->u_usemarker, 1.0f);
-    glDrawArrays(GL_TRIANGLES, 6, 6);       // маркер
+    glDrawArrays(GL_TRIANGLES, 6, 6);       // marker
     glDisable(GL_BLEND);
     glUniform1f(p->u_usemarker, 0.0f);
-    glUniform3f(p->u_color, 1.0f, 0.25f, 0.15f); // оранжевая — линия взгляда
-    glDrawArrays(GL_LINES, 12, 2);          // направление взгляда
-    glUniform3f(p->u_color, 1.0f, 0.85f, 0.2f); // жёлтое — солнце
+    glUniform3f(p->u_color, 1.0f, 0.25f, 0.15f); // orange — view line
+    glDrawArrays(GL_LINES, 12, 2);          // view direction
+    glUniform3f(p->u_color, 1.0f, 0.85f, 0.2f); // yellow — sun
     glDrawArrays(GL_LINES, 14, 2);
 
 }
 
 void minimap_cleanup(SceneNode *n)
 {
-    if (!n) return;   // error-path scene_build: узел мог не создаться
+    if (!n) return;   // error-path scene_build: the node may not have been created
     MinimapParams *p = n->params;
     resources_program_release(p->prog);
-    resources_texture_release(p->tex_marker);   // карта — общая, её не удаляем
+    resources_texture_release(p->tex_marker);   // the base map is shared, don't delete it
     glDeleteBuffers(1, &p->vbo);
     glDeleteVertexArrays(1, &p->vao);
 }

@@ -1,91 +1,91 @@
 // ============================================================================
-//  bloom.h — постобработка glow (bloom)
+//  bloom.h — post-processing glow (bloom)
 // ----------------------------------------------------------------------------
-//  Сцена рисуется в FBO (bloom_scene_fbo), потом bloom_render:
-//    1) яркие пиксели вырезаются (bright, мягкий порог);
-//    2) размываются на половинном разрешении (гаусс 11 тапов, H+V);
-//    3) складываются со сценой на экран (композит).
-//  Миникарта и HUD рисуются ПОСЛЕ bloom_render — они не светятся.
+//  The scene is drawn into an FBO (bloom_scene_fbo), then bloom_render:
+//    1) bright pixels are extracted (bright pass, soft threshold);
+//    2) blurred at half resolution (11-tap Gaussian, H+V);
+//    3) composited with the scene onto the screen.
+//  The minimap and HUD are drawn AFTER bloom_render — they do not glow.
 // ============================================================================
 #ifndef BLOOM_H
 #define BLOOM_H
 #include "gl_loader.h"
 
 typedef struct {
-    GLuint fbo, tex;           // сцена: FBO + цвет (полный экран)
-    GLuint depth;              // буфер глубины сцены (текстура для пост-эффектов)
-    GLuint rbo_depth_nm;       // глубина сцены БЕЗ MSAA: RBO-аттачмент
-    GLuint fbo_res;            // resolve-FBO (tex + depth-текстура) для blit'а
-    GLuint fbo_ms;             // MSAA-сцена: мультисэмпл-FBO (r_msaa > 0)
-    GLuint rbo_color, rbo_depth;   // его цвет/глубина (мультисэмпл-RBO)
-    int msaa;                  // активные сэмплы (0 = MSAA выключен)
-    int msaa_failed;           // неподдерживаемый запрос (не повторять каждый кадр)
+    GLuint fbo, tex;           // scene: FBO + color (full screen)
+    GLuint depth;              // scene depth buffer (texture for post-effects)
+    GLuint rbo_depth_nm;       // scene depth WITHOUT MSAA: RBO attachment
+    GLuint fbo_res;            // resolve-FBO (tex + depth texture) for the blit
+    GLuint fbo_ms;             // MSAA scene: multisample FBO (r_msaa > 0)
+    GLuint rbo_color, rbo_depth;   // its color/depth (multisample RBO)
+    int msaa;                  // active samples (0 = MSAA disabled)
+    int msaa_failed;           // unsupported request (don't retry every frame)
     int msaa_failed_ldr;
-    GLuint fbo_ldr, tex_ldr;   // LDR-копия сцены для present (bloom_present)
-    int scene_ldr;             // сцена сразу в RGBA8 (картошка: HDR некому)
-    GLuint fbo_glow[2];        // ping-pong буферы glow (половинный размер)
+    GLuint fbo_ldr, tex_ldr;   // LDR copy of the scene for present (bloom_present)
+    int scene_ldr;             // scene goes straight to RGBA8 (low-end: no HDR support)
+    GLuint fbo_glow[2];        // glow ping-pong buffers (half size)
     GLuint tex_glow[2];
-    GLuint vao, vbo;           // полноэкранный треугольник
+    GLuint vao, vbo;           // full-screen triangle
     GLuint prog_bright, prog_blur, prog_composite;
     GLint u_btex, u_threshold, u_intensity;
     GLint u_blurtex, u_dir, u_texel;
     GLint u_ctex, u_glowtex, u_strength;
     GLint u_exposure, u_gamma, u_sat, u_contrast, u_wetness;
-    GLint u_underwater, u_watertint, u_time;     // подводные эффекты (composite.fs)
-    int vw, vh;                // размер сцены (пиксели)
-    int gw, gh;                // размер glow (половина)
-    float threshold;           // порог яркости (0..1)
-    float intensity;           // множитель ярких пикселей
-    float strength;            // сила свечения в композите
+    GLint u_underwater, u_watertint, u_time;     // underwater effects (composite.fs)
+    int vw, vh;                // scene size (pixels)
+    int gw, gh;                // glow size (half)
+    float threshold;           // brightness threshold (0..1)
+    float intensity;           // multiplier for bright pixels
+    float strength;            // glow strength in the composite
 } BloomParams;
 
-// Создаёт FBO и шейдеры постобработки. vw/vh — размер окна в пикселях.
+// Creates the FBOs and post-processing shaders. vw/vh — window size in pixels.
 void bloom_init(BloomParams *b, int vw, int vh);
 
-// Пересоздаёт текстуры при изменении размера окна.
+// Recreates the textures when the window size changes.
 void bloom_resize(BloomParams *b, int vw, int vh);
 
-// FBO, в который main.c рисует 3D-сцену (с глубиной). При включённом MSAA
-// (cvar r_msaa) — мультисэмпл-FBO: сцена рисуется в него, затем
-// bloom_resolve разворачивает (resolve) цвет и глубину в обычные текстуры.
+// The FBO into which main.c draws the 3D scene (with depth). With MSAA enabled
+// (cvar r_msaa) — a multisample FBO: the scene is drawn into it, then
+// bloom_resolve resolves the color and depth into plain textures.
 GLuint bloom_scene_fbo(const BloomParams *b);
 
-// Пересоздаёт MSAA-таргет, если cvar r_msaa изменился (вызывать ДО привязки
-// FBO сцены в начале кадра). Живое применение настройки без перезапуска.
+// Recreates the MSAA target if the cvar r_msaa changed (call BEFORE binding
+// the scene FBO at the start of the frame). Applies the setting live, no restart.
 void bloom_msaa_sync(BloomParams *b);
 
-// Текущие сэмплы MSAA-таргета сцены (0 — без MSAA). Для alpha-to-coverage:
-// классический MSAA не сглаживает края alpha-cutout (discard в шейдере),
-// рисующие модули включают GL_SAMPLE_ALPHA_TO_COVERAGE при активном MSAA.
+// Current sample count of the scene's MSAA target (0 — no MSAA). For
+// alpha-to-coverage: classic MSAA does not smooth alpha-cutout edges (discard
+// in the shader); drawing modules enable GL_SAMPLE_ALPHA_TO_COVERAGE when MSAA is active.
 int bloom_msaa_active(void);
 
-// Разворачивает мультисэмпл-сцену в обычные текстуры (цвет + глубина) для
-// постобработки (GI/SSR/туман читают их). Без MSAA — ничего не делает.
-// Вызывать ПОСЛЕ отрисовки 3D-сцены, ДО всех пост-проходов.
-// want_depth: нужна ли развёрнутая глубина в этом кадре. В КАРТОШКЕ ни один
-// потребитель (GI/SSR/voxfog) не активен — тогда копию глубины из RBO в
-// текстуру пропускаем (полноэкранный blit впустую). MSAA-путь цвет+глубину
-// разворачивает всегда (СРЕДНИЕ/УЛЬТРА бит-в-бит без изменений).
+// Resolves the multisample scene into plain textures (color + depth) for
+// post-processing (GI/SSR/fog read them). Without MSAA — does nothing.
+// Call AFTER drawing the 3D scene, BEFORE all post passes.
+// want_depth: whether the resolved depth is needed this frame. In the low-end
+// preset no consumer (GI/SSR/voxfog) is active — then the depth copy from the
+// RBO into a texture is skipped (a wasted full-screen blit). The MSAA path
+// always resolves color+depth (medium/ULTRA presets stay bit-for-bit unchanged).
 void bloom_resolve(BloomParams *b, int want_depth);
 
-// Текстура и глубина сцены (для объёмного тумана — voxfog.c).
+// Scene texture and depth (for volumetric fog — voxfog.c).
 GLuint bloom_scene_tex(const BloomParams *b);
 GLuint bloom_scene_depth(const BloomParams *b);
 
-// Яркие пиксели -> блюр -> композит на экран. Вызывается после отрисовки
-// сцены в FBO, ДО миникарты и HUD. scene_tex — текстура сцены: обычная
-// или уже с объёмным туманом (voxfog). target_fbo — куда писать композит:
-// 0 = экран; иначе FBO (voxfog подставляет свой, чтобы туман лёг ПОВЕРХ
-// bloom'а и сам не светился).
+// Bright pixels -> blur -> composite onto screen. Called after the scene is
+// drawn into the FBO, BEFORE the minimap and HUD. scene_tex — the scene
+// texture: plain or already with volumetric fog (voxfog). target_fbo — where
+// to write the composite: 0 = screen; otherwise an FBO (voxfog substitutes its
+// own so the fog lands ON TOP of the bloom and does not glow itself).
 void bloom_render(BloomParams *b, GLuint scene_tex, GLuint target_fbo,
                   int out_w, int out_h);
 void bloom_present(BloomParams *b, GLuint scene_tex, int out_w, int out_h);
 
-// Освобождает GL-ресурсы.
+// Frees the GL resources.
 void bloom_cleanup(BloomParams *b);
 
-// Подводные эффекты (composite.fs): amount 0..1 (плавный вход/выход из воды),
-// tint — тон водоёма, time — время сцены (анимация волн искажения).
+// Underwater effects (composite.fs): amount 0..1 (smooth entering/leaving the
+// water), tint — the water body's tint, time — scene time (distortion wave animation).
 void bloom_set_underwater(float amount, const float tint[3], float time);
 
 #endif

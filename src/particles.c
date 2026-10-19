@@ -1,15 +1,15 @@
 // ============================================================================
-//  particles.c — система частиц: instanced-спрайты с CPU-обновлением
+//  particles.c — particle system: instanced sprites with CPU update
 // ----------------------------------------------------------------------------
-//  Один пул частиц (максимум PARTICLES_MAX) с текстурой-спрайтом
-//  (img/particle.png, при отсутствии — notfound.png). Рендер — два
-//  instanced draw: альфа-бленд и аддитив, per-instance атрибуты (позиция,
-//  размер, цвет, альфа, скорость) в отдельном VBO. Физика частицы:
-//  скорость/гравитация/сопротивление воздуха/ветер/покачивание, опции
-//  streak (вытянутая капля) и bounce (отскок от земли через sample_height).
+//  A single particle pool (PARTICLES_MAX at most) with a sprite texture
+//  (img/particle.png, falls back to notfound.png if missing). Rendering is two
+//  instanced draws: alpha-blended and additive; per-instance attributes
+//  (position, size, color, alpha, velocity) live in a separate VBO. Particle
+//  physics: velocity/gravity/air drag/wind/sway, with streak (elongated drop)
+//  and bounce (off the ground via sample_height) options.
 //
-//  Параметры задаются структурой ParticleParams -> particles_emit/burst.
-//  Именованные эффекты и эмиттеры — в fx.c поверх этого модуля.
+//  Parameters are given via ParticleParams -> particles_emit/burst.
+//  Named effects and emitters live in fx.c on top of this module.
 // ============================================================================
 #include "particles.h"
 
@@ -24,50 +24,50 @@
 
 #include <SDL3/SDL.h>
 
-// Инстанс-атрибуты: pos(xyz) + size(sxy) + color(rgb) + alpha + vel(xyz)
-// + plain (1 = без текстуры, яркий круг)
+// Instance attributes: pos(xyz) + size(sxy) + color(rgb) + alpha + vel(xyz)
+// + plain (1 = no texture, bright disc)
 typedef struct {
     float pos[3];
-    float size[2];   // x = ширина, y = длина стрика (для streak)
+    float size[2];   // x = width, y = streak length (for streak)
     float col[3];
     float alpha;
-    float vel[3];    // скорость (для стрика: направление растяжения)
-    float plain;     // 1 = чистый диск, без текстуры
+    float vel[3];    // velocity (for streak: stretch direction)
+    float plain;     // 1 = clean disc, no texture
 } ParticleInst;
 
 typedef struct {
     float x, y, z;
     float vx, vy, vz;
-    float life, max_life;   // остаток и полная жизнь
-    float size;             // текущий размер (ширина)
+    float life, max_life;   // remaining and total lifetime
+    float size;             // current size (width)
     float r, g, b;
     float gravity;
     float drag;
     float sway;
-    float turb;             // турбулентность (закручивание)
-    float ph;               // случайная фаза (каждая частица качается по-своему)
+    float turb;             // turbulence (swirling)
+    float ph;               // random phase (each particle sways on its own)
     float wind[3];
-    float alpha0, alpha1;   // альфа в начале и конце жизни
-    float sizek;            // прирост размера в секунду (из size0/size1)
-    int blend;              // 0 альфа / 1 аддитив
-    int streak;             // вытянуть вдоль скорости
-    int plain;              // без текстуры — яркий диск (снег)
-    int bounce;             // отскок от земли
-    int collide;            // 1 = гибнет о террейн/воду, 2 = ложится и гаснет
+    float alpha0, alpha1;   // alpha at the start and end of life
+    float sizek;            // size growth per second (from size0/size1)
+    int blend;              // 0 alpha / 1 additive
+    int streak;             // stretch along the velocity
+    int plain;              // no texture — bright disc (snow)
+    int bounce;             // bounce off the ground
+    int collide;            // 1 = dies on terrain/water, 2 = settles and fades
     int active;
 } Particle;
 
 typedef struct {
-    const WorldState *world;   // карта высот (отскок bounce)
+    const WorldState *world;   // heightmap (bounce)
     const RendererContext *rc;
     GLuint prog, vao, vbo, inst_vbo;
     GLint u_viewproj, u_tex, u_camright, u_camup;
     GLuint tex;
     Particle p[PARTICLES_MAX];
-    ParticleInst inst[PARTICLES_MAX * 2];   // две зоны: альфа/аддитив
+    ParticleInst inst[PARTICLES_MAX * 2];   // two zones: alpha/additive
 } ParticlesParams;
 
-static ParticlesParams *s_p = NULL;   // текущий узел (один на мир)
+static ParticlesParams *s_p = NULL;   // current node (one per world)
 
 static void particles_node_update(SceneNode *n, float dt);
 static void particles_node_render(SceneNode *n, float dt);
@@ -83,8 +83,8 @@ SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc)
     if (!p) return NULL;
     p->world = w;
     p->rc = rc;
-    // REPEAT (не CLAMP): стрик-шейдер тайлит текстуру вдоль капли (t*4),
-    // с CLAMP тот "тайлинг" показывал залитую строку вместо капель.
+    // REPEAT (not CLAMP): the streak shader tiles the texture along the drop
+    // (t*4); with CLAMP that "tiling" showed a filled row instead of drops.
     p->tex = resources_texture("img/particle.png", 4, GL_REPEAT, 1);
 
     p->prog = make_program("shaders/particle.vs", "shaders/particle.fs");
@@ -101,7 +101,7 @@ SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc)
     glUniform1i(p->u_tex, 0);
     glUseProgram(0);
 
-    // Квад с UV; инстанс-атрибуты в отдельном VBO (glVertexAttribDivisor)
+    // Quad with UVs; instance attributes in a separate VBO (glVertexAttribDivisor)
     glGenVertexArrays(1, &p->vao);
     glBindVertexArray(p->vao);
     glGenBuffers(1, &p->vbo);
@@ -159,7 +159,7 @@ SceneNode *particles_make_node(const WorldState *w, const RendererContext *rc)
     return node;
 }
 
-// Колбэки узла: update — из фикс-тика (100 Гц), render — из обхода сцены
+// Node callbacks: update — from the fixed tick (100 Hz), render — from the scene traversal
 static void particles_node_update(SceneNode *n, float dt)
 {
     (void)n;
@@ -174,18 +174,24 @@ static void particles_node_render(SceneNode *n, float dt)
     particles_draw(p->rc);
 }
 
-// Находит слот: мёртвая частица или самая старая из живых (пул полон)
+// Finds a slot: a dead particle or the oldest of the live ones (pool full)
 static int particles_alloc(ParticlesParams *p)
 {
     for (int i = 0; i < PARTICLES_MAX; i++)
         if (!p->p[i].active) return i;
+    // "life" is the REMAINING lifetime, so the oldest is the largest age
+    // (max_life - life). Comparing "life >" evicted the FRESHEST particle, and a
+    // burst into a full pool visibly dropped its own newest spawns.
     int oldest = 0;
-    for (int i = 1; i < PARTICLES_MAX; i++)
-        if (p->p[i].life > p->p[oldest].life) oldest = i;
+    float oldest_age = p->p[0].max_life - p->p[0].life;
+    for (int i = 1; i < PARTICLES_MAX; i++) {
+        float age = p->p[i].max_life - p->p[i].life;
+        if (age > oldest_age) { oldest_age = age; oldest = i; }
+    }
     return oldest;
 }
 
-// --- Эмиссия ---------------------------------------------------------------
+// --- Emission ---------------------------------------------------------------
 void particles_emit(const ParticleParams *par)
 {
     if (!s_p || !par) return;
@@ -195,17 +201,17 @@ void particles_emit(const ParticleParams *par)
     float ang1 = frand() * 6.2832f;
     float ang2 = (frand() - 0.5f) * par->spread;
     float vx = sinf(ang1) * cosf(ang2);
-    float vy = sinf(ang2);                       // знак разрешён: разброс и навес
+    float vy = sinf(ang2);                       // sign allowed: spread and lob
     float vz = cosf(ang1) * cosf(ang2);
-    // dir — массив внутри struct, NULL быть не может: проверяем только нули
+    // dir is an array inside the struct, it cannot be NULL: only check for zeros
     if (par->dir[0] || par->dir[1] || par->dir[2]) {
         vx += par->dir[0]; vy += par->dir[1]; vz += par->dir[2];
         float l = sqrtf(vx * vx + vy * vy + vz * vz);
         if (l > 0.001f) { vx /= l; vy /= l; vz /= l; }
     }
-    // Разброс скоростей (снег): множитель по весам bucket_w. Гравитация
-    // масштабируется тем же множителем — иначе drag за ~1 с гасит стартовую
-    // скорость к терминальной (gravity/drag), и все частицы падают одинаково.
+    // Speed spread (snow): multiplier weighted by bucket_w. Gravity is scaled
+    // by the same multiplier — otherwise drag kills the initial speed toward
+    // the terminal one (gravity/drag) within ~1 s and all particles fall alike.
     float mul = 1.0f;
     if (par->nbucket > 0) {
         float wsum = 0.0f;
@@ -230,8 +236,8 @@ void particles_emit(const ParticleParams *par)
     q->drag = par->drag;
     q->sway = par->sway;
     q->turb = par->turb;
-    q->ph = frand() * 6.2832f;          // фаза: свой цикл качания/закрутки
-    if (mul != 1.0f) q->gravity *= mul; // разброс скоростей — и гравитации
+    q->ph = frand() * 6.2832f;          // phase: own sway/swirl cycle
+    if (mul != 1.0f) q->gravity *= mul; // speed spread — and gravity spread
     q->wind[0] = par->wind[0];
     q->wind[1] = par->wind[1];
     q->wind[2] = par->wind[2];
@@ -253,7 +259,7 @@ void particles_burst(const ParticleParams *par, int count)
         particles_emit(par);
 }
 
-// --- Обновление физики ------------------------------------------------------
+// --- Physics update ---------------------------------------------------------
 void particles_update(float dt)
 {
     if (!s_p) return;
@@ -264,19 +270,19 @@ void particles_update(float dt)
         q->life -= dt;
         if (q->life <= 0.0f) { q->active = 0; continue; }
 
-        // Гравитация и сопротивление воздуха
+        // Gravity and air drag
         q->vy -= q->gravity * dt;
         float dr = 1.0f - q->drag * dt;
         if (dr < 0.0f) dr = 0.0f;
         q->vx *= dr; q->vy *= dr; q->vz *= dr;
-        // Ветер и покачивание (снег/пыль): у каждой частицы своя фаза —
-        // соседние хлопья качаются не синхронно.
+        // Wind and sway (snow/dust): each particle has its own phase —
+        // neighbouring flakes sway out of sync.
         float t = q->max_life - q->life;
         q->vx += (q->wind[0] + q->sway * sinf(t * 2.5f + q->ph)) * dt;
         q->vy += q->wind[1] * dt;
         q->vz += (q->wind[2] + q->sway * cosf(t * 2.1f + q->ph)) * dt;
-        // Турбулентность: медленное закручивание траектории (вихрь):
-        // круговое движение в XZ c другой частотой + лёгкая болтанка по Y.
+        // Turbulence: slow swirling of the trajectory (vortex):
+        // circular motion in XZ at another frequency + slight Y wobble.
         if (q->turb > 0.001f) {
             q->vx += q->turb * 2.2f * cosf(t * 1.6f + q->ph * 2.0f) * dt;
             q->vz += q->turb * 2.2f * sinf(t * 1.9f + q->ph * 2.0f) * dt;
@@ -288,47 +294,47 @@ void particles_update(float dt)
         q->z += q->vz * dt;
         q->size += q->sizek * dt;
 
-        // Отскок от земли (кровь/искры)
+        // Bounce off the ground (blood/sparks)
         if (q->bounce && p->world && q->vy < 0.0f) {
             float h = sample_height(p->world, q->x, q->z);
             if (q->y < h + 0.05f) {
                 q->y = h + 0.05f;
                 q->vy = -q->vy * 0.35f;
                 q->vx *= 0.5f; q->vz *= 0.5f;
-                if (q->vy < 0.8f) q->bounce = 0;   // затухло — лежит
+                if (q->vy < 0.8f) q->bounce = 0;   // damped out — lies still
             }
         }
 
-        // Столкновение с поверхностью (дождь/снег): рельеф ИЛИ уровень воды —
-        // выше то из двух. Дождевая капля гибнет о воду/землю; снежинка
-        // ложится на поверхность и коротко гаснет.
+        // Collision with the surface (rain/snow): terrain OR water level —
+        // whichever of the two is higher. A raindrop dies on water/ground; a
+        // snowflake settles on the surface and fades out briefly.
         if (q->collide && p->world && q->vy < 0.0f) {
             float h = sample_height(p->world, q->x, q->z);
             float ws = water_surface_at(p->world, q->x, q->z);
-            if (ws > h) h = ws;                    // вода выше рельефа — в воде
+            if (ws > h) h = ws;                    // water above terrain — in water
             if (q->y <= h + 0.03f) {
                 if (q->collide == 1) {
-                    q->active = 0;                 // дождь: капля утонула
+                    q->active = 0;                 // rain: the drop drowned
                     continue;
                 }
-                // снег: ложится и гаснет (остаток жизни короткий — fade)
+                // snow: settles and fades (remaining life is short — fade)
                 q->y = h + 0.03f;
                 q->vx = q->vy = q->vz = 0.0f;
                 q->gravity = 0.0f; q->sway = 0.0f;
                 if (q->life > 0.5f) q->life = 0.5f;
-                q->collide = 0;                    // лежит — больше не проверяем
+                q->collide = 0;                    // lying — no more checks
             }
         }
     }
 }
 
-// --- Рендер: instanced draw всех живых частиц ----------------------------------
-// Два draw call: сначала альфа-бленд (нормальные), затем аддитивные (искры,
-// свет). Аддитиву нужен GL_ONE, поэтому режим делится по проходам.
+// --- Render: instanced draw of all live particles ------------------------------
+// Two draw calls: first alpha-blended (normal ones), then additive (sparks,
+// light). Additive needs GL_ONE, so the mode is split into passes.
 void particles_draw(const RendererContext *rc)
 {
     if (!s_p) return;
-    if (rc->pass == RP_SHADOW) return;   // в карты теней частицы не пишут
+    if (rc->pass == RP_SHADOW) return;   // particles don't write into shadow maps
     ParticlesParams *p = s_p;
 
     int n_alpha = 0, n_add = 0;
@@ -340,9 +346,9 @@ void particles_draw(const RendererContext *rc)
         it->pos[0] = q->x; it->pos[1] = q->y; it->pos[2] = q->z;
         float k = q->max_life > 0.001f ? (q->life / q->max_life) : 0.0f;
         it->size[0] = q->size;
-        it->size[1] = q->streak ? q->size * 8.0f : q->size;   // длина стрика
+        it->size[1] = q->streak ? q->size * 8.0f : q->size;   // streak length
         it->col[0] = q->r; it->col[1] = q->g; it->col[2] = q->b;
-        it->alpha = q->alpha1 + (q->alpha0 - q->alpha1) * k;   // fade по жизни
+        it->alpha = q->alpha1 + (q->alpha0 - q->alpha1) * k;   // fade over life
         it->vel[0] = q->vx; it->vel[1] = q->vy; it->vel[2] = q->vz;
         it->plain = q->plain ? 1.0f : 0.0f;
     }
@@ -395,5 +401,5 @@ void particles_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->inst_vbo);
     glDeleteVertexArrays(1, &p->vao);
-    // params (p) освобождает node_free_tree(g->root)
+    // params (p) is freed by node_free_tree(g->root)
 }

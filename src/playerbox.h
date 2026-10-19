@@ -1,9 +1,9 @@
 // ============================================================================
-//  playerbox.h — бокс коллизии персонажа в режиме от 3-го лица
+//  playerbox.h — character collision box in third-person mode
 // ----------------------------------------------------------------------------
-//  Персонаж в 3-м лице рисуется как полный бокс его физической коллизии
-//  (ширина 1 м, высота 2 м — см. camera.h): полупрозрачная закраска граней
-//  + жёлтые рёбра. В 1-м лице и в теневом проходе узел ничего не рисует.
+//  In third person the character is drawn as a full box of its physical
+//  collision (1 m wide, 2 m tall — see camera.h): translucent filled faces
+//  + yellow edges. In first person and in the shadow pass the node draws nothing.
 // ============================================================================
 #ifndef PLAYERBOX_H
 #define PLAYERBOX_H
@@ -12,17 +12,17 @@
 #include "scene.h"
 #include "camera.h"
 
-// Параметры узла. cam — физическое состояние персонажа (позиция/взгляд).
+// Node parameters. cam — the character's physical state (position/view).
 typedef struct {
-    const RendererContext *rc;   // видовой базис, вид/проекция
-    CameraParams *cam;           // персонаж (позиция, yaw, присед)
-    GLuint prog;                 // шейдер бокса (позиция в мире + цвет)
+    const RendererContext *rc;   // view basis, view/projection
+    CameraParams *cam;           // character (position, yaw, crouch)
+    GLuint prog;                 // box shader (world position + color)
     GLint u_viewproj, u_color;
-    GLuint vao_fill, vbo_fill;   // полупрозрачные грани
-    GLuint vao_line, vbo_line;   // рёбра бокса
+    GLuint vao_fill, vbo_fill;   // translucent faces
+    GLuint vao_line, vbo_line;   // box edges
 } PlayerBoxParams;
 
-// Создаёт узел PlayerBox. cam — параметры узла Camera (живой указатель).
+// Creates the PlayerBox node. cam — the Camera node's parameters (live pointer).
 SceneNode *playerbox_make_node(CameraParams *cam, const RendererContext *rc);
 
 void playerbox_node_render(SceneNode *n, float dt);

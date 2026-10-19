@@ -1,14 +1,14 @@
 // ============================================================================
-//  Shadow — вершинный шейдер карты теней (земля)
+//  Shadow — vertex shader of the shadow map (terrain)
 // ----------------------------------------------------------------------------
-//  Тот же рельеф, что в terrain.vs, но позиция сразу в пространстве
-//  источника света (uViewProj = proj * view от солнца).
+//  Same relief as in terrain.vs, but the position goes straight into the light
+//  source's space (uViewProj = proj * view from the sun).
 // ============================================================================
 
 layout (location = 0) in vec2 aPos;   // x, z
-layout (location = 1) in vec2 aUV;    // координата в карте высот
+layout (location = 1) in vec2 aUV;    // coordinate in the heightmap
 
-uniform mat4 uViewProj;               // вид * проекция ОТ СОЛНЦА
+uniform mat4 uViewProj;               // view * projection from the SUN
 uniform sampler2D uHeightmap;
 uniform float uHeightMin;
 uniform float uHeightMax;

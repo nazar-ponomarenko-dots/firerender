@@ -1,19 +1,20 @@
 // ============================================================================
-//  Material — фрагментный шейдер материальной системы (см. matprog.c)
+//  Material — fragment shader of the material system (see matprog.c)
 // ----------------------------------------------------------------------------
-//  Тело одно, а ВАРИАНТЫ (пермутации) собираются #define'ами, которые
-//  матсистема подставляет перед компиляцией (как шейдерные пермутации в
-//  Source: COMPILE_宏 в LeakNet, или варианты Cg в Far Cry). Фича, не
-//  нужная материалу, исключается из шейдера целиком — фрагментный этап
-//  дешевле (нет веток по uSpecular/uWetness, нет mtime у ненужных текстур):
+//  One body, but VARIANTS (permutations) are assembled from #defines that
+//  the material system injects before compilation (like Source's shader
+//  permutations: COMPILE_宏 in LeakNet, or Cg variants in Far Cry). A
+//  feature the material does not need is compiled out of the shader
+//  entirely — the fragment stage gets cheaper (no branches on
+//  uSpecular/uWetness, no mtime on unneeded textures):
 //
-//    MAT_SPECULAR    спекуляр (Blinn-Phong) + мокрый блик
-//    MAT_WETNESS     мокрость: затемнение, шум карты, кубомап-глянец
-//    MAT_EMISSIVE    эмиссия (uEmissive * альбедо) поверх света
-//    MAT_ALPHATEST   альфа-тест (discard) — только для alphatest-материалов
+//    MAT_SPECULAR    specular (Blinn-Phong) + wet sheen
+//    MAT_WETNESS     wetness: darkening, map noise, cubemap gloss
+//    MAT_EMISSIVE    emission (uEmissive * albedo) on top of lighting
+//    MAT_ALPHATEST   alpha test (discard) — only for alphatest materials
 //
-//  Остальное (тени CSM, туман, точечные/прожекторные источники) — общее,
-//  тело идентично mesh.fs, чтобы картинка совпадала пиксель-в-пиксель.
+//  Everything else (CSM shadows, fog, point/spot lights) is shared; the
+//  body is identical to mesh.fs so the image matches pixel-for-pixel.
 // ============================================================================
 
 in vec3 vWorldPos;
@@ -25,10 +26,10 @@ uniform vec3 uCamPos;
 uniform vec3 uTint;
 uniform int uBlend;
 uniform float uAlpha;
-uniform float uSpecular;       // сила спекуляра (0 = матовый)
-uniform float uGloss;          // жёсткость блика (0 = дефолт 32)
-uniform vec3 uEmissive;        // эмиссия (MAT_EMISSIVE)
-uniform float uWetness;        // мокрость 0..1 (fx.c)
+uniform float uSpecular;       // specular strength (0 = matte)
+uniform float uGloss;          // highlight tightness (0 = default 32)
+uniform vec3 uEmissive;        // emission (MAT_EMISSIVE)
+uniform float uWetness;        // wetness 0..1 (fx.c)
 uniform samplerCube uReflection;
 uniform sampler2D uNoise;
 

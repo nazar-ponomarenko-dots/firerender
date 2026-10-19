@@ -1,10 +1,10 @@
 // ============================================================================
-//  gamepad.c — управление с геймпада (см. gamepad.h)
+//  gamepad.c — gamepad input (see gamepad.h)
 // ----------------------------------------------------------------------------
-//  SDL_Event-driven: стики приходят как SDL_EVENT_GAMEPAD_AXIS_MOTION, кнопки
-//  — как BUTTON_DOWN/UP. Флаги движения ставим те же (g_act), что и клавиши —
-//  физика/камера не знают, откуда пришёл ввод. Обзор правого стика копится в
-//  пиксельную дельту, которую camera.c прибавляет к движению мыши.
+//  SDL_Event-driven: sticks arrive as SDL_EVENT_GAMEPAD_AXIS_MOTION, buttons
+//  as BUTTON_DOWN/UP. The movement flags set are the same ones (g_act) the
+//  keys set — physics/camera do not know where the input came from. Right-
+//  stick look accumulates into a pixel delta that camera.c adds to mouse motion.
 // ============================================================================
 #include "gamepad.h"
 
@@ -15,11 +15,11 @@
 #include <SDL3/SDL.h>
 #include <string.h>
 
-#define STICK_DEAD  0.35f   // мёртвая зона стиков
-#define LOOK_SPEED  1200.0f // пикселей обзора в секунду при полном отклонении
+#define STICK_DEAD  0.35f   // stick dead zone
+#define LOOK_SPEED  1200.0f // look pixels per second at full deflection
 
 static SDL_Gamepad *s_pad = NULL;
-static float s_lx, s_ly, s_rx, s_ry;   // стики, -1..1
+static float s_lx, s_ly, s_rx, s_ry;   // sticks, -1..1
 static bool s_btn_jump, s_btn_duck, s_btn_rb, s_btn_lstick;
 static float s_look_dx, s_look_dy;
 static Uint64 s_last_frame;
@@ -29,8 +29,8 @@ static void set_action(ActionId id, bool on)
     action_set(ACTION_SRC_GAMEPAD, id, on);
 }
 
-// Пороговое состояние стика -> флаги движения (аналоговые скорости в движке
-// нет — флаги бинарые, как у клавиатуры)
+// Thresholded stick state -> movement flags (the engine has no analog
+// speeds — flags are binary, just like the keyboard)
 static void stick_move(void)
 {
     set_action(A_LEFT, s_lx < -STICK_DEAD);
@@ -89,19 +89,19 @@ int gamepad_event(const SDL_Event *ev)
     case SDL_EVENT_GAMEPAD_BUTTON_UP: {
         bool down = ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
         switch (ev->gbutton.button) {
-        case SDL_GAMEPAD_BUTTON_SOUTH:          // A — прыжок
+        case SDL_GAMEPAD_BUTTON_SOUTH:          // A — jump
             s_btn_jump = down;
             break;
-        case SDL_GAMEPAD_BUTTON_EAST:           // B — присесть
+        case SDL_GAMEPAD_BUTTON_EAST:           // B — crouch
             s_btn_duck = down;
             break;
-        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: // RB — бег
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: // RB — run
             s_btn_rb = down;
             break;
         case SDL_GAMEPAD_BUTTON_LEFT_STICK:
             s_btn_lstick = down;
             break;
-        case SDL_GAMEPAD_BUTTON_START:          // Start — пауза/назад
+        case SDL_GAMEPAD_BUTTON_START:          // Start — pause/back
             if (down) app_escape();
             break;
         default:
@@ -121,7 +121,7 @@ void gamepad_frame(void)
     float dt = (s_last_frame ? (float)(now - s_last_frame) / 1000.0f : 0.016f);
     s_last_frame = now;
     if (SDL_fabsf(s_rx) > STICK_DEAD || SDL_fabsf(s_ry) > STICK_DEAD) {
-        // Правый стик -> пиксели обзора (камера умножит на cl_sens сам)
+        // Right stick -> look pixels (the camera multiplies by cl_sens itself)
         s_look_dx += s_rx * LOOK_SPEED * dt;
         s_look_dy += s_ry * LOOK_SPEED * dt;
     }

@@ -1,5 +1,5 @@
 // ============================================================================
-//  gi.c — динамическое глобальное освещение (см. gi.h)
+//  gi.c — dynamic global illumination (see gi.h)
 // ============================================================================
 #include "gi.h"
 
@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static GiParams *s_gi_p = NULL;      // для hot-reload (shader_on_reshade)
+static GiParams *s_gi_p = NULL;      // for hot-reload (shader_on_reshade)
 
 static void gi_prog_init(GiParams *g)
 {
@@ -71,7 +71,7 @@ static void gi_reshade(void)
     if (p2) g->prog_blur = p2;
     if (p3) g->prog_apply = p3;
     gi_prog_init(g);
-    g->frames = 0;              // история могла стать несовместимой
+    g->frames = 0;              // the history may have become incompatible
 }
 
 static void make_target(GLuint *fbo, GLuint *tex, int w, int h)
@@ -98,18 +98,18 @@ void gi_init(GiParams *g, int vw, int vh)
     s_gi_p = g;
     cvar_register_ex("r_gi", 1.0f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "динамическое глобальное освещение (GI, аналог Lumen)");
-    // v7: небо на промахах лучей даёт физичную подсветку теней, поэтому сила
-    // непрямого снова поднята (0.28 -> 0.38): добавка по-прежнему ограничена
-    // локальной яркостью окрестности (gi_apply.fs), свечение невозможно.
+    // v7: sky on ray misses gives physical shadow fill-in, so the indirect
+    // strength was raised again (0.28 -> 0.38): the addition is still capped by
+    // the local neighborhood brightness (gi_apply.fs), glow is impossible.
     cvar_register_ex("r_gi_strength", 0.38f, 0.0f, 3.0f, CVAR_ARCHIVE,
                      "сила непрямого света GI");
-    // Затенение до 1.5: значения выше 1 «пережимают» тень глубже (в нишах —
-    // до чистого чёрного), gi_apply.fs это поддерживает (clamp до 1.5).
+    // Shading up to 1.5: values above 1 crush the shadow deeper (in niches —
+    // down to pure black); gi_apply.fs supports this (clamped to 1.5).
     cvar_register_ex("r_gi_ao", 0.8f, 0.0f, 1.5f, CVAR_ARCHIVE,
                      "сила затенения GI (контактные тени + закрытость неба)");
-    // Оптимизация: 6 лучей x 10 шагов (было 8x12) — минус ~40% трассировки.
-    // Разные наборы лучей по пикселям (IGN) + темпоральное накопление 0.92
-    // + денойз собирают полусферу заново — шум не виден.
+    // Optimization: 6 rays x 10 steps (was 8x12) — cuts tracing by ~40%.
+    // Per-pixel varying ray sets (IGN) + temporal accumulation 0.92
+    // + denoise rebuild the hemisphere — the noise is not visible.
     cvar_register_ex("r_gi_rays", 6.0f, 2.0f, 32.0f, CVAR_ARCHIVE,
                      "лучей на пиксель (дороже = чище)");
     cvar_register_ex("r_gi_steps", 10.0f, 4.0f, 32.0f, CVAR_ARCHIVE,
@@ -120,8 +120,8 @@ void gi_init(GiParams *g, int vw, int vh)
                      "радиус ambient occlusion, м");
     cvar_register_ex("r_gi_sky", 0.45f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "крупное затенение по закрытости небосвода (игра света)");
-    // Небесный свет на промахах лучей: тени получают цвет небосвода (UE5
-    // Skylight). 1.0 = радианс панорамы без приумножения.
+    // Sky light on ray misses: shadows receive the skydome color (UE5
+    // Skylight). 1.0 = panorama radiance without extra scaling.
     cvar_register_ex("r_gi_skylight", 1.0f, 0.0f, 3.0f, CVAR_ARCHIVE,
                      "свет неба в тенях (цвет берётся с панорамы неба)");
     cvar_register_ex("r_gi_clamp", 1.0f, 0.1f, 8.0f, CVAR_ARCHIVE,
@@ -130,8 +130,8 @@ void gi_init(GiParams *g, int vw, int vh)
                      "насыщенность отражённого света (цветные рефлексы)");
     cvar_register_ex("r_gi_reflect", 0.35f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "зеркальный отблеск GI (отражения света на поверхностях)");
-    // Максимум 1.0 безопасен: hit_radiance делит на (1 + spread), поэтому
-    // цепочка переотражений перераспределяет энергию, а не добавляет её.
+    // Max 1.0 is safe: hit_radiance divides by (1 + spread), so the
+    // rebounce chain redistributes energy instead of adding to it.
     cvar_register_ex("r_gi_spread", 0.18f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "распространение света: переотражения по цепочке");
     cvar_register_ex("r_gi_temporal", 0.92f, 0.0f, 0.96f, CVAR_ARCHIVE,
@@ -181,8 +181,8 @@ void gi_resize(GiParams *g, int vw, int vh)
     g->vw = vw;
     g->vh = vh;
     int gw = (int)(vw * sc), gh = (int)(vh * sc);
-    // Абсолютный кэп: GI после билатерального денойза мягкий, трассировать
-    // больше 960x540 (даже на 4К-экране) — выбрасывание фпс на ветер
+    // Absolute cap: GI is soft after bilateral denoising, tracing more than
+    // 960x540 (even on a 4K screen) throws fps away for nothing
     if (gw > 960) { gh = gh * 960 / gw; gw = 960; }
     if (gh > 540) { gw = gw * 540 / gh; gh = 540; }
     if (gw < 8) gw = 8;
@@ -216,7 +216,7 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
                  const RendererContext *rc)
 {
     if (!g->fbo_gi[0] || !gi_is_on()) return scene_tex;
-    // Смена r_gi_scale на ходу: пересобрать таргеты (дешевле, чем ветвление)
+    // Changing r_gi_scale on the fly: rebuild the targets (cheaper than branching)
     {
         float sc = cvar_get("r_gi_scale");
         int want_w = (int)(g->vw * (sc < 0.25f ? 0.25f : (sc > 1.0f ? 1.0f : sc)));
@@ -225,7 +225,7 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
 
     float invvp[16];
     mat4_invert(invvp, rc->viewproj);
-    int cur = g->cur ^ 1;                       // пишем в свободный буфер
+    int cur = g->cur ^ 1;                       // write into the free buffer
     float blend = cvar_get("r_gi_temporal");
     if (blend > 0.96f) blend = 0.96f;
     if (g->frames == 0 || !g->have_prev) blend = 0.0f;
@@ -235,7 +235,7 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
     glDisable(GL_BLEND);
     glBindVertexArray(g->vao);
 
-    // --- 1) Трассировка + темпоральное накопление ---------------------------
+    // --- 1) Tracing + temporal accumulation ---------------------------------
     glBindFramebuffer(GL_FRAMEBUFFER, g->fbo_gi[cur]);
     glViewport(0, 0, g->gw, g->gh);
     glUseProgram(g->prog_trace);
@@ -246,10 +246,10 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
     glBindTexture(GL_TEXTURE_2D, scene_depth);
     glUniform1i(g->t_depth, 1);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, g->tex_gi[g->cur]);    // прошлый кадр
+    glBindTexture(GL_TEXTURE_2D, g->tex_gi[g->cur]);    // previous frame
     glUniform1i(g->t_prev, 2);
-    // Панорама неба (unit 3): цвет промахнувшихся лучей. Нет неба (меню) —
-    // uSkyOn = 0, шейдер красит промахи градиентом из цвета тумана.
+    // Sky panorama (unit 3): color of missed rays. No sky (menu) —
+    // uSkyOn = 0, the shader tints misses with a fog-color gradient.
     {
         float skytint[3];
         GLuint skytex = sky_panorama(skytint);
@@ -270,20 +270,21 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
     glUniform2f(g->t_texel, 1.0f / (float)g->gw, 1.0f / (float)g->gh);
     glUniform4f(g->t_params, cvar_get("r_gi_rays"), cvar_get("r_gi_steps"),
                 cvar_get("r_gi_radius"), rc->znear);
-    // Фаза джиттера: меняется каждый кадр — накопление усредняет разные лучи
+    // Dither phase: changes every frame — accumulation averages different rays
     glUniform4f(g->t_params2, rc->zfar, cvar_get("r_gi_sky"),
                 (float)(g->frames % 64) * 1.618f, cvar_get("r_gi_ao_radius"));
     glUniform4f(g->t_params3, cvar_get("r_gi_bounce"),
                 cvar_get("r_gi_reflect"), cvar_get("r_gi_spread"), 0.0f);
     glUniform3f(g->t_groundcolor, rc->ground_color[0], rc->ground_color[1],
                 rc->ground_color[2]);
-    // Снежный покров: GI зимой светлее — отскок от земли белый, тени холоднее
+    // Snow cover: GI is brighter in winter — the bounce off the ground is
+    // white, shadows cooler
     glUniform1f(g->t_snowcover, rc->snowcover);
     glUniform1f(g->t_clamp, cvar_get("r_gi_clamp"));
     glUniform1f(g->t_blend, blend);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    // --- 2) Билатеральный денойз (H, затем V) -------------------------------
+    // --- 2) Bilateral denoise (H, then V) -----------------------------------
     float br = cvar_get("r_gi_blur");
     GLuint denoised = g->tex_gi[cur];
     if (br > 0.01f) {
@@ -305,9 +306,9 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, g->tex_gi[cur]);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        // V: tmp -> gi[g->cur] (старый буфер: он уже прочитан как история).
-        // ВАЖНО: пишем НЕ в gi[cur] — он остаётся «сырым» накопителем для
-        // следующего кадра (иначе размытие копилось бы экспоненциально).
+        // V: tmp -> gi[g->cur] (the old buffer: already read as history).
+        // IMPORTANT: we do NOT write into gi[cur] — it stays the "raw"
+        // accumulator for the next frame (otherwise blur would compound exponentially).
         glBindFramebuffer(GL_FRAMEBUFFER, g->fbo_gi[g->cur]);
         glUniform2f(g->b_dir, 0.0f, 1.0f);
         glActiveTexture(GL_TEXTURE0);
@@ -316,7 +317,7 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
         denoised = g->tex_gi[g->cur];
     }
 
-    // --- 3) Наложение на сцену ---------------------------------------------
+    // --- 3) Apply onto the scene ---------------------------------------------
     glBindFramebuffer(GL_FRAMEBUFFER, g->fbo_out);
     glViewport(0, 0, g->vw, g->vh);
     glUseProgram(g->prog_apply);
@@ -342,8 +343,8 @@ GLuint gi_render(GiParams *g, GLuint scene_tex, GLuint scene_depth,
 
     memcpy(g->prev_vp, rc->viewproj, sizeof g->prev_vp);
     g->have_prev = 1;
-    // История для следующего кадра — СЫРОЙ накопитель (gi[cur]); denoised
-    // писался в gi[g->cur], поэтому свапаем так, чтобы cur стал историей.
+    // History for the next frame is the RAW accumulator (gi[cur]); denoised
+    // was written into gi[g->cur], so swap so that cur becomes the history.
     g->cur = cur;
     g->frames++;
     return g->tex_out;

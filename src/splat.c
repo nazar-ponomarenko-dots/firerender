@@ -1,10 +1,10 @@
 // ============================================================================
-//  splat.c — поверхности рельефа: splat-маска, дороги, карта занятости
+//  splat.c — terrain surfaces: splat mask, roads, occupancy map
 // ----------------------------------------------------------------------------
-//  См. splat.h. Порядок работы при загрузке карты:
-//    world_load: высоты -> splat_flatten_roads (режем полотно дорог)
-//                       -> нормали/текстуры (по УЖЕ выровненным высотам)
-//    scene_build: splat_build (маска материалов + занятость объектами)
+//  See splat.h. Order of operations during map load:
+//    world_load: heights -> splat_flatten_roads (cut the roadbed)
+//                       -> normals/textures (over ALREADY flattened heights)
+//    scene_build: splat_build (material mask + occupancy by objects)
 // ============================================================================
 #include "splat.h"
 
@@ -15,16 +15,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-// --- Состояние ----------------------------------------------------------------
+// --- State ------------------------------------------------------------------
 static MapSurfaces s_surf;
-static int s_sw, s_sh;             // разрешение splat-маски (тексели)
-static float s_spm;                // метров на тексель
+static int s_sw, s_sh;             // splat mask resolution (texels)
+static float s_spm;                // meters per texel
 static unsigned char *s_mask;      // RGBA8: dirt, sand, gravel, asphalt
 static GLuint s_tex;
 static float s_world_w, s_world_d;
 
-// Карта занятости: своё (более грубое) разрешение — 2 м/тексель хватает,
-// чтобы трава не росла в машине, и вдвое дешевле по памяти.
+// Occupancy map: its own (coarser) resolution — 2 m/texel is enough to keep
+// grass from growing inside a car, and it is twice as cheap in memory.
 #define OCC_METERS 2.0f
 static int s_ow, s_oh;
 static unsigned char *s_occ;
@@ -35,7 +35,7 @@ GLuint splat_texture(void) { return s_tex; }
 const MapSurfaces *splat_surfaces(void) { return &s_surf; }
 unsigned int splat_occupancy_version(void) { return s_occ_version; }
 
-// --- Геометрия: расстояние от точки до отрезка (XZ) ---------------------------
+// --- Geometry: distance from a point to a segment (XZ) ----------------------
 static float seg_dist2(float px, float pz, float ax, float az,
                        float bx, float bz)
 {
@@ -52,7 +52,7 @@ static float seg_dist2(float px, float pz, float ax, float az,
     return ex * ex + ez * ez;
 }
 
-// Минимальное расстояние до ломаной (осевой линии дороги/полосы), метры.
+// Minimum distance to a polyline (road/lane centerline), in meters.
 static float polyline_dist(const float pts[][2], int n, float px, float pz)
 {
     if (n <= 0) return 1e9f;
@@ -69,7 +69,7 @@ static float polyline_dist(const float pts[][2], int n, float px, float pz)
     return sqrtf(best);
 }
 
-// AABB ломаной с запасом margin — чтобы не гонять всю карту на каждую дорогу.
+// AABB of the polyline padded by margin — so we don't scan the whole map per road.
 static void polyline_bounds(const float pts[][2], int n, float margin,
                             float out[4])
 {
@@ -85,16 +85,17 @@ static void polyline_bounds(const float pts[][2], int n, float margin,
     out[2] -= margin; out[3] += margin;
 }
 
-// --- Выравнивание рельефа под дороги ------------------------------------------
-//  Полотно дороги должно быть проезжим: вдоль осевой линии высота
-//  сглаживается ОЧЕНЬ сильно (продольный профиль по опорным точкам линейно
-//  интерполируется), поперёк — плавно переходит в исходный рельеф на
-//  расстоянии width/2 + flatten_extra.
+// --- Flattening the terrain under roads --------------------------------------
+//  The roadbed must be drivable: along the centerline the height is smoothed
+//  VERY strongly (the longitudinal profile is linearly interpolated between the
+//  control points), across it smoothly blends back into the original terrain at
+//  distance width/2 + flatten_extra.
 //
-//  Опорная высота считается по СЫРОМУ рельефу вдоль линии и сглаживается
-//  скользящим средним: дорога идёт по местности, но без ям и кочек.
+//  The reference height is taken from the RAW terrain along the line and
+//  smoothed with a moving average: the road follows the land, but with no
+//  potholes or bumps.
 
-// Высота исходного рельефа в точке (метры) прямо из массива высот.
+// Original terrain height at a point (meters), straight from the height array.
 static float raw_height(const WorldState *w, float x, float z)
 {
     if (!w->heights) return 0.0f;
@@ -119,17 +120,17 @@ static float raw_height(const WorldState *w, float x, float z)
     return a + (b - a) * tz;
 }
 
-// Сэмплы вдоль дороги: центр линии с шагом ~2 м, высота сглажена окном.
+// Samples along the road: line center at ~2 m steps, height smoothed by a window.
 #define ROAD_SAMPLE_STEP 2.0f
-#define ROAD_SMOOTH_WIN  12          // окно сглаживания профиля (сэмплов)
+#define ROAD_SMOOTH_WIN  12          // profile smoothing window (samples)
 
 typedef struct { float x, z, h; } RoadSample;
 
-// Строит продольный профиль дороги. Возвращает число сэмплов (0 при OOM).
+// Builds the longitudinal road profile. Returns the sample count (0 on OOM).
 static int road_profile(const WorldState *w, const MapRoad *r,
                         RoadSample **out)
 {
-    // Длина ломаной -> число сэмплов
+    // Polyline length -> sample count
     float total = 0.0f;
     for (int i = 0; i + 1 < r->point_n; i++) {
         float dx = r->points[i + 1][0] - r->points[i][0];
@@ -140,7 +141,7 @@ static int road_profile(const WorldState *w, const MapRoad *r,
     if (n < 2) n = 2;
     RoadSample *s = malloc((size_t)n * sizeof *s);
     if (!s) return 0;
-    // Раскладываем точки равномерно по длине
+    // Spread the points evenly along the length
     for (int k = 0; k < n; k++) {
         float want = total * (float)k / (float)(n - 1);
         float acc = 0.0f;
@@ -163,7 +164,7 @@ static int road_profile(const WorldState *w, const MapRoad *r,
         s[k].z = pz;
         s[k].h = raw_height(w, px, pz);
     }
-    // Сглаживание профиля скользящим средним (дорога без кочек)
+    // Smooth the profile with a moving average (road without bumps)
     float *sm = malloc((size_t)n * sizeof(float));
     if (sm) {
         for (int k = 0; k < n; k++) {
@@ -181,7 +182,7 @@ static int road_profile(const WorldState *w, const MapRoad *r,
     return n;
 }
 
-// Высота полотна в точке (ближайший сэмпл профиля) + расстояние до оси.
+// Roadbed height at a point (nearest profile sample) + distance to the axis.
 static void road_query(const RoadSample *s, int n, float px, float pz,
                        float *out_h, float *out_dist)
 {
@@ -190,7 +191,7 @@ static void road_query(const RoadSample *s, int n, float px, float pz,
         float d2 = seg_dist2(px, pz, s[i].x, s[i].z, s[i + 1].x, s[i + 1].z);
         if (d2 >= best) continue;
         best = d2;
-        // высота вдоль сегмента: интерполяция между сэмплами по проекции
+        // height along the segment: interpolate between samples by projection
         float dx = s[i + 1].x - s[i].x, dz = s[i + 1].z - s[i].z;
         float len2 = dx * dx + dz * dz;
         float t = len2 > 1e-8f
@@ -230,7 +231,7 @@ int splat_flatten_roads(WorldState *w)
                 float rh, d;
                 road_query(prof, pn, px, pz, &rh, &d);
                 if (d > reach) continue;
-                // Вес выравнивания: 1 на полотне, плавно к 0 на reach
+                // Flatten weight: 1 on the roadbed, smoothly down to 0 at reach
                 float t;
                 if (d <= half) t = 1.0f;
                 else {
@@ -242,14 +243,14 @@ int splat_flatten_roads(WorldState *w)
                 size_t idx = (size_t)j * w->tex_w + i;
                 float src = w->heights[idx];
                 float target = rh;
-                // Колеи грунтовки: две продавленные полосы по краям полотна
+                // Dirt-road ruts: two pressed strips along the roadbed edges
                 if (r->ruts > 0.001f && d <= half) {
-                    float rut_c = half * 0.55f;         // центр колеи
-                    float rut_w = half * 0.28f;         // полуширина
+                    float rut_c = half * 0.55f;         // rut center
+                    float rut_w = half * 0.28f;         // half-width
                     float dd = fabsf(d - rut_c);
                     float rut = 1.0f - dd / (rut_w + 1e-5f);
                     if (rut > 0.0f)
-                        target -= rut * rut * r->ruts * 0.14f;   // до 14 см
+                        target -= rut * rut * r->ruts * 0.14f;   // up to 14 cm
                 }
                 w->heights[idx] = src + (target - src) * k;
                 changed = 1;
@@ -262,9 +263,9 @@ int splat_flatten_roads(WorldState *w)
     return changed;
 }
 
-// --- Splat-маска ---------------------------------------------------------------
-// Добавляет вес слоя в тексель (насыщение до 255, остальные слои ужимаются:
-// сумма каналов не должна превышать 255, иначе шейдеру нечего нормировать).
+// --- Splat mask --------------------------------------------------------------
+// Adds a layer weight to the texel (saturating at 255, other layers squeezed down:
+// the channel sum must not exceed 255, otherwise the shader has nothing to normalize).
 static void mask_add(int i, int j, int layer, float v)
 {
     if (v <= 0.001f) return;
@@ -276,7 +277,7 @@ static void mask_add(int i, int j, int layer, float v)
     int nv = cur + add;
     if (nv > 255) nv = 255;
     px[layer] = (unsigned char)nv;
-    // Остальные слои уступают место (новый материал перекрывает старый)
+    // Other layers give way (the new material overrides the old one)
     int room = 255 - nv;
     int other = 0;
     for (int k = 0; k < 4; k++) if (k != layer) other += px[k];
@@ -296,7 +297,7 @@ static void occ_add(int i, int j, float v)
     *px = (unsigned char)(nv > 255 ? 255 : nv);
 }
 
-// Круг занятости в мировых координатах
+// Occupancy circle in world coordinates
 void splat_occupy_circle(float x, float z, float r, float strength)
 {
     if (!s_occ || r <= 0.0f) return;
@@ -328,7 +329,7 @@ void splat_occupy_box(float x, float z, float hw, float hd, float strength)
     s_occ_version++;
 }
 
-// Покраска: пятно материала (круг/прямоугольник/полоса)
+// Painting: a material blob (circle/rectangle/strip)
 static void paint_apply(const MapPaint *p)
 {
     float reach = 0.0f;
@@ -372,13 +373,13 @@ static void paint_apply(const MapPaint *p)
             }
             if (w <= 0.0f) continue;
             if (w > 1.0f) w = 1.0f;
-            w = w * w * (3.0f - 2.0f * w);          // smoothstep-край
+            w = w * w * (3.0f - 2.0f * w);          // smoothstep edge
             mask_add(i, j, p->material, w * p->strength);
         }
     }
 }
 
-// Дорога: полотно своим материалом, обочина — своим, плюс занятость.
+// Road: the bed gets its own material, the shoulder its own, plus occupancy.
 static void road_paint(const MapRoad *r)
 {
     float half = r->width * 0.5f;
@@ -394,14 +395,14 @@ static void road_paint(const MapRoad *r)
             float pz = ((float)j + 0.5f) * s_spm;
             float d = polyline_dist(r->points, r->point_n, px, pz);
             if (d > reach) continue;
-            // Полотно: полный вес до half, спад на edge
+            // Roadbed: full weight up to half, falloff over edge
             float road_w = 1.0f - (d - half) / (r->edge + 1e-5f);
             if (road_w > 1.0f) road_w = 1.0f;
             if (road_w > 0.0f) {
                 road_w = road_w * road_w * (3.0f - 2.0f * road_w);
                 mask_add(i, j, r->material, road_w);
             }
-            // Обочина: между half и outer, гаснет к краю
+            // Shoulder: between half and outer, fading out toward the edge
             if (r->shoulder > 0.01f && r->shoulder_material != r->material) {
                 float sh = 0.0f;
                 if (d > half && d <= outer) sh = 1.0f;
@@ -415,7 +416,7 @@ static void road_paint(const MapRoad *r)
             }
         }
     }
-    // Занятость: на полотне (и чуть шире) растительности нет
+    // Occupancy: on the roadbed (and slightly wider) there is no vegetation
     if (!r->veg_clear || !s_occ) return;
     float occ_r = half + 0.35f;
     for (int i = 0; i + 1 < r->point_n; i++) {
@@ -431,7 +432,7 @@ static void road_paint(const MapRoad *r)
     }
 }
 
-// Уклон рельефа в точке (тангенс) — для авто-щебня на крутых склонах.
+// Terrain slope at a point (tangent) — for auto-gravel on steep slopes.
 static float slope_at(const WorldState *w, float x, float z)
 {
     const float e = 1.5f;
@@ -462,8 +463,8 @@ void splat_build(WorldState *w)
     }
     Uint64 t0 = SDL_GetTicks();
 
-    // 1) Авто-материалы по рельефу: на крутых склонах базовая трава не
-    //    держится — проступает щебень (как в жизни: осыпь на обрыве).
+    // 1) Automatic materials from the terrain: on steep slopes the base grass
+    //    does not hold — gravel shows through (as in real life: scree on a cliff).
     if (s_surf.slope_rock > 1.0f) {
         float tan_min = tanf(s_surf.slope_rock * (float)M_PI / 180.0f);
         float tan_max = tan_min * 1.6f + 0.2f;
@@ -479,21 +480,21 @@ void splat_build(WorldState *w)
             }
     }
 
-    // 2) Пятна покраски из карты
+    // 2) Paint blobs from the map
     for (int i = 0; i < mapdata_paint_count(); i++) {
         const MapPaint *p = mapdata_paint(i);
         if (p) paint_apply(p);
     }
 
-    // 3) Дороги (полотно + обочина + занятость)
+    // 3) Roads (bed + shoulder + occupancy)
     for (int i = 0; i < mapdata_road_count(); i++) {
         const MapRoad *r = mapdata_road(i);
         if (r) road_paint(r);
     }
 
-    // 4) Занятость от статических объектов карты (биллборды-деревья, модели):
-    //    трава не растёт в стволе/кузове. Радиус — из коллизии, если задана,
-    //    иначе из масштаба объекта.
+    // 4) Occupancy from static map objects (tree billboards, models):
+    //    grass must not grow inside a trunk or a car body. The radius comes
+    //    from the collision if defined, otherwise from the object scale.
     for (int i = 0; i < mapdata_object_count(); i++) {
         const MapObject *o = mapdata_object(i);
         if (!o || !o->model[0]) continue;
@@ -502,7 +503,7 @@ void splat_build(WorldState *w)
                                                     : 0.9f * sxz;
         splat_occupy_circle(o->pos[0], o->pos[2], r, 1.0f);
     }
-    // Коллизии-квадраты из collisions[] (дома, платформы)
+    // Square collisions from collisions[] (houses, platforms)
     for (int i = 0; i < mapdata_collision_count(); i++) {
         const MapCollision *c = mapdata_collision(i);
         if (!c || c->size[0] <= 0.01f || c->size[1] <= 0.01f) continue;
@@ -510,7 +511,7 @@ void splat_build(WorldState *w)
                          c->size[0] * 0.5f, c->size[1] * 0.5f, 1.0f);
     }
 
-    // Текстура splat-маски: LINEAR (края материалов плавные), CLAMP.
+    // Splat mask texture: LINEAR (soft material edges), CLAMP.
     glGenTextures(1, &s_tex);
     glBindTexture(GL_TEXTURE_2D, s_tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -522,7 +523,7 @@ void splat_build(WorldState *w)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Статистика: сколько площади под каким материалом (для лога)
+    // Statistics: how much area each material covers (for the log)
     long cov[4] = { 0, 0, 0, 0 };
     long total = (long)s_sw * s_sh;
     for (long k = 0; k < total; k++)
@@ -547,7 +548,7 @@ void splat_free(void)
     s_occ_version++;
 }
 
-// --- Запросы ------------------------------------------------------------------
+// --- Queries ------------------------------------------------------------------
 float splat_weight_at(int material, float wx, float wz)
 {
     if (!s_mask || material < 0 || material >= SPLAT_LAYERS) return 0.0f;
@@ -574,13 +575,13 @@ float splat_occupancy_at(float wx, float wz)
 
 float splat_grass_factor(float wx, float wz)
 {
-    // Занятость: 1 = стоит объект/дорога -> травы нет вовсе.
+    // Occupancy: 1 = an object/road stands here -> no grass at all.
     float occ = splat_occupancy_at(wx, wz);
     if (occ > 0.5f) return 0.0f;
-    float f = 1.0f - occ * 2.0f;               // 0.5 занятости -> уже 0
+    float f = 1.0f - occ * 2.0f;               // 0.5 occupancy -> already 0
     if (!s_mask) return f;
-    // Слои поверхности: базовая трава уступает материалу пропорционально
-    // его весу, а на самом материале трава растёт с коэффициентом grass.
+    // Surface layers: base grass yields to a material proportionally to its
+    // weight, and on the material itself grass grows with the grass coefficient.
     int i = (int)(wx / s_spm);
     int j = (int)(wz / s_spm);
     if (i < 0) i = 0;

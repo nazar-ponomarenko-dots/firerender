@@ -1,10 +1,10 @@
 // ============================================================================
-//  shader.c — чтение файлов шейдеров и сборка программ
+//  shader.c — reading shader files and building programs
 // ----------------------------------------------------------------------------
-//  Файлы читаются через менеджер ресурсов (resources_read_text: диск ->
-//  ../диск -> вшитые данные). Программы КЕШИРУЮТСЯ по паре (vs, fs) в
-//  resources.c — один и тот же шейдер компилируется один раз, сколько бы
-//  узлов его ни использовали (см. resources_program).
+//  Files are read through the resource manager (resources_read_text: disk ->
+//  ../disk -> embedded data). Programs are CACHED by the (vs, fs) pair in
+//  resources.c — the same shader is compiled once no matter how many nodes
+//  use it (see resources_program).
 // ============================================================================
 #include "shader.h"
 
@@ -62,23 +62,25 @@ uint64_t shader_source_stamp(const char *path)
     return path ? shader_stamp_recursive(path, 0) : 0;
 }
 
-// Префикс GLSL для текущей платформы
+// GLSL prefix for the current platform
 static const char *shader_version(GLenum type)
 {
 #ifdef USE_GLES_PATH
     if (type == GL_COMPUTE_SHADER)
         return "#version 310 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
-    return "#version 300 es\nprecision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
+    return FR_GLSL_VERSION_LINE
+           "precision highp float;\nprecision highp int;\n#define FR_HEIGHT_RG8 1\n";
 #else
     if (type == GL_COMPUTE_SHADER)
-        return "#version 430 core\n";   // compute-шейдеры требуют GLSL 4.30+
-    return "#version 330 core\n";
+        return "#version 430 core\n";   // compute shaders require GLSL 4.30+
+    return FR_GLSL_VERSION_LINE;
 #endif
 }
 
-// Разворачивает #include "файл" — рекурсивно подставляет содержимое
-// (глубина до 8, циклы не проверяются). Пути — относительно директории
-// шейдера. Так вся сцена делит общий код (shaders/snow.glsl, csm.glsl).
+// Expands #include "file" — recursively substitutes the contents
+// (depth up to 8, cycles are not checked). Paths are relative to the shader
+// directory. This way the whole scene shares common code (shaders/snow.glsl,
+// csm.glsl).
 static int buf_grow(char **buf, size_t *len, size_t *cap, const char *s)
 {
     size_t sl = strlen(s);
@@ -129,7 +131,7 @@ static char *shader_expand_includes(const char *text, const char *dir, int depth
                 }
                 free(exp);
             } else {
-                // файла нет — оставляем как есть (ошибка будет в GLSL-логе)
+                // file missing — leave the line as is (the error shows in the GLSL log)
                 if (!buf_grow(&out, &len, &cap, line)) goto oom;
             }
         } else {
@@ -151,7 +153,7 @@ GLuint compile_shader_file(GLenum type, const char *path)
         SDL_Log("Cannot read shader file: %s", path);
         return 0;
     }
-    // Директория шейдера — база для относительных #include
+    // Shader directory — base for relative #include paths
     char dir[512] = "";
     const char *slash = strrchr(path, '/');
     if (slash) {
@@ -194,9 +196,74 @@ GLuint compile_shader_file(GLenum type, const char *path)
     return sh;
 }
 
+// Compiles an inline body with the same dialect prefix the file loader uses.
+static GLuint compile_shader_string(GLenum type, const char *body)
+{
+    const char *version = shader_version(type);
+    size_t n = strlen(version) + strlen(body) + 1;
+    char *buf = malloc(n);
+    if (!buf) return 0;
+    snprintf(buf, n, "%s%s", version, body);
+    const char *src = buf;
+
+    GLuint sh = glCreateShader(type);
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(sh, sizeof log, NULL, log);
+        SDL_Log("GLSL probe: %s compile failed: %s",
+                type == GL_VERTEX_SHADER ? "vertex" : "fragment", log);
+        glDeleteShader(sh);
+        free(buf);
+        return 0;
+    }
+    free(buf);
+    return sh;
+}
+
+int shader_dialect_supported(void)
+{
+    // One probe per run: the driver does not change mid-session, and the
+    // result is queried from several places (boot message, map load).
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    if (getenv("FR_GL_PROBE_FAIL")) return (cached = 0);  // test knob
+
+    static const char *vs_body =
+        "in vec3 aPos;\n"
+        "void main(){ gl_Position = vec4(aPos, 1.0); }\n";
+    static const char *fs_body =
+        "out vec4 FragColor;\n"
+        "void main(){ FragColor = vec4(1.0); }\n";
+    GLuint vs = compile_shader_string(GL_VERTEX_SHADER, vs_body);
+    GLuint fs = compile_shader_string(GL_FRAGMENT_SHADER, fs_body);
+    int ok = 0;
+    if (vs && fs) {
+        GLuint prog = glCreateProgram();
+        glAttachShader(prog, vs);
+        glAttachShader(prog, fs);
+        glLinkProgram(prog);
+        GLint linked = 0;
+        glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+        if (!linked) {
+            char log[512];
+            glGetProgramInfoLog(prog, sizeof log, NULL, log);
+            SDL_Log("GLSL probe: link failed: %s", log);
+        }
+        ok = linked ? 1 : 0;
+        glDeleteProgram(prog);
+    }
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    return (cached = ok);
+}
+
 GLuint make_program(const char *vs_path, const char *fs_path)
 {
-    // Кеш в resources.c: одна программа на пару файлов, ссылки считаются.
+    // Cache lives in resources.c: one program per file pair, refcounted.
     return resources_program(vs_path, fs_path);
 }
 

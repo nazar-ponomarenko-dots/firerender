@@ -1,4 +1,4 @@
-// decal.fs — декаль на рельефе: текстура * цвет * альфа, альфа-бленд.
+// decal.fs — decal on the terrain: texture * color * alpha, alpha-blended.
 in vec2 vUV;
 out vec4 FragColor;
 

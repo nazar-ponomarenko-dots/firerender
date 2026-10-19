@@ -1,63 +1,82 @@
 // ============================================================================
-//  audio.h — звук (SDL3 audio): эффекты и фоновые петли
+//  audio.h — sound (SDL3 audio): effects and background loops
 // ----------------------------------------------------------------------------
-//  Звуки грузятся через ресурс-менеджер (пак карты -> диск -> вшитые),
-//  поэтому карта может положить свои audio/*.wav в zip — они переопределят
-//  движковые. Воспроизведение: несколько каналов-потоков, привязанных к
-//  устройству (устройство микширует их само). Есть фоновый канал для петель
-//  (ветер и т.п.).
+//  Sounds load through the resource manager (map pack -> disk -> built-in),
+//  so a map can put its own audio/*.wav into a zip — they override
+//  the engine ones. Playback: several stream channels bound to the
+//  device (the device mixes them itself). There is a background channel for loops
+//  (wind and the like).
 // ============================================================================
 #ifndef AUDIO_H
 #define AUDIO_H
 
 typedef struct Sound Sound;
+struct WorldState;   // incomplete type: audio only needs a pointer to the map
+typedef struct WorldState WorldState;   // same types as in world.h
 
-// Инициализация звука: открывает устройство. Без звука движок работает
-// (если нет устройства/файлов). Вызывать один раз после SDL_Init.
+// Audio initialization: opens the device. The engine works without
+// sound (if there is no device/files). Call once after SDL_Init.
 void audio_init(void);
 
-// Каждый кадр: обслуживает фоновую петлю (доливает данные).
+// Every frame: services the background loop (feeds it more data).
 void audio_update(void);
 
-// Загружает wav (через ресурсы). Кеш: один файл — один объект.
-// NULL, если файла нет или он битый.
+// Loads a wav (through resources). Cache: one file — one object.
+// NULL if the file is missing or broken.
 Sound *audio_load(const char *path);
 
-// Проигрывает звук один раз. volume 0..1, pitch 0.5..2 (1 = оригинал).
-// Если все каналы заняты — занимает самый старый.
+// Plays a sound once. volume 0..1, pitch 0.5..2 (1 = original).
+// If all channels are busy — takes the oldest one.
 void audio_play(Sound *s, float volume, float pitch);
 
-// Фоновая петля: звук повторяется непрерывно до audio_loop_stop.
+// Background loop: the sound repeats continuously until audio_loop_stop.
 // volume 0..1.
 void audio_loop_start(Sound *s, float volume);
 void audio_loop_stop(void);
-// Множитель громкости петли на ходу (погода: в дождь ветер громче).
-// 1.0 — без изменений; применяет audio_update каждый кадр.
+// Loop volume multiplier applied on the fly (weather: wind is louder in rain).
+// 1.0 — unchanged; audio_update applies it every frame.
 void audio_loop_mul_volume(float mul);
 
-// Музыка карты: вторая независимая петля (не конфликтует с ambient).
+// Map music: a second independent loop (does not conflict with ambient).
 void audio_music_start(Sound *s, float volume);
 void audio_music_stop(void);
 
-// --- Позиционный (3D) звук -----------------------------------------------------
-// Источник в точке pos[3]: громкость падает с расстоянием до слушателя
-// (глухо за радиусом radius), с дистанцией усиливается реверб-эхо.
-// audio_3d_play — петля (повторяется, пока не audio_3d_stop);
-// audio_3d_play_once — один раз (канал сам освобождается).
-// Возвращает id канала (>= 0) или -1.
+// --- Positional (3D) sound -----------------------------------------------------
+// Source at pos[3]: volume falls off with distance to the listener
+// (inaudible beyond radius), reverb echo grows with distance.
+// audio_3d_play — loop (repeats until audio_3d_stop);
+// audio_3d_play_once — once (the channel frees itself).
+// Returns the channel id (>= 0) or -1.
 int audio_3d_play(Sound *s, float volume, const float pos[3], float radius);
 int audio_3d_play_once(Sound *s, float volume, const float pos[3], float radius);
 void audio_3d_stop(int id);
 void audio_3d_stop_all(void);
 
-// Слушатель (позиция камеры): вызывать каждый кадр из главного цикла.
+// Listener (camera position): call every frame from the main loop.
 void audio_set_listener(const float pos[3]);
 
-// Отладка: перечисляет звуки, играющие прямо сейчас (имена через пробел).
-// Возвращает число звуков. buf — строка, size — её размер.
+// World for occlusion: without it sound "always passes straight through". NULL — off.
+void audio_set_world(const struct WorldState *w);
+
+// Volume multiplier from line-of-sight occlusion LISTENER -> to
+// (1 = open, lower = behind a hill/wall). Exposed — for the console and tests.
+float audio_occlusion_at(const float to[3]);
+
+// Console command: snd_occlude <x> <y> <z> (registered in cmdreg.c).
+void cmd_snd_occlude(const char *args);
+
+// Occlusion self-test on a synthetic wall (FR_TEST 'Z'). Number of failures.
+int audio_selftest(void);
+
+// Same on a real map: logs the multiplier for every sound in map.json.
+// Call after the world is loaded (needs heights and the player position).
+void audio_selftest_world(const WorldState *w, const float listener[3]);
+
+// Debug: lists the sounds playing right now (space-separated names).
+// Returns the sound count. buf — the string, size — its capacity.
 int audio_active_names(char *buf, int size);
 
-// Полная очистка при выходе.
+// Full teardown at exit.
 void audio_cleanup(void);
 
 #endif

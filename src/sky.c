@@ -1,5 +1,5 @@
 // ============================================================================
-//  sky.c — небосвод из панорамы: узел Skybox3D + цвет тумана горизонта
+//  sky.c — skydome from a panorama: Skybox3D node + horizon fog color
 // ============================================================================
 #include "sky.h"
 
@@ -17,22 +17,22 @@
 #include <stdlib.h>
 
 typedef struct {
-    GLuint prog, vao, vbo;         // программа и треугольник на весь экран
-    GLuint tex;                    // панорама неба (img/skybox.png)
-    GLuint noise_tex;              // img/noise.png (процедурные облака)
+    GLuint prog, vao, vbo;         // program and the full-screen triangle
+    GLuint tex;                    // sky panorama (img/skybox.png)
+    GLuint noise_tex;              // img/noise.png (procedural clouds)
     GLint u_forward, u_right, u_up, u_tanfov, u_aspect;
     GLint u_sundir, u_suncolor, u_sunglow;
     GLint u_noise, u_camxz, u_time, u_clouds;
-    const RendererContext *rc;     // базис камеры и солнце (renderer.c)
+    const RendererContext *rc;     // camera basis and sun (renderer.c)
 } SkyParams;
-static SkyParams *s_sky = NULL;   // для hot-reload (shader_on_reshade)
+static SkyParams *s_sky = NULL;   // for hot-reload (shader_on_reshade)
 static void sky_reshade(void);
 
-static float g_fog_rgb[3] = { 0.6f, 0.65f, 0.7f };   // до загрузки неба
+static float g_fog_rgb[3] = { 0.6f, 0.65f, 0.7f };   // until the sky is loaded
 
 SceneNode *sky_make_node(const RendererContext *rc)
 {
-    // Панорама и тон — из map/map.json (sky = { tex, tint })
+    // Panorama and tint come from map/map.json (sky = { tex, tint })
     MapSky sc;
     mapdata_sky(&sc);
     GLuint prog = make_program("shaders/sky.vs", "shaders/sky.fs");
@@ -43,13 +43,13 @@ SceneNode *sky_make_node(const RendererContext *rc)
         return NULL;
     }
 
-    // Небо: REPEAT по X убирает шов панорамы на стыке 360 градусов.
-    // LINEAR (последний аргумент 1) — без полос/пикселизации на куполе
-    // (панорама 512x128 даёт ~1.4px/градус — NEAREST выглядел грязно).
-    // Текстура — через кеш ресурсов (пиксели уже загружены для цвета тумана).
+    // Sky: REPEAT on X removes the panorama seam at the 360-degree junction.
+    // LINEAR (last argument 1) — no banding/pixelation on the dome
+    // (the 512x128 panorama gives ~1.4 px/degree — NEAREST looked dirty).
+    // The texture goes through the resource cache (pixels already loaded for the fog color).
     GLuint tex = resources_texture(sc.tex, 3, GL_REPEAT, 1);
 
-    // Цвет тумана берём из середины панорамы неба — горизонт сходится с небом
+    // Fog color is taken from the middle of the sky panorama — the horizon meets the sky
     float fr = 0, fg = 0, fb = 0, fn = 0;
     for (int y = sh * 40 / 100; y < sh * 65 / 100; y++)
         for (int x = 0; x < sw; x++) {
@@ -63,9 +63,9 @@ SceneNode *sky_make_node(const RendererContext *rc)
     g_fog_rgb[0] = fr / fn / 255.0f;
     g_fog_rgb[1] = fg / fn / 255.0f;
     g_fog_rgb[2] = fb / fn / 255.0f;
-    // Пиксели во владении ресурсного кеша — не освобождаем (см. resources.h)
+    // Pixels are owned by the resource cache — do not free (see resources.h)
 
-    // Полноэкранный треугольник
+    // Full-screen triangle
     GLuint vao, vbo;
     float sky_verts[3][2] = { {-1, -1}, {3, -1}, {-1, 3} };
     glGenVertexArrays(1, &vao);
@@ -101,11 +101,11 @@ SceneNode *sky_make_node(const RendererContext *rc)
     p->u_camxz    = glGetUniformLocation(prog, "uCamXZ");
     p->u_time     = glGetUniformLocation(prog, "uTime");
     p->u_clouds   = glGetUniformLocation(prog, "uClouds");
-    // Шум для процедурных облаков (общий кеш ресурсов, REPEAT):
-    // img/cloud_noise.png — гладкий тайлящийся FBM (tools/make_cloud_noise.py),
-    // img/noise.png — белое зерно, облака из него получились бы в спеклу.
+    // Noise for procedural clouds (shared resource cache, REPEAT):
+    // img/cloud_noise.png — smooth tileable FBM (tools/make_cloud_noise.py),
+    // img/noise.png — white grain, clouds from it would turn out speckled.
     p->noise_tex  = resources_texture("img/cloud_noise.png", 3, GL_REPEAT, 1);
-    // Покрытие облаков — cvar (меню/консоль), применяется каждый кадр
+    // Cloud coverage — a cvar (menu/console), applied every frame
     cvar_register_ex("r_clouds", 0.25f, 0.0f, 1.0f, CVAR_ARCHIVE,
                      "процедурные облака: покрытие 0..1");
 
@@ -117,7 +117,7 @@ SceneNode *sky_make_node(const RendererContext *rc)
     glUniform3f(glGetUniformLocation(prog, "uTint"),
                 sc.tint[0], sc.tint[1], sc.tint[2]);
     glUseProgram(0);
-    s_sky = p;                     // для hot-reload
+    s_sky = p;                     // for hot-reload
     shader_on_reshade(sky_reshade);
 
     const float size[3] = { 0, 0, 0 };
@@ -135,9 +135,9 @@ SceneNode *sky_make_node(const RendererContext *rc)
     return node;
 }
 
-// Hot-reload: пересоздать программу и uniform'ы неба.
-// replace балансирует refcount (release старого + новая ссылка); если пара
-// не пересобралась — 0, продолжаем рисовать прежнюю программу.
+// Hot-reload: recreate the sky program and uniforms.
+// replace balances the refcount (release the old + new reference); if the
+// pair fails to relink — 0, keep drawing the previous program.
 static void sky_reshade(void)
 {
     SkyParams *p = s_sky;
@@ -174,24 +174,24 @@ void sky_node_render(SceneNode *n, float dt)
     (void)dt;
     SkyParams *p = n->params;
     const RendererContext *rc = p->rc;
-    if (rc->pass == RP_SHADOW) return; // в карты теней небо не пишет
+    if (rc->pass == RP_SHADOW) return; // the sky does not write into shadow maps
 
-    glDisable(GL_DEPTH_TEST);          // небо рисуется первым, без глубины
-    glDepthMask(GL_FALSE);             // и не пишет в буфер глубины
+    glDisable(GL_DEPTH_TEST);          // the sky is drawn first, without depth
+    glDepthMask(GL_FALSE);             // and does not write to the depth buffer
     glUseProgram(p->prog);
-    // Базис ВИДОВОЙ камеры (реальный рендер): в 1-м лице совпадает со
-    // взглядом, в 3-м лице — камера стоит сзади персонажа. Иначе небо
-    // разъезжалось со сценой в 3-м лице.
+    // Basis of the VIEW camera (the real render): in 1st person it matches the
+    // look, in 3rd person the camera stands behind the character. Otherwise the
+    // sky drifted against the scene in 3rd person.
     glUniform3f(p->u_forward, rc->view_fwd[0], rc->view_fwd[1], rc->view_fwd[2]);
     glUniform3f(p->u_right, rc->view_right[0], rc->view_right[1], rc->view_right[2]);
     glUniform3f(p->u_up, rc->view_up[0], rc->view_up[1], rc->view_up[2]);
     glUniform1f(p->u_tanfov, tanf(rc->cam_fov_deg * 3.14159f / 360.0f));
     glUniform1f(p->u_aspect, rc->cam_aspect);
-    // Солнце — первый направленный источник (индекс 0)
+    // The sun is the first directional light (index 0)
     glUniform3f(p->u_sundir, rc->light_dir[0][0], rc->light_dir[0][1], rc->light_dir[0][2]);
     glUniform3f(p->u_suncolor, rc->light_color[0][0], rc->light_color[0][1], rc->light_color[0][2]);
     glUniform1f(p->u_sunglow, rc->sun_glow);
-    // Процедурные облака: шум на unit 1, дрейф по времени, привязка к миру
+    // Procedural clouds: noise on unit 1, drift over time, world-anchored
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, p->noise_tex);
     glUniform1i(p->u_noise, 1);
@@ -224,7 +224,7 @@ GLuint sky_panorama(float tint[3])
 
 void sky_cleanup(SceneNode *n)
 {
-    if (!n) return;   // безопасно при частичном построении сцены (error-path)
+    if (!n) return;   // safe with partially built scenes (error path)
     SkyParams *p = n->params;
     resources_program_release(p->prog);
     resources_texture_release(p->tex);

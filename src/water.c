@@ -1,11 +1,11 @@
 // ============================================================================
-//  water.c — вода: лужи, озёра, реки, моря (см. water.h)
+//  water.c — water: puddles, lakes, rivers, seas (see water.h)
 // ----------------------------------------------------------------------------
-//  Геометрия: круглые водоёмы — кольцевая сетка (ровный край у берега),
-//  море без радиуса — сетка на весь мир, река — лента вдоль осевой линии
-//  (митеринг на стыках сегментов). Поверхность плоская на уровне level;
-//  волны двигают вершины в вершинном шейдере, нормали считаются во
-//  фрагментном конечными разностями той же функции (гладкие при любой сетке).
+//  Geometry: round basins — a ring grid (even edge at the shore),
+//  a sea without radius — a grid over the whole world, a river — a ribbon along
+//  its centerline (mitered joints between segments). The surface is flat at level;
+//  waves move the vertices in the vertex shader, normals are computed in the
+//  fragment shader by finite differences of the same function (smooth on any grid).
 // ============================================================================
 #include "water.h"
 
@@ -21,9 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-static WaterParams *s_water = NULL;   // для hot-reload (water_reshade)
+static WaterParams *s_water = NULL;   // for hot-reload (water_reshade)
 
-// Длина волны по типу (шаг сетки в 3..4 раза мельче)
+// Wavelength per type (grid step 3..4 times finer)
 static float water_wavelen(const MapWater *m)
 {
     switch (m->type) {
@@ -35,7 +35,7 @@ static float water_wavelen(const MapWater *m)
     return 6.0f;
 }
 
-// Ширина кромки (полоса, где альфа сходит на нет): лужа — узкая, море — нет
+// Edge fade width (band where alpha goes to zero): puddle — narrow, sea — none
 static float water_edge_fade(const MapWater *m)
 {
     switch (m->type) {
@@ -47,20 +47,20 @@ static float water_edge_fade(const MapWater *m)
         return e < 0.5f ? 0.5f : (e > 4.0f ? 4.0f : e);
     }
     case WATER_SEA:
-        return m->radius > 0.0f ? 3.0f : 1e6f;  // море без края
+        return m->radius > 0.0f ? 3.0f : 1e6f;  // sea without an edge
     }
     return 2.0f;
 }
 
-// --- Общие CPU-запросы (камера, растительность, рендер) -------------------------
-// Накрывает ли водоём точку (x, z)? Река — по расстоянию до осевой линии,
-// круг — по радиусу, море без радиуса — весь мир.
+// --- Shared CPU queries (camera, vegetation, render) -------------------------
+// Does the water body cover point (x, z)? River — by distance to its centerline,
+// circle — by radius, a sea without radius — the whole world.
 static int water_covers(const MapWater *m, float x, float z)
 {
     if (m->type == WATER_RIVER) {
         if (m->point_n < 2) return 0;
         float hw = m->width * 0.5f;
-        // расстояние до ЛЕНТЫ: до ближайшего отрезка осевой линии
+        // distance to the RIBBON: to the nearest centerline segment
         float best = 1e30f;
         for (int i = 0; i + 1 < m->point_n; i++) {
             float ax = m->points[i][0], az = m->points[i][1];
@@ -91,9 +91,9 @@ float water_surface_at(const WorldState *w, float x, float z)
     for (int i = 0; i < mapdata_water_count(); i++) {
         const MapWater *m = mapdata_water(i);
         if (!m || !water_covers(m, x, z)) continue;
-        // Вода есть только там, где рельеф ПОД уровнем: берег (рельеф
-        // выше уровня) маскируем, чтобы плавание/растения не «застревали»
-        // в пересохшей кромке.
+        // Water exists only where the terrain is BELOW the level: the shore
+        // (terrain above the level) is masked so swimming/plants don't "get stuck"
+        // in the dried-out edge.
         if (sample_height(w, x, z) >= m->level) continue;
         if (m->level > best) best = m->level;
     }
@@ -141,9 +141,9 @@ int water_count(void)
     return mapdata_water_count();
 }
 
-// --- Геометрия ------------------------------------------------------------------
-// Круглый водоём: центр + кольца + ровный обод. aEdge — расстояние до края
-// (для мягкой кромки во фрагментном шейдере). UV = мировые/4 (тайл волн).
+// --- Geometry -----------------------------------------------------------------
+// Round basin: center + rings + even rim. aEdge — distance to the edge
+// (for the soft edge in the fragment shader). UV = world/4 (wave tiling).
 static int build_disc(const MapWater *m, float **verts, GLuint **idx,
                       int *vert_n, int *idx_n, float step)
 {
@@ -163,11 +163,11 @@ static int build_disc(const MapWater *m, float **verts, GLuint **idx,
     if (!v || !q) { free(v); free(q); return -1; }
     float cx = m->center[0], cz = m->center[1];
 
-    // центр
+    // center
     v[0] = cx; v[1] = cz; v[2] = cx / 4.0f; v[3] = cz / 4.0f; v[4] = r;
     int vi = 1;
     for (int ring = 1; ring <= nr; ring++) {
-        float rr = (ring == nr) ? r : dr * ring;    // обод ровно на радиусе
+        float rr = (ring == nr) ? r : dr * ring;    // rim exactly at the radius
         for (int s = 0; s < nseg; s++) {
             float th = 6.2831853f * s / nseg;
             float x = cx + cosf(th) * rr;
@@ -175,18 +175,18 @@ static int build_disc(const MapWater *m, float **verts, GLuint **idx,
             float *p = v + (size_t)vi * 5;
             p[0] = x; p[1] = z;
             p[2] = x / 4.0f; p[3] = z / 4.0f;
-            p[4] = r - rr;                          // 0 у берега
+            p[4] = r - rr;                          // 0 at the shore
             vi++;
         }
     }
     int qi = 0;
-    // веер от центра к первому кольцу (1..nseg)
+    // fan from the center to the first ring (1..nseg)
     for (int s = 0; s < nseg; s++) {
         q[qi++] = 0;
         q[qi++] = (GLuint)(1 + s);
         q[qi++] = (GLuint)(1 + (s + 1) % nseg);
     }
-    // ленты между кольцами (ring 1..nr-1 -> ring+1)
+    // strips between rings (ring 1..nr-1 -> ring+1)
     for (int ring = 1; ring < nr; ring++) {
         int a0 = 1 + (ring - 1) * nseg;
         int b0 = 1 + ring * nseg;
@@ -205,7 +205,7 @@ static int build_disc(const MapWater *m, float **verts, GLuint **idx,
     return 0;
 }
 
-// Море на весь мир: прямоугольная сетка (волны двигают вершины).
+// Sea over the whole world: rectangular grid (waves move the vertices).
 static int build_sea_grid(const WorldState *w, float **verts, GLuint **idx,
                           int *vert_n, int *idx_n, float step)
 {
@@ -225,7 +225,7 @@ static int build_sea_grid(const WorldState *w, float **verts, GLuint **idx,
             float *p = v + (size_t)vi * 5;
             p[0] = x; p[1] = z;
             p[2] = x / 4.0f; p[3] = z / 4.0f;
-            p[4] = 1e6f;                            // края нет
+            p[4] = 1e6f;                            // no edge anywhere
             vi++;
         }
     }
@@ -244,8 +244,8 @@ static int build_sea_grid(const WorldState *w, float **verts, GLuint **idx,
     return 0;
 }
 
-// Река: лента вдоль осевой линии, ширина width. Митеринг стыков — нормаль
-// усредняется между соседними сегментами. aUV.x = дистанция вдоль русла.
+// River: a ribbon along the centerline, width width. Mitered joints — the normal
+// is averaged between neighbouring segments. aUV.x = distance along the bed.
 static int build_river(const MapWater *m, float **verts, GLuint **idx,
                        int *vert_n, int *idx_n)
 {
@@ -259,7 +259,7 @@ static int build_river(const MapWater *m, float **verts, GLuint **idx,
 
     float along = 0.0f;
     for (int i = 0; i < np; i++) {
-        // направление в точке: среднее соседних сегментов
+        // direction at the point: average of neighbouring segments
         float dx = 0, dz = 0;
         if (i > 0) {
             dx += m->points[i][0] - m->points[i - 1][0];
@@ -277,7 +277,7 @@ static int build_river(const MapWater *m, float **verts, GLuint **idx,
             float sz = m->points[i][1] - m->points[i - 1][1];
             along += sqrtf(sx * sx + sz * sz);
         }
-        // нормаль в плоскости XZ: (-dz, dx) / (dz, -dx)
+        // in-plane XZ normal: (-dz, dx) / (dz, -dx)
         for (int side = 0; side < 2; side++) {
             float sgn = side ? 1.0f : -1.0f;
             float *p = v + (size_t)(i * 2 + side) * 5;
@@ -286,10 +286,10 @@ static int build_river(const MapWater *m, float **verts, GLuint **idx,
             p[1] = m->points[i][1] + nz * hw;
             p[2] = along / 4.0f;
             p[3] = 0.0f;
-            p[4] = 0.0f;                            // у берега
+            p[4] = 0.0f;                            // at the shore
         }
-        v[(size_t)i * 10 + 3] = -hw / 4.0f;         // левый борт
-        v[(size_t)i * 10 + 8] =  hw / 4.0f;         // правый борт
+        v[(size_t)i * 10 + 3] = -hw / 4.0f;         // left bank
+        v[(size_t)i * 10 + 8] =  hw / 4.0f;         // right bank
     }
     int qi = 0;
     for (int i = 0; i + 1 < np; i++) {
@@ -333,9 +333,9 @@ static GLuint upload_geometry(const float *verts, int vert_n,
     return vao;
 }
 
-// --- Uniform'ы ------------------------------------------------------------------
-// Проги создаются СНАРУЖИ (make_node / reshade): здесь только локации и
-// статичные значения для текущего p->prog.
+// --- Uniforms ------------------------------------------------------------------
+// Programs are created OUTSIDE (make_node / reshade): here only the
+// locations and static values for the current p->prog.
 static void water_prog_init(WaterParams *p, const WorldState *w)
 {
     GLuint prog = p->prog;
@@ -364,8 +364,8 @@ static void water_prog_init(WaterParams *p, const WorldState *w)
                 w->world_w, w->world_d);
     glUniform1f(p->u_heightmin, w->min_height);
     glUniform1f(p->u_heightmax, w->max_height);
-    glUniform1f(p->u_edge, 2.0f);        // переопределяется на инстанс
-    // Каскады теней на юнитах 3..6 (как в рельефе)
+    glUniform1f(p->u_edge, 2.0f);        // overridden per instance
+    // Shadow cascades on units 3..6 (as in the terrain)
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         if (p->su.u_shadowmap[c] >= 0) glUniform1i(p->su.u_shadowmap[c], 3 + c);
         if (p->su.u_shadowdepth[c] >= 0) glUniform1i(p->su.u_shadowdepth[c], 3 + c);
@@ -373,7 +373,7 @@ static void water_prog_init(WaterParams *p, const WorldState *w)
     glUseProgram(0);
 }
 
-// Hot-reload: пересоздать программу и uniform'ы (паттерн terrain_reshade).
+// Hot-reload: recreate the program and uniforms (terrain_reshade pattern).
 static void water_reshade(void)
 {
     if (!s_water) return;
@@ -385,7 +385,7 @@ static void water_reshade(void)
     water_prog_init(s_water, s_water->world);
 }
 
-// --- Узел -----------------------------------------------------------------------
+// --- Node ----------------------------------------------------------------------
 SceneNode *water_make_node(WorldState *w, const WorldTextures *wt,
                            const RendererContext *rc)
 {
@@ -434,7 +434,7 @@ SceneNode *water_make_node(WorldState *w, const WorldTextures *wt,
                                       &it->vbo, &it->ibo);
             it->idx_count = idx_n;
             free(verts); free(idx);
-            // BBOX для фрустум-отсечения (с запасом на волну)
+            // BBOX for frustum culling (with margin for the wave)
             float pad = m->wave_amp * 2.0f + 1.0f;
             if (m->type == WATER_RIVER) {
                 float hw = m->width * 0.5f + pad;
@@ -461,16 +461,16 @@ SceneNode *water_make_node(WorldState *w, const WorldTextures *wt,
                 it->bbox_min[2] = m->center[1] - m->radius - pad;
                 it->bbox_max[2] = m->center[1] + m->radius + pad;
             }
-            // BBOX по вертикали расширен ВНИЗ на глубину: камера на берегу
-            // или под водой не должна выкидывать водный слой по фрустуму
-            // (тонкий 2-метровый бокс пропадал "вблизи"). Низ — дно мировое.
+            // The vertical BBOX is extended DOWNWARD by the depth: a camera on the
+            // shore or underwater must not cull the water layer by frustum
+            // (a thin 2-meter box used to vanish "up close"). Bottom — world floor.
             it->bbox_min[1] = w->min_height - 1.0f;
             it->bbox_max[1] = m->level + pad;
             p->n++;
             built++;
         }
         if (built == 0) {
-            // Ни одной воды не построилось — программу вернуть, узла нет
+            // Not a single water body built — release the program, no node
             resources_program_release(p->prog);
             free(p);
             return NULL;
@@ -499,7 +499,7 @@ void water_node_update(SceneNode *n, float dt)
     p->time += dt;
 }
 
-// Набирает uniform'ы одного инстанса (вызывается перед glDrawElements)
+// Sets the uniforms of one instance (called before glDrawElements)
 static void water_instance_uniforms(WaterParams *p, const WaterInst *it)
 {
     const MapWater *m = it->md;
@@ -522,7 +522,7 @@ void water_node_render(SceneNode *n, float dt)
     (void)dt;
     WaterParams *p = n->params;
     const RendererContext *rc = p->rc;
-    // вода не в карты теней и не в свой же кубомап отражений (самоотражение)
+    // water is not in the shadow maps and not in its own reflection cubemap (self-reflection)
     if (rc->pass == RP_SHADOW || rc->pass == RP_CUBEMAP_FACE) return;
     if (p->n == 0) return;
 
@@ -531,7 +531,7 @@ void water_node_render(SceneNode *n, float dt)
     glDepthMask(GL_TRUE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_CULL_FACE);             // видно и снизу (из-под воды)
+    glDisable(GL_CULL_FACE);             // visible also from below (underwater)
 
     glUseProgram(p->prog);
     scene_uniforms_bind(&p->su, rc);
@@ -558,7 +558,7 @@ void water_node_render(SceneNode *n, float dt)
 
 void water_cleanup(SceneNode *n)
 {
-    if (!n) return;   // error-path scene_build: узел мог не создаться
+    if (!n) return;   // error-path scene_build: the node may never have been created
     WaterParams *p = n->params;
     if (s_water == p) s_water = NULL;
     for (int i = 0; i < p->n; i++) {

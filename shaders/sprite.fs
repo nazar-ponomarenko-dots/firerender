@@ -1,11 +1,11 @@
 // ============================================================================
-//  Sprite3D — фрагментный шейдер прицепляемого спрайта
+//  Sprite3D — fragment shader for an attachable sprite
 // ----------------------------------------------------------------------------
-//  Освещение простое и «в стиле движка»: полусферный ambient + ровный
-//  диффуз от направленных источников + CSM-тень солнца + туман. У спрайта
-//  нормаль условная, поэтому диффуз почти плоский (как у биллбордов
-//  растительности) — спрайт не «мигает» при повороте камеры.
-//  uUnlit = 1 — выключить свет вовсе (иконки, метки интерфейса в мире).
+//  Lighting is simple and "in engine style": hemispheric ambient + flat
+//  diffuse from directional lights + the sun's CSM shadow + fog. A sprite's
+//  normal is nominal, so the diffuse is nearly flat (like vegetation
+//  billboards) — the sprite doesn't "flash" when the camera rotates.
+//  uUnlit = 1 — turn lighting off entirely (icons, in-world UI markers).
 // ============================================================================
 
 in vec2 vUV;
@@ -15,9 +15,9 @@ in vec3 vNormal;
 uniform sampler2D uTex;
 uniform vec3 uCamPos;
 uniform vec3 uTint;
-uniform int uBlend;            // 0 альфа-тест, 1 альфа, 2 аддитив, 3 непрозр.
+uniform int uBlend;            // 0 alpha-test, 1 alpha, 2 additive, 3 opaque
 uniform float uAlpha;
-uniform float uUnlit;          // 1 = без освещения (чистая текстура * tint)
+uniform float uUnlit;          // 1 = unlit (pure texture * tint)
 
 #define SUN_MAX_LIGHTS 4
 uniform vec3 uLightDir[SUN_MAX_LIGHTS];
@@ -74,13 +74,13 @@ float shadow_at(vec3 wp) {
 void main() {
     vec4 c = texture(uTex, vUV);
     if (uBlend == 0 || uBlend == 3) {
-        if (c.a < 0.5) discard;              // альфа-тест
+        if (c.a < 0.5) discard;              // alpha-test
     }
     vec3 col = c.rgb * uTint;
     if (uUnlit < 0.5) {
         vec3 N = normalize(vNormal);
-        // Нормаль спрайта условная: берём её «полувверх», чтобы освещение
-        // было мягким и стабильным при повороте камеры.
+        // The sprite normal is nominal: tilt it "half upward" so the lighting
+        // stays soft and stable while the camera rotates.
         vec3 Nl = normalize(N + vec3(0.0, 0.6, 0.0));
         vec3 amb = mix(uGroundColor, uSkyColor, Nl.y * 0.5 + 0.5) * uAmbient;
         float sh = shadow_at(vWorldPos);

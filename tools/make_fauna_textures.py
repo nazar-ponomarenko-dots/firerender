@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Генерирует текстуры фауны (светлячки, бабочки, птицы) в img/.
+"""Generate fauna textures (fireflies, butterflies, birds) into img/.
 
-Запуск: python3 tools/make_fauna_textures.py
+Usage: python3 tools/make_fauna_textures.py
 """
 import math
 import os
@@ -33,7 +33,7 @@ def write_png(path, w, h, rgba):
 
 
 def glow(w, h):
-    """Радиальный градиент: центр яркий тёплый -> прозрачный край."""
+    """Radial gradient: bright warm centre -> transparent edge."""
     buf = []
     cx, cy = (w - 1) / 2, (h - 1) / 2
     for y in range(h):
@@ -46,13 +46,13 @@ def glow(w, h):
 
 
 def butterfly(w, h):
-    """Бабочка сверху: два крыла-эллипса с тёмной окантовкой, тело."""
+    """Butterfly seen from above: two ellipse wings with a dark rim, a body."""
     buf = []
     for y in range(h):
         for x in range(w):
             u = x / w - 0.5
             v = y / h - 0.5
-            # крылья: левое и правое (эллипсы, разнесённые от оси)
+            # wings: left and right (ellipses offset from the axis)
             wing = 0.0
             for sx in (-1, 1):
                 wx = u * 2.0 - sx * 0.28
@@ -60,12 +60,12 @@ def butterfly(w, h):
                 d = (wx * wx) / (0.34 * 0.34) + (wy * wy) / (0.42 * 0.42)
                 if d <= 1.0:
                     wing = max(wing, 1.0 - d)
-            # тело
+            # body
             body = 0.0
             db = (u * 2.0) ** 2 / (0.045 ** 2) + (v * 2.0) ** 2 / (0.35 ** 2)
             if db <= 1.0:
                 body = 1.0 - db
-            # пятнышки на крыльях (для текстуры)
+            # specks on the wings (for texture)
             speck = 0.0
             for sx in (-1, 1):
                 wx = u * 2.0 - sx * 0.30
@@ -86,13 +86,13 @@ def butterfly(w, h):
 
 
 def bird(w, h):
-    """Птица сбоку: корпус + распахнутые крылья (силуэт)."""
+    """Bird seen from the side: body + spread wings (silhouette)."""
     buf = []
     for y in range(h):
         for x in range(w):
             u = x / w - 0.5
             v = y / h - 0.5
-            # крылья: две дуги вверх-в стороны
+            # wings: two arcs going up and outward
             wl = 0.0
             for sx in (-1, 1):
                 wx = u * 2.0 - sx * 0.18
@@ -100,7 +100,7 @@ def bird(w, h):
                 d = (wx * wx) / (0.38 * 0.38) + (wy * wy) / (0.22 * 0.22)
                 if d <= 1.0 and wy < 0.25:
                     wl = max(wl, 1.0 - d)
-            # корпус — вытянутый эллипс по X
+            # body — an ellipse stretched along X
             body = 0.0
             db = (u * 2.0) ** 2 / (0.40 ** 2) + (v * 2.0 - 0.10) ** 2 / (0.12 ** 2)
             if db <= 1.0:
@@ -118,7 +118,7 @@ def main():
     write_png(os.path.join(OUT, "fauna_glow.png"), 64, 64, glow(64, 64))
     write_png(os.path.join(OUT, "fauna_butterfly.png"), 128, 128, butterfly(128, 128))
     write_png(os.path.join(OUT, "fauna_bird.png"), 128, 64, bird(128, 64))
-    print("Готово.")
+    print("Done.")
 
 
 if __name__ == "__main__":

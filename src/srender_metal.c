@@ -1,18 +1,18 @@
 // ============================================================================
-//  srender_metal.c — каркас Metal-бэкенда для macOS (сборка: make metal)
+//  srender_metal.c — Metal backend scaffold for macOS (build: make metal)
 // ----------------------------------------------------------------------------
-//  ЗАЧАТОК: каркас выбора и стабы. Рендер-пайплайн не портирован — файл
-//  нужен, чтобы (а) macOS-сборка существовала архитектурно, (б) был виден
-//  полный список операций, которые предстоит реализовать.
+//  SEED FRAMEWORK: selection scaffolding and stubs. The render pipeline is not
+//  ported — the file exists so that (a) the macOS build exists architecturally,
+//  (b) the full list of operations still to implement stays visible.
 //
-//  Два пути реализации (выбирается позже):
-//    A) MoltenVK — Vulkan-бэкенд (srender_vk.c) работает на Metal как есть:
-//       этот файл не нужен вовсе, достаточно SDL_Vulkan_CreateSurface.
-//    B) Нативный Metal: шейдеры SPIR-V -> MSL (SPIRV-Cross), ресурсы ->
-//       MTLTexture/MTLBuffer, состояние -> MTLRenderPipelineState (кеш по
-//       хешу, как задумано в srender.h), поверхность SDL_Metal_CreateView.
-//  Путь B требует Objective-C для вызовов Metal — файл тогда переименовывается
-//  в srender_metal.m или Metal-части выделяется в отдельный .m-модуль.
+//  Two implementation paths (chosen later):
+//    A) MoltenVK — the Vulkan backend (srender_vk.c) runs on Metal as is:
+//       this file would not be needed at all, SDL_Vulkan_CreateSurface suffices.
+//    B) Native Metal: shaders SPIR-V -> MSL (SPIRV-Cross), resources ->
+//       MTLTexture/MTLBuffer, state -> MTLRenderPipelineState (hash-keyed
+//       cache, as envisioned in srender.h), surface via SDL_Metal_CreateView.
+//  Path B requires Objective-C for the Metal calls — the file is then renamed
+//  to srender_metal.m or the Metal parts move into a separate .m module.
 // ============================================================================
 #if defined(FR_BACKEND_METAL) && defined(__APPLE__)
 
@@ -24,7 +24,7 @@
 #include <string.h>
 
 struct SrDevice {
-    int      unused;      // нативный Metal-девайс появится на пути B
+    int      unused;      // the native Metal device appears on path B
     SrCaps   caps;
 };
 
@@ -33,7 +33,7 @@ struct SrDevice {
         static int warned;                                                    \
         if (!warned) {                                                        \
             warned = 1;                                                       \
-            SDL_Log("Metal backend: '%s' не портирован (заглушка)", op);      \
+            SDL_Log("Metal backend: '%s' not ported (stub)", op);            \
         }                                                                     \
     } while (0)
 
@@ -42,8 +42,8 @@ struct SrDevice {
 
 SrDevice *sr_create(void)
 {
-    // SDL даёт Metal-вид: SDL_Metal_CreateView(window) + SDL_Metal_GetLayer
-    // -> CAMetalLayer; MTLCreateSystemDefaultDevice() — на шаге B.
+    // SDL provides a Metal view: SDL_Metal_CreateView(window) + SDL_Metal_GetLayer
+    // -> CAMetalLayer; MTLCreateSystemDefaultDevice() — at step B.
     SrDevice *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     static char ver[64];
@@ -53,17 +53,17 @@ SrDevice *sr_create(void)
     d->caps.gl_minor = 0;
     d->caps.compute = 1;              // MTLComputePipelineState
     d->caps.indirect = 1;             // MTLIndirectCommandBuffer / dispatch
-    d->caps.base_instance = 1;        // baseInstance в drawInstanced
+    d->caps.base_instance = 1;        // baseInstance in drawInstanced
     d->caps.timer_query = 1;          // MTLCounterSampleBuffer (GPU family 4+)
     d->caps.tex3d = 1;
-    d->caps.color_half_float = 1;     // MTLPixelFormatRGBA16Float рендерится
+    d->caps.color_half_float = 1;     // MTLPixelFormatRGBA16Float renders
     d->caps.texture_norm16 = 1;
     d->caps.msaa_max = 8;
     d->caps.max_tex_size = 16384;
     d->caps.vendor = "Apple";
     d->caps.renderer = "Apple GPU";
     d->caps.version = ver;
-    SDL_Log("Metal backend: каркас поднят (%s); рендер-пайплайн не портирован",
+    SDL_Log("Metal backend: skeleton brought up (%s); render pipeline not ported",
             ver);
     return d;
 }
@@ -71,7 +71,7 @@ SrDevice *sr_create(void)
 void sr_destroy(SrDevice *d) { free(d); }
 const SrCaps *sr_caps(const SrDevice *d) { return d ? &d->caps : NULL; }
 
-// --- Операции рендера: каркас, реализация по дорожной карте -------------------
+// --- Render operations: scaffold, implementation per roadmap -------------------
 void sr_bind_fbo(SrDevice *d, SrFbo fbo) { (void)d; (void)fbo; SR_MT_UNIMPL("sr_bind_fbo"); }
 void sr_viewport(SrDevice *d, int x, int y, int w, int h) { (void)d; (void)x; (void)y; (void)w; (void)h; SR_MT_UNIMPL("sr_viewport"); }
 void sr_clear(SrDevice *d, float r, float g, float b, float a, int cc, int cd) { (void)d; (void)r; (void)g; (void)b; (void)a; (void)cc; (void)cd; SR_MT_UNIMPL("sr_clear"); }
@@ -151,6 +151,6 @@ void sr_read_pixels(SrDevice *d, int x, int y, int w, int h, SrPixFormat pix, vo
 typedef int sr_scaffold_marker;
 
 #else
-// Не macOS или не Metal-сборка — файл пуст.
+// Not macOS or not a Metal build — the file is empty.
 typedef int sr_metal_disabled_marker;
 #endif

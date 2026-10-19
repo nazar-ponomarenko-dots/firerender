@@ -1,5 +1,5 @@
 // ============================================================================
-//  sun.c — солнце: замороженный направленный источник света
+//  sun.c — sun: a frozen directional light source
 // ============================================================================
 #include "sun.h"
 
@@ -14,19 +14,19 @@ SceneNode *sun_make_node(void)
 {
     SunParams *p = calloc(1, sizeof *p);
     if (!p) return NULL;
-    // По умолчанию: солнце на высоте ~39° (тени длинные), азимут чуть
-    // восточнее юга. normalize(0.25, 0.6, 0.7). Если в map/map.json задан
-    // направленный свет (lights[]) — берём направление/цвет/силу оттуда.
+    // Default: sun at ~39° elevation (long shadows), azimuth slightly
+    // east of south. normalize(0.25, 0.6, 0.7). If map/map.json defines
+    // directional light (lights[]) — take direction/color/intensity from there.
     p->dir[0] = 0.25f; p->dir[1] = 0.6f; p->dir[2] = 0.7f;
     vec3_normalize(p->dir);
     p->color[0] = 1.0f; p->color[1] = 0.95f; p->color[2] = 0.85f;
     p->intensity = 1.0f;
-    // Тени по умолчанию: как прежние константы (4 текселя рельеф, 2 — трава)
+    // Default shadows: same as the previous constants (4 terrain texels, 2 — grass)
     p->shadow_on = 1;
     p->shadow_bias = 4.0f;
     p->shadow_bias_veg = 2.0f;
-    // Все направленные источники из JSON — солнце (0-й) и дополнительные
-    // света. Массив идёт в шейдер массивом: каждый свет освещает отдельно.
+    // All directional lights from JSON — the sun (index 0) and extra lights.
+    // The array goes to the shader as an array: each light shades separately.
     p->light_count = 0;
     for (int i = 0; i < mapdata_light_count() && p->light_count < SUN_MAX_LIGHTS; i++) {
         const MapLight *l = mapdata_light(i);
@@ -53,7 +53,7 @@ SceneNode *sun_make_node(void)
         }
     }
     SDL_Log("Lights total: %d (directional)", p->light_count);
-    const float pos[3] = { 0, 100, 0 };        // высоко над миром
+    const float pos[3] = { 0, 100, 0 };        // high above the world
     const float size[3] = { 1, 1, 1 };
     SceneNode *node = node_new("Sun", "DirectionalLight3D", pos, size, p,
                                sun_node_update, NULL);
@@ -64,12 +64,12 @@ SceneNode *sun_make_node(void)
 void sun_node_update(SceneNode *n, float dt)
 {
     (void)n; (void)dt;
-    // Солнце ЗАМОРОЖЕНО: направление задано один раз при инициализации
-    // (sun->dir в sun_make_node). Чтобы снова запустить прогулку по небу —
-    // раскомментировать строки ниже.
+    // The sun is FROZEN: direction is set once at initialization
+    // (sun->dir in sun_make_node). To make it walk across the sky again —
+    // uncomment the lines below.
     // SunParams *p = n->params;
     // p->t += dt;
-    // float a = p->t * 0.008f;              // медленно ходит по небу (~0.5 град/с)
+    // float a = p->t * 0.008f;              // slowly moves across the sky (~0.5 deg/s)
     // p->dir[0] = sinf(a) * 0.5f;
     // p->dir[1] = 0.7f;
     // p->dir[2] = cosf(a) * 0.5f;

@@ -1,60 +1,60 @@
 // ============================================================================
-//  app.h — состояние приложения: главное меню / игра / пауза
+//  app.h — application state: main menu / game / pause
 // ----------------------------------------------------------------------------
-//  Как в Half-Life 1: запуск — в главном меню (за ним живёт сцена как фон),
-//  ESC в игре — меню паузы, из настроек — назад. ВСЕ настройки меню пишут
-//  в cvar'ы (применяются сразу) и сохраняются в config.cfg при выходе
-//  из экрана настроек и при выходе из игры.
+//  Like Half-Life 1: launch goes to the main menu (a live scene runs behind it
+//  as the background), ESC in game opens the pause menu, settings screens go
+//  back. ALL menu settings write into cvar's (applied immediately) and are
+//  saved to config.cfg when leaving the settings screen and when quitting game.
 // ============================================================================
 #ifndef APP_H
 #define APP_H
 #include <SDL3/SDL.h>
 
 typedef enum {
-    APP_BOOT = 0,    // старт: инициализация систем (фаза boot_init в main.c)
-    APP_MENU,        // главное меню (мир заморожен, сцена — фон)
-    APP_PLAY,        // игра: мир обновляется, HUD виден
-    APP_PAUSE        // пауза (ESC): меню поверх замороженной сцены
+    APP_BOOT = 0,    // startup: system init (boot_init phase in main.c)
+    APP_MENU,        // main menu (world frozen, scene as background)
+    APP_PLAY,        // game: world updates, HUD visible
+    APP_PAUSE        // pause (ESC): menu over the frozen scene
 } AppState;
 
-// Действия, которые меню сообщает главному циклу
+// Actions the menu reports to the main loop
 enum {
     APP_ACT_NONE = 0,
-    APP_ACT_START,     // новая игра: загрузить мир и телепорт на спавн
-    APP_ACT_RESUME,    // продолжить
-    APP_ACT_MAIN,      // в главное меню (мир выгружается)
-    APP_ACT_QUIT,      // выход
+    APP_ACT_START,     // new game: load the world and teleport to spawn
+    APP_ACT_RESUME,    // resume
+    APP_ACT_MAIN,      // back to the main menu (world is unloaded)
+    APP_ACT_QUIT,      // quit
 };
 
-// Начальное состояние (APP_MENU, экран главного меню)
+// Initial state (APP_MENU, main menu screen)
 void app_init(void);
 
 AppState app_state(void);
 void app_set_state(AppState s);
 
-// Игра хоть раз начиналась? (для пункта "Продолжить" в главном меню)
+// Has the game been started at least once? (for the "Продолжить" item in the main menu)
 int app_in_game(void);
 
-// ESC: игра -> пауза, пауза -> игра, в меню — назад по экранам
+// ESC: game -> pause, pause -> game, in menus — back through the screens
 void app_escape(void);
 
-// Запись бинда из меню "Клавиши": вернуть 1, если клавиша съедена записью
-// (вызывать из главного цикла на KEYDOWN, ДО игровых клавиш).
+// Bind recording from the "Клавиши" menu: return 1 if the key was consumed
+// by the recorder (call from the main loop on KEYDOWN, BEFORE game keys).
 int app_bind_key(SDL_Scancode sc);
 
-// Рисует текущий экран меню (ui_begin/ui_end внутри). Возвращает действие
-// для главного цикла (APP_ACT_*). Вызывать только при app_state() != APP_PLAY.
+// Draws the current menu screen (ui_begin/ui_end inside). Returns the action
+// for the main loop (APP_ACT_*). Call only when app_state() != APP_PLAY.
 int app_menu(int vw, int vh);
 
-// Фон меню — картинка img/menu.png (загружена в текстуру)? Если нет —
-// фоном служит замороженная сцена (главный цикл её рендерит).
+// Is the menu background img/menu.png (loaded into a texture)? If not —
+// the frozen scene serves as the background (the main loop renders it).
 int app_bg_has(void);
 
-// Применить точный графический пресет без записи config.cfg.
-// Используется воспроизводимым benchmark до загрузки мира.
+// Apply an exact graphics preset without writing config.cfg.
+// Used by the reproducible benchmark before the world is loaded.
 void app_apply_benchmark_preset(int level);
 
-// Печатает список карт в консоль (команда maps)
+// Prints the map list to the console (maps command)
 void app_maps_print(void);
 
 #endif

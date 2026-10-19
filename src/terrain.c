@@ -1,5 +1,5 @@
 // ============================================================================
-//  terrain.c — рельеф: сетка из карты высот, материал земли, рендер с тенями
+//  terrain.c — terrain: heightmap grid, ground material, shadowed rendering
 // ============================================================================
 #include "terrain.h"
 
@@ -29,17 +29,17 @@
 
 #include <SDL3/SDL.h>
 
-// --- Теневой проход (pass == RP_SHADOW) ----------------------------------------
-// Глубина рельефа в каскад: та же сетка, высота из карты высот в шейдере.
-// Программа раньше жила в shadow.c — теперь принадлежит рельефу.
+// --- Shadow pass (pass == RP_SHADOW) ----------------------------------------
+// Terrain depth into a cascade: the same grid, height taken from the heightmap in the shader.
+// The program used to live in shadow.c — now it belongs to the terrain.
 static GLuint s_shadow_prog = 0;
 static GLint u_sh_viewproj, u_sh_heightmap, u_sh_hmin, u_sh_hmax;
-static TerrainParams *s_terr = NULL;   // для hot-reload (shader_on_reshade)
+static TerrainParams *s_terr = NULL;   // for hot-reload (shader_on_reshade)
 
-// Пересоздаёт программы, ищет uniform'ы и статичные uniform'ы. Вызывается
-// при создании узла и при hot-reload шейдеров (shader_hot_reload).
-// Проги создаются СНАРУЖИ (make_node / reshade: refcount балансируется там).
-// Здесь — только uniform'ы для ТЕКУЩИХ id (p->prog и s_shadow_prog).
+// Recreates the programs, looks up uniform locations and static uniforms. Called
+// when the node is created and on shader hot-reload (shader_hot_reload).
+// Programs are created OUTSIDE (make_node / reshade: refcount is balanced there).
+// Here — only the uniform locations for the CURRENT ids (p->prog and s_shadow_prog).
 static void terrain_prog_init(TerrainParams *p, const WorldState *w)
 {
     GLuint prog = p->prog;
@@ -48,7 +48,7 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     u_sh_hmin = glGetUniformLocation(s_shadow_prog, "uHeightMin");
     u_sh_hmax = glGetUniformLocation(s_shadow_prog, "uHeightMax");
 
-    scene_uniforms_init(&p->su, prog);    // общий набор сцены
+    scene_uniforms_init(&p->su, prog);    // shared scene set
     p->u_specpow  = glGetUniformLocation(prog, "uSpecPower");
     p->u_specint  = glGetUniformLocation(prog, "uSpecIntensity");
     p->u_heightmin = glGetUniformLocation(prog, "uHeightMin");
@@ -62,9 +62,9 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
     p->u_sunvis    = glGetUniformLocation(prog, "uSunVis");
     p->u_sunvis_on = glGetUniformLocation(prog, "uSunVisOn");
     p->u_wetness_mask = glGetUniformLocation(prog, "uWetnessMask");
-    // Поверхности (splat): маска + 4 слоя. Юниты: 10 — маска, 12..15 — слои
-    // (0..9 и 11 заняты базой/нормалями/высотами/каскадами/статикой/
-    // мокростью/кубомапом/шумом — см. ниже).
+    // Surfaces (splat): mask + 4 layers. Units: 10 — mask, 12..15 — layers
+    // (0..9 and 11 are taken by base/normals/heights/cascades/static/
+    // wetness/cubemap/noise — see below).
     p->u_splat = glGetUniformLocation(prog, "uSplat");
     p->u_splat_on = glGetUniformLocation(prog, "uSplatOn");
     p->u_detail_dist = glGetUniformLocation(prog, "uDetailDist");
@@ -76,33 +76,33 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
         p->u_layer[i] = glGetUniformLocation(prog, name);
     }
 
-    // Материал рельефа: статичные параметры шейдера
+    // Terrain material: static shader parameters
     MapTerrain tc;
     mapdata_terrain(&tc);
     glUseProgram(prog);
-    glUniform1i(glGetUniformLocation(prog, "uBasemap"), 0);   // земля
-    glUniform1i(glGetUniformLocation(prog, "uNormalmap"), 1); // нормали
-    glUniform1i(glGetUniformLocation(prog, "uHeightmap"), 2); // высоты
-    glUniform1i(p->u_wetness_mask, 8);             // маска мокрости (unit 8)
-    // Каскады теней на юнитах 3-6 (uShadowMap%d и сырая глубина uShadowDepth%d —
-    // ТЕ ЖЕ текстуры: при выборке через sampler2D режим сравнения
-    // игнорируется, читается глубина).
+    glUniform1i(glGetUniformLocation(prog, "uBasemap"), 0);   // ground
+    glUniform1i(glGetUniformLocation(prog, "uNormalmap"), 1); // normals
+    glUniform1i(glGetUniformLocation(prog, "uHeightmap"), 2); // heights
+    glUniform1i(p->u_wetness_mask, 8);             // wetness mask (unit 8)
+    // Shadow cascades on units 3-6 (uShadowMap%d and raw depth uShadowDepth%d —
+    // the SAME textures: when sampled via sampler2D the comparison mode is
+    // ignored, depth is read directly).
     for (int c = 0; c < SHADOW_CASCADES; c++) {
         if (p->su.u_shadowmap[c] >= 0)
             glUniform1i(p->su.u_shadowmap[c], 3 + c);
         if (p->su.u_shadowdepth[c] >= 0)
             glUniform1i(p->su.u_shadowdepth[c], 3 + c);
     }
-    glUniform1i(p->u_statictex, 7);               // статические тени (unit 7)
+    glUniform1i(p->u_statictex, 7);               // static shadows (unit 7)
     glUniform1i(p->u_static_on, 0);
-    if (p->u_baked_lm >= 0) glUniform1i(p->u_baked_lm, 11); // люксель (unit 11:
-                                                            // 9 занят кубомапом
-                                                            // отражений uReflection)
+    if (p->u_baked_lm >= 0) glUniform1i(p->u_baked_lm, 11); // luxel (unit 11:
+                                                            // 9 taken by the reflection
+                                                            // cubemap uReflection)
     if (p->u_baked_on >= 0) glUniform1f(p->u_baked_on, 0.0f);
-    if (p->u_sunvis >= 0) glUniform1i(p->u_sunvis, 16);     // карта видимости солнца
+    if (p->u_sunvis >= 0) glUniform1i(p->u_sunvis, 16);     // sun visibility map
     if (p->u_sunvis_on >= 0) glUniform1f(p->u_sunvis_on, 0.0f);
     glUniform2f(p->u_worldsize, w->world_w, w->world_d);
-    // Слои поверхностей: сэмплеры и масштабы тайлов (метров на тайл).
+    // Surface layers: samplers and tile scales (meters per tile).
     if (p->u_splat >= 0) glUniform1i(p->u_splat, 10);
     for (int i = 0; i < SPLAT_LAYERS; i++)
         if (p->u_layer[i] >= 0) glUniform1i(p->u_layer[i], 12 + i);
@@ -114,31 +114,31 @@ static void terrain_prog_init(TerrainParams *p, const WorldState *w)
         if (p->u_splat_on >= 0)
             glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
     }
-    // Окружение/туман шлёт scene_uniforms_bind каждый кадр из rc
+    // Environment/fog is pushed by scene_uniforms_bind every frame from rc
     glUniform1f(p->u_specpow, 40.0f);
-    glUniform1f(p->u_specint, 0.0f);   // земля матовая — без отражения солнца
+    glUniform1f(p->u_specint, 0.0f);   // ground is matte — no sun specular
     glUniform1f(p->u_heightmin, w->min_height);
     glUniform1f(p->u_heightmax, w->max_height);
-    // Тайл земли: текстура на tex_scale метров (из map.json)
+    // Ground tile: one texture per tex_scale meters (from map.json)
     glUniform2f(glGetUniformLocation(prog, "uTexScale"),
                 w->world_w / tc.tex_scale, w->world_d / tc.tex_scale);
-    // Поле пшеницы: тон почвы внутри прямоугольника (вместо травы)
+    // Wheat field: soil tint inside the rectangle (instead of grass)
     glUniform4f(glGetUniformLocation(prog, "uField"),
                 w->field_x0, w->field_x0 + w->field_w,
                 w->field_z0, w->field_z0 + w->field_d);
     glUniform3f(glGetUniformLocation(prog, "uFieldColor"),
                 tc.field_color[0], tc.field_color[1], tc.field_color[2]);
     glUniform1f(glGetUniformLocation(prog, "uFieldBlend"), tc.field_blend);
-    // Туман (uFogStart/uFogEnd) шлёт scene_uniforms_bind из rc
+    // Fog (uFogStart/uFogEnd) is pushed by scene_uniforms_bind from rc
     glUseProgram(0);
 }
 
-// Hot-reload: пересоздать программы и uniform'ы текущего узла.
-// Старые программы отдаём в релиз: make_program считает ссылки, и без release
-// каждый reload утекал бы и p->prog, и теневую программу (refs не падали,
-// отложенное удаление в resources.c никогда не срабатывало).
-// replace отдаёт старую ссылку и берёт свежую. Если пара не пересобралась,
-// возвращает 0 — НЕ меняем id, рисуем прежнюю (она жива до релиза).
+// Hot-reload: recreate the current node's programs and uniforms.
+// We release the old programs: make_program refcounts them, and without release
+// each reload would leak both p->prog and the shadow program (refs never dropped,
+// so deferred deletion in resources.c never fired).
+// replace releases the old reference and takes a fresh one. If the pair fails to
+// rebuild, it returns 0 — we do NOT change the id and keep drawing the old one (still alive until release).
 static void terrain_reshade(void)
 {
     if (!s_terr) return;
@@ -155,22 +155,22 @@ static void terrain_reshade(void)
     terrain_prog_init(s_terr, s_terr->world);
 }
 
-// --- Статические тени (режим r_shadows_mode 2) ---------------------------------
-// Разрешение карты теней: ~1 тексель на 1 м (2000x1125 -> 2048x1152).
+// --- Static shadows (r_shadows_mode 2) ---------------------------------
+// Shadow map resolution: ~1 texel per 1 m (2000x1125 -> 2048x1152).
 #define STATIC_SHADOW_W 2048
 #define STATIC_SHADOW_H 1152
-#define STATIC_SHADOW_STEP 12.0f  // шаг луча по рельефу, м
-#define STATIC_SHADOW_STEPS 40    // длина луча: 480 м
-#define STATIC_OBJ_STEP 4.0f      // шаг луча по объектам, м (мельче: кроны узкие)
-#define STATIC_OBJ_STEPS 60       // длина: 240 м
+#define STATIC_SHADOW_STEP 12.0f  // terrain ray step, m
+#define STATIC_SHADOW_STEPS 40    // ray length: 480 m
+#define STATIC_OBJ_STEP 4.0f      // object ray step, m (finer: canopies are narrow)
+#define STATIC_OBJ_STEPS 60       // length: 240 m
 
-// Цилиндры объектов для трассировки (собраны и отсортированы по x один раз)
+// Object cylinders for tracing (gathered and sorted by x once)
 #define STATIC_OBJ_MAX 256
 typedef struct {
-    float x, z;      // позиция
-    float r;         // радиус кроны, м
-    float h;         // высота кроны, м
-    float base;      // высота земли у объекта
+    float x, z;      // position
+    float r;         // canopy radius, m
+    float h;         // canopy height, m
+    float base;      // ground height at the object
 } ShadowObj;
 static ShadowObj s_shobjs[STATIC_OBJ_MAX];
 static int s_shobjs_n = 0;
@@ -192,20 +192,20 @@ static void shobjs_build(const WorldState *w)
         float sy = o->scale[1] > 0.01f ? o->scale[1] : 1.0f;
         s->x = o->pos[0];
         s->z = o->pos[2];
-        s->r = 4.5f * sy;                     // радиус кроны
-        s->h = 9.0f * sy + 2.0f;              // высота кроны
+        s->r = 4.5f * sy;                     // canopy radius
+        s->h = 9.0f * sy + 2.0f;              // canopy height
         s->base = sample_height(w, s->x, s->z);
         s_shobjs_n++;
     }
     qsort(s_shobjs, (size_t)s_shobjs_n, sizeof s_shobjs[0], shobj_cmp);
 }
 
-// Луч к солнцу: задевает ли крону дерева? Бинарный поиск по x отсекает
-// почти все объекты — мелкий шаг (4 м) не даёт "дырок" в тени.
+// Ray to the sun: does it hit a tree canopy? A binary search on x prunes
+// almost all objects — the small step (4 m) leaves no "holes" in the shadow.
 static int ray_hits_object(float x, float y, float z)
 {
     if (s_shobjs_n == 0) return 0;
-    // диапазон объектов с |ox| < 120 м (тень от дальних деревьев незаметна)
+    // object range with |ox| < 120 m (distant tree shadows are negligible)
     int lo = 0, hi = s_shobjs_n - 1, first = -1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
@@ -216,8 +216,8 @@ static int ray_hits_object(float x, float y, float z)
     for (int k = first; k < s_shobjs_n; k++) {
         const ShadowObj *o = &s_shobjs[k];
         if (o->x > x + 120.0f) break;
-        // луч почти горизонтален (dz по z-компоненте солнца); точка луча
-        // на дистанции dist2d от дерева: тень от дерева тянется на dist
+        // the ray is nearly horizontal (dz from the sun's z component); a ray
+        // point at dist2d from the tree: the tree shadow stretches out to dist
         float ddx = x - o->x;
         float ddz = z - o->z;
         if (ddx * ddx + ddz * ddz > o->r * o->r) continue;
@@ -230,45 +230,45 @@ static int ray_hits_object(float x, float y, float z)
 static GLuint s_static_tex = 0;
 static int s_static_baked = 0;
 
-// --- Запечённый свет: GL-текстура люкселя + 3D-сетка зондов --------------------
-static GLuint s_baked_lm_tex = 0;    // RGB8 люксель рельефа (unit 11)
-static GLuint s_baked_sunvis_tex = 0;// R8 (grayscale) видимость солнца (unit 16):
-                                     // дальние статичные тени в режиме 1 (CSM)
-static int    s_baked_have = 0;      // 1 = люксель загружен/запечён
-// Сетка зондов освещённости для динамических объектов (ambient RGB + sunvis).
+// --- Baked light: GL luxel texture + 3D probe grid --------------------
+static GLuint s_baked_lm_tex = 0;    // RGB8 terrain luxel (unit 11)
+static GLuint s_baked_sunvis_tex = 0;// R8 (grayscale) sun visibility (unit 16):
+                                     // distant static shadows in mode 1 (CSM)
+static int    s_baked_have = 0;      // 1 = luxel loaded/baked
+// Irradiance probe grid for dynamic objects (ambient RGB + sunvis).
 static float *s_probes = NULL;       // nx*ny*nz*4 float (RGB + sunvis)
 static int    s_pnx = 0, s_pny = 0, s_pnz = 0;
-static float  s_py0 = 0.0f, s_py1 = 0.0f;   // вертикальный диапазон сетки
-static float  s_pwx = 0.0f, s_pwz = 0.0f;   // размеры мира (для UV сетки)
+static float  s_py0 = 0.0f, s_py1 = 0.0f;   // grid vertical range
+static float  s_pwx = 0.0f, s_pwz = 0.0f;   // world size (for the grid UV)
 
-// --- Тайловая геометрия с 4 LOD -------------------------------------------------
-// Карта режется на тайлы 128x128 м. Каждый тайл строится в 4 LOD-уровнях
-// (шаг квада 2/8/32/128 м) — геометрия НЕ зависит от плотности текселей:
-// высоту вершина берёт из карты высот в шейдере (GL_R16 LINEAR), поэтому
-// крупные квады на дальних LOD дают гладкий рельеф при минимуме полигонов.
+// --- Tiled geometry with 4 LOD -------------------------------------------------
+// The map is cut into 128x128 m tiles. Each tile is built at 4 LOD levels
+// (quad step 2/8/32/128 m) — the geometry does NOT depend on texel density:
+// a vertex takes its height from the heightmap in the shader (GL_R16 LINEAR), so
+// large quads at far LODs give smooth terrain with a minimum of polygons.
 //
-// Тайл — ровная плоская сетка (без склеек и плит), чтобы рельеф выглядел
-// гладким, а не «блоками». Стыки разных LOD закрывает МЕЛКАЯ юбка —
-// вертикальная стенка по границе тайла, опущенная всего на несколько метров
-// (aDrop в шейдере): щелей нет, а снизу тайл не выглядит массивным блоком.
-// Рисуем ВСЕ тайлы каждый кадр (без отсечения фрустумом) — LOD по дистанции
-// держит число полигонов малым.
+// A tile is a flat, even grid (no stitching or slabs) so the terrain looks
+// smooth rather than "blocky". The seams between LODs are hidden by a SHORT skirt —
+// a vertical wall along the tile border, dropped only a few meters
+// (aDrop in the shader): no gaps, and from below the tile doesn't look like a massive block.
+// We draw ALL tiles every frame (no frustum culling) — distance-based LOD
+// keeps the polygon count low.
 //
-// Вершина: (x, z, u, v, drop) — 5 float. drop = 0 у поверхности, у нижней
-// кромки юбки drop = TERRAIN_SKIRT_DEPTH (шейдер: y = h - drop).
+// Vertex: (x, z, u, v, drop) — 5 float. drop = 0 at the surface, at the bottom
+// edge of the skirt drop = TERRAIN_SKIRT_DEPTH (shader: y = h - drop).
 
-#define TERRAIN_SKIRT_DEPTH 4.0f    // глубина юбки, м (скрывает стыки LOD)
-// Дистанции переключения LOD (до ближайшей точки тайла), м.
-// Реализованы как cvar'ы r_terrain_lod1..3: можно тюнить дальность отрисовки
-// без пересборки (например, на слабых машинах уменьшить LOD3 = грубее дальний план).
+#define TERRAIN_SKIRT_DEPTH 4.0f    // skirt depth, m (hides LOD seams)
+// LOD switch distances (to the nearest tile point), m.
+// Implemented as cvars r_terrain_lod1..3: draw distance can be tuned
+// without a rebuild (e.g. on weak machines shrink LOD3 = coarser background).
 static float s_lod1 = 200.0f;
 static float s_lod2 = 500.0f;
 static float s_lod3 = 1200.0f;
 static const float s_lod_step[TERRAIN_LODS] = { 2.0f, 8.0f, 32.0f, 128.0f };
 
-// Растущие буферы вершин/индексов (один VBO+IBO на весь рельеф)
+// Growing vertex/index buffers (one VBO+IBO for the whole terrain)
 typedef struct {
-    float *v;    size_t nv, cv;    // 5 float на вершину
+    float *v;    size_t nv, cv;    // 5 float per vertex
     GLuint *idx; size_t ni, ci;
     int failed;
 } TerrMesh;
@@ -304,7 +304,7 @@ static void tm_push_tri(TerrMesh *m, GLuint a, GLuint b, GLuint c)
     m->idx[m->ni++] = a;  m->idx[m->ni++] = b;  m->idx[m->ni++] = c;
 }
 
-// Квад поверхности (xa,za)-(xb,zb), лицевая сторона вверх (CCW сверху)
+// Surface quad (xa,za)-(xb,zb), front face up (CCW from above)
 static void tm_push_quad(TerrMesh *m, const WorldState *w,
                          float xa, float za, float xb, float zb)
 {
@@ -317,7 +317,7 @@ static void tm_push_quad(TerrMesh *m, const WorldState *w,
     tm_push_tri(m, v01, v11, v10);
 }
 
-// Вершина юбки: та же точка, но опущенная на drop (0 = верх юбки)
+// Skirt vertex: same point but dropped by drop (0 = top of skirt)
 static GLuint tm_push_skirt_vert(TerrMesh *m, const WorldState *w,
                                  float x, float z)
 {
@@ -325,24 +325,24 @@ static GLuint tm_push_skirt_vert(TerrMesh *m, const WorldState *w,
                         (z + 0.5f) / (float)w->tex_h, TERRAIN_SKIRT_DEPTH);
 }
 
-// Юбка вдоль края тайла: узлы xs[0..n-1] на прямой z=const (или x=const).
-// Стенка смотрит НАРУЖУ тайла; нижняя кромка опущена всего на
-// TERRAIN_SKIRT_DEPTH метров (мелкая: скрывает стыки соседних LOD, но
-// тайл снизу не выглядит массивным блоком до пола мира).
+// Skirt along a tile edge: nodes xs[0..n-1] on a line z=const (or x=const).
+// The wall faces OUTWARD from the tile; the bottom edge is dropped only by
+// TERRAIN_SKIRT_DEPTH meters (short: hides neighbouring-LOD seams, but
+// the tile doesn't look like a massive block down to the world floor).
 static void tm_push_skirt_edge(TerrMesh *m, const WorldState *w,
                                const float *xs, int n,
                                float fixed, int along_x, int outward_pos)
 {
     for (int i = 0; i + 1 < n; i++) {
         float xa = xs[i], xb = xs[i + 1];
-        // верхняя кромка совпадает с краем поверхности тайла
+        // the top edge coincides with the tile surface border
         GLuint ta, tb, ba, bb;
-        if (along_x) {   // край вдоль X: z = fixed (юг/север)
+        if (along_x) {   // edge along X: z = fixed (south/north)
             ta = tm_push_vert(m, xa, fixed, (xa + 0.5f) / (float)w->tex_w,
                               (fixed + 0.5f) / (float)w->tex_h, 0);
             tb = tm_push_vert(m, xb, fixed, (xb + 0.5f) / (float)w->tex_w,
                               (fixed + 0.5f) / (float)w->tex_h, 0);
-        } else {         // край вдоль Z: x = fixed (запад/восток)
+        } else {         // edge along Z: x = fixed (west/east)
             ta = tm_push_vert(m, fixed, xa, (fixed + 0.5f) / (float)w->tex_w,
                               (xa + 0.5f) / (float)w->tex_h, 0);
             tb = tm_push_vert(m, fixed, xb, (fixed + 0.5f) / (float)w->tex_w,
@@ -350,7 +350,7 @@ static void tm_push_skirt_edge(TerrMesh *m, const WorldState *w,
         }
         ba = tm_push_skirt_vert(m, w, along_x ? xa : fixed, along_x ? fixed : xa);
         bb = tm_push_skirt_vert(m, w, along_x ? xb : fixed, along_x ? fixed : xb);
-        // Нормаль наружу: юг(-z), запад(-x) -> (ta,tb,ba); север(+z), восток(+x) -> (ta,ba,tb)
+        // Outward normal: south(-z), west(-x) -> (ta,tb,ba); north(+z), east(+x) -> (ta,ba,tb)
         if ((along_x && !outward_pos) || (!along_x && outward_pos)) {
             tm_push_tri(m, ta, tb, ba);
             tm_push_tri(m, tb, bb, ba);
@@ -361,10 +361,10 @@ static void tm_push_skirt_edge(TerrMesh *m, const WorldState *w,
     }
 }
 
-// Один LOD тайла: ровная плоская сетка с шагом step + мелкие юбки.
-// Возвращает диапазон индексов [first, first+count) в общем IBO.
-// Ровная сетка БЕЗ склеек в плиты — рельеф гладкий, чанки не выглядят
-// ступенчатыми блоками.
+// One tile LOD: flat even grid with step spacing + short skirts.
+// Returns the index range [first, first+count) in the shared IBO.
+// Flat grid WITHOUT merging into slabs — the terrain is smooth, chunks don't
+// look like stepped blocks.
 static void terrain_tile_lod(const WorldState *w, TerrMesh *m,
                              float x0, float z0, float x1, float z1,
                              float step,
@@ -372,8 +372,8 @@ static void terrain_tile_lod(const WorldState *w, TerrMesh *m,
 {
     *first = (GLuint)m->ni;
     float wt = x1 - x0, dt = z1 - z0;
-    int ncx = (int)(wt / step + 0.5f);           // целых клеток по X
-    if ((float)ncx * step < wt - 0.01f) ncx++;   // + хвостовая (крупнее/мельче)
+    int ncx = (int)(wt / step + 0.5f);           // whole cells along X
+    if ((float)ncx * step < wt - 0.01f) ncx++;   // + remainder cell (larger/smaller)
     if (ncx < 1) ncx = 1;
     int ncy = (int)(dt / step + 0.5f);
     if ((float)ncy * step < dt - 0.01f) ncy++;
@@ -390,24 +390,24 @@ static void terrain_tile_lod(const WorldState *w, TerrMesh *m,
     for (int i = 0; i <= ncx; i++) xs[i] = (i < ncx) ? x0 + i * step : x1;
     for (int j = 0; j <= ncy; j++) zs[j] = (j < ncy) ? z0 + j * step : z1;
 
-    // Ровная сетка: каждая клетка — один квад (без слияний в плиты)
+    // Flat grid: each cell is one quad (no merging into slabs)
     for (int j = 0; j < ncy; j++)
         for (int i = 0; i < ncx; i++)
             tm_push_quad(m, w, xs[i], zs[j], xs[i + 1], zs[j + 1]);
 
-    // Мелкие юбки по четырём границам тайла
-    tm_push_skirt_edge(m, w, xs, nnx, z0, 1, 0);              // юг
-    tm_push_skirt_edge(m, w, xs, nnx, z1, 1, 1);              // север
-    tm_push_skirt_edge(m, w, zs, nny, x0, 0, 0);              // запад
-    tm_push_skirt_edge(m, w, zs, nny, x1, 0, 1);              // восток
+    // Short skirts along the four tile borders
+    tm_push_skirt_edge(m, w, xs, nnx, z0, 1, 0);              // south
+    tm_push_skirt_edge(m, w, xs, nnx, z1, 1, 1);              // north
+    tm_push_skirt_edge(m, w, zs, nny, x0, 0, 0);              // west
+    tm_push_skirt_edge(m, w, zs, nny, x1, 0, 1);              // east
     free(xs); free(zs);
     *count = (GLsizei)(m->ni - *first);
 }
 
-// Разбивает карту на тайлы 128x128 м, строит 4 LOD на тайл (слияние ровных
-// квадов + юбки) и кладёт всё в один VBO/IBO. Формат вершины:
-// (x, z, u, v, drop) — 5 float; UV в центрах текселей карты (GL_LINEAR
-// между ними даёт билинейную высоту, как в прежней сетке 1 квад/метр).
+// Splits the map into 128x128 m tiles, builds 4 LODs per tile (flat quads
+// plus skirts) and puts everything into one VBO/IBO. Vertex format:
+// (x, z, u, v, drop) — 5 float; UV at texel centers of the map (GL_LINEAR
+// between them gives bilinear height, like the old 1-quad-per-meter grid).
 static int terrain_geometry_create(WorldState *w,
                                    GLuint *vao, GLuint *vbo, GLuint *ibo,
                                    int *vert_count,
@@ -428,7 +428,7 @@ static int terrain_geometry_create(WorldState *w,
             t->zmin = tj * TERRAIN_TILE;
             t->xmax = t->xmin + TERRAIN_TILE; if (t->xmax > w->world_w) t->xmax = w->world_w;
             t->zmax = t->zmin + TERRAIN_TILE; if (t->zmax > w->world_d) t->zmax = w->world_d;
-            // Диапазон высот тайла (для AABB фрустум-теста): скан с шагом 4 м
+            // Tile height range (for the AABB frustum test): scan with a 4 m step
             float ymin = 1e9f, ymax = -1e9f;
             for (float z = t->zmin; z <= t->zmax + 0.5f; z += 4.0f) {
                 float zz = z > t->zmax ? t->zmax : z;
@@ -481,13 +481,13 @@ static int terrain_geometry_create(WorldState *w,
     glBindVertexArray(0);
 
     *vert_count = (int)m.ni;
-    w->vert_count = *vert_count;      // для HUD (GRID/TRIS)
+    w->vert_count = *vert_count;      // for the HUD (GRID/TRIS)
     *out_tiles = tiles;
     *out_tiles_n = tiles_x * tiles_z;
     return 1;
 }
 
-// Возводит точку в расстояние до AABB тайла (0 = внутри)
+// Squared distance from a point to the tile AABB (0 = inside)
 static float terrain_tile_dist2(const TerrainTile *t, const float *p)
 {
     float dx = p[0] < t->xmin ? t->xmin - p[0] : (p[0] > t->xmax ? p[0] - t->xmax : 0);
@@ -496,14 +496,14 @@ static float terrain_tile_dist2(const TerrainTile *t, const float *p)
     return dx * dx + dy * dy + dz * dz;
 }
 
-// Рисует тайлы. Цветной проход: отсечение фрустумом + LOD по дистанции.
-// Теневой проход: отсечение по орто-боксу каскада (rc->shadow_vp).
+// Draws the tiles. Color pass: frustum culling + distance-based LOD.
+// Shadow pass: culling against the cascade's ortho box (rc->shadow_vp).
 static void terrain_draw_tiles(const TerrainParams *p,
                                const RendererContext *rc)
 {
-    if (!p->tiles) return;               // OOM при построении — нечего рисовать
+    if (!p->tiles) return;               // OOM during build — nothing to draw
     int shadow = (rc->pass == RP_SHADOW);
-    // LOD-дистанции из cvar'ов (r_terrain_lod1..3) — применяются сразу
+    // LOD distances from cvars (r_terrain_lod1..3) — applied immediately
     float lod1 = cvar_get("r_terrain_lod1");
     float lod2 = cvar_get("r_terrain_lod2");
     float lod3 = cvar_get("r_terrain_lod3");
@@ -511,14 +511,14 @@ static void terrain_draw_tiles(const TerrainParams *p,
     const float lod1_2 = lod1 * lod1;
     const float lod2_2 = lod2 * lod2;
     const float lod3_2 = lod3 * lod3;
-    Frustum lf;                              // фрустум света (для тени)
+    Frustum lf;                              // light frustum (for shadows)
     if (shadow) frustum_build(&lf, rc->shadow_vp);
     glBindVertexArray(p->vao);
     for (int i = 0; i < p->tiles_n; i++) {
         const TerrainTile *t = &p->tiles[i];
         float mn[3] = { t->xmin, t->ymin, t->zmin };
         float mx[3] = { t->xmax, t->ymax, t->zmax };
-        // Фрустум-куллинг: цветной проход использует камеру, теневой — свет
+        // Frustum culling: the color pass uses the camera, the shadow pass — the light
         if (shadow) {
             if (!frustum_test_aabb(&lf, mn, mx))
                 continue;
@@ -538,7 +538,7 @@ static void terrain_draw_tiles(const TerrainParams *p,
                 : d2 < lod2_2 ? 1
                 : d2 < lod3_2 ? 2 : 3;
         }
-        // Убрано: доклад в консоль "Terrain/frame: ..." каждые 240 кадров (шум).
+        // Removed: reporting to the console "Terrain/frame: ..." every 240 frames (noise).
         if (!t->count[lod]) continue;
         glDrawElements(GL_TRIANGLES, t->count[lod], GL_UNSIGNED_INT,
                        (const void *)(uintptr_t)((size_t)t->first[lod] *
@@ -546,23 +546,23 @@ static void terrain_draw_tiles(const TerrainParams *p,
     }
 }
 
-// Материал земли: ground.png с НАШТАМПОВАННЫМИ пучками травы (grass.png):
-// дальняя трава "вшита" в текстуру, поэтому ВСЯ карта выглядит покрытой
-// травой даже там, где объёмные пучки уже не видны (LOD-текстура —
-// стандартный приём, дешёвле миллионов дальних спрайтов).
+// Ground material: ground.png with STAMPED-IN grass tufts (grass.png):
+// distant grass is "baked" into the texture, so the WHOLE map looks covered
+// in grass even where the volumetric tufts are no longer visible (an LOD texture —
+// a standard trick, cheaper than millions of distant sprites).
 static GLuint terrain_ground_texture(const unsigned char *ground_img,
                                      const unsigned char *grass_img)
 {
     int cw = 512, ch = 512;
     unsigned char *cover = malloc((size_t)cw * ch * 3);
     if (!cover) return 0;
-    memcpy(cover, ground_img, (size_t)cw * ch * 3);   // фон = земля 1:1
+    memcpy(cover, ground_img, (size_t)cw * ch * 3);   // background = ground 1:1
     unsigned int rng2 = 0x51f15e;
-    // Пучков много (2200): дальний вид растительности несёт ИМЕННО эта
-    // текстура — статический слой спрайтов рисуется только вокруг камеры.
+    // Many tufts (2200): the distant vegetation look is carried by THIS
+    // texture — the static sprite layer is drawn only around the camera.
     for (int s = 0; s < 2200; s++) {
         float cx = frnd(&rng2) * cw, cy = frnd(&rng2) * ch;
-        float sc = 0.12f + 0.16f * frnd(&rng2);   // пучок 15..36 px
+        float sc = 0.12f + 0.16f * frnd(&rng2);   // tuft 15..36 px
         float ang = frnd(&rng2) * 6.2831853f;
         float tint = 0.80f + 0.25f * frnd(&rng2);
         float ca = cosf(ang), sa = sinf(ang);
@@ -578,7 +578,7 @@ static GLuint terrain_ground_texture(const unsigned char *ground_img,
             int px = (int)cx + dx, py = (int)cy + dy;
             if ((unsigned)px >= (unsigned)cw || (unsigned)py >= (unsigned)ch) continue;
             unsigned char *d = cover + ((size_t)py * cw + px) * 3;
-            float a = sp[3] / 255.0f * 0.55f;   // полупрозрачные пучки
+            float a = sp[3] / 255.0f * 0.55f;   // semi-transparent tufts
             d[0] = (unsigned char)(d[0] * (1 - a) + sp[0] * tint * a);
             d[1] = (unsigned char)(d[1] * (1 - a) + sp[1] * tint * a);
             d[2] = (unsigned char)(d[2] * (1 - a) + sp[2] * tint * a);
@@ -592,8 +592,8 @@ static GLuint terrain_ground_texture(const unsigned char *ground_img,
 SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
                              const RendererContext *rc)
 {
-    // Материал земли: текстура из map.json (terrain.ground_tex), трава —
-    // всегда img/grass.png (штампуется в землю)
+    // Ground material: texture from map.json (terrain.ground_tex), grass is
+    // always img/grass.png (stamped into the ground)
     MapTerrain tc;
     mapdata_terrain(&tc);
     int gw = 0, gh = 0, aw = 0, ah = 0;
@@ -602,12 +602,12 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
     if (!ground_img || !grass_img) return NULL;
     GLuint tex_ground = terrain_ground_texture(ground_img, grass_img);
     if (!tex_ground) return NULL;
-    // Пиксели во владении ресурсного кеша — не освобождаем (см. resources.h)
+    // Pixels are owned by the resource cache — we don't free them (see resources.h)
 
     GLuint prog = make_program("shaders/terrain.vs", "shaders/terrain.fs");
     if (!prog) { glDeleteTextures(1, &tex_ground); return NULL; }
-    // Теневая программа (глубина рельефа): после cleanup() s_shadow_prog == 0,
-    // поэтому replace здесь эквивалентен plain-загрузке.
+    // Shadow program (terrain depth): after cleanup() s_shadow_prog == 0,
+    // so replace here is equivalent to a plain load.
     s_shadow_prog = resources_program_replace(s_shadow_prog,
                                               "shaders/shadow.vs",
                                               "shaders/shadow.fs");
@@ -643,27 +643,27 @@ SceneNode *terrain_make_node(WorldState *w, const WorldTextures *wt,
         return NULL;
     }
     p->world = w;
-    p->rc = rc;                           // кадровые данные (renderer.c)
+    p->rc = rc;                           // per-frame data (renderer.c)
     p->prog = prog;
     p->vao = vao;    p->vbo = vbo;
     p->ibo = ibo;
-    p->tex_base = tex_ground;             // земля (unit 0)
-    p->tex_norm = wt->tex_norm;           // нормали (unit 1)
-    p->tex_height = wt->tex_height;       // высоты (unit 2)
+    p->tex_base = tex_ground;             // ground (unit 0)
+    p->tex_norm = wt->tex_norm;           // normals (unit 1)
+    p->tex_height = wt->tex_height;       // heights (unit 2)
     p->tiles = tiles;
     p->tiles_n = tiles_n;
     p->vert_count = vert_count;
-    // Слои поверхностей (splat): текстуры тайлятся (REPEAT) с мип-фильтром —
-    // асфальт/песок на дистанции не рябят. Пути и масштабы — из map.json
-    // (surfaces = { ... }), дефолты — img/dirt|sand|gravel|asphalt.png.
+    // Surface layers (splat): textures tile (REPEAT) with mipmapping —
+    // asphalt/sand don't shimmer at distance. Paths and scales come from map.json
+    // (surfaces = { ... }), defaults are img/dirt|sand|gravel|asphalt.png.
     {
         const MapSurfaces *sf = splat_surfaces();
         for (int i = 0; i < SPLAT_LAYERS; i++)
             p->tex_splat_layer[i] = resources_texture(sf->tex[i], 3,
                                                       GL_REPEAT, 1);
     }
-    terrain_prog_init(p, w);              // uniform'ы (+ статичные)
-    s_terr = p;                           // для hot-reload
+    terrain_prog_init(p, w);              // uniforms (+ static)
+    s_terr = p;                           // for hot-reload
     shader_on_reshade(terrain_reshade);
 
     const float size[3] = { w->world_w, w->max_height - w->min_height,
@@ -698,9 +698,9 @@ void terrain_node_render(SceneNode *n, float dt)
         s_cvar_reg = 1;
     }
 
-    // Теневой проход (RP_SHADOW): глубина рельефа в текущий каскад.
-    // Оркестрацию делает shadow.c (см. shadow_render в renderer_frame).
-    // Без отсечения фрустумом: дальние тайлы дают длинные тени в каскад.
+    // Shadow pass (RP_SHADOW): terrain depth into the current cascade.
+    // Orchestration is done by shadow.c (see shadow_render in renderer_frame).
+    // No frustum culling: distant tiles cast long shadows into the cascade.
     if (rc->pass == RP_SHADOW) {
         if (g_shadow_terrain) {
             glUseProgram(s_shadow_prog);
@@ -710,19 +710,19 @@ void terrain_node_render(SceneNode *n, float dt)
             glUniform1f(u_sh_hmax, p->world->max_height);
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, p->tex_height);
-            terrain_draw_tiles(p, rc);   // кулинг по объёму каскада + LOD
+            terrain_draw_tiles(p, rc);   // cull by cascade volume + LOD
         }
         return;
     }
 
-    // обычный проход (вьюпорт задаёт рендер-контекст: окно или грань кубомапа)
+    // normal pass (the viewport is set by the render context: window or cubemap face)
     glViewport(rc->view_vp[0], rc->view_vp[1], rc->view_vp[2], rc->view_vp[3]);
-    glEnable(GL_DEPTH_TEST);   // 3D: ближние склоны закрывают дальние
-    glDepthMask(GL_TRUE);      // (скайбокс её выключает)
+    glEnable(GL_DEPTH_TEST);   // 3D: near slopes hide far ones
+    glDepthMask(GL_TRUE);      // (the skybox disables it)
     glUseProgram(p->prog);
-    // Общий набор: виды, свет, окружение, туман, каскады теней (из rc)
+    // Shared set: views, light, environment, fog, shadow cascades (from rc)
     scene_uniforms_bind(&p->su, p->rc);
-    // Статические тени (режим 2): множитель вместо CSM
+    // Static shadows (mode 2): a multiplier instead of CSM
     {
         float on = 0.0f;
         if (cvar_get("r_shadows_mode") == 2.0f && terrain_shadows_have())
@@ -733,16 +733,16 @@ void terrain_node_render(SceneNode *n, float dt)
             glBindTexture(GL_TEXTURE_2D, s_static_tex);
         }
     }
-    // Запечённый свет (unit 11): RGB-люксель заменяет ambient+солнце+тень.
-    // Это СТАТИЧНОЕ решение освещения (тени преград запечены офлайн), поэтому
-    // включается ТОЛЬКО в режиме статических теней (r_shadows_mode==2). В
-    // режимах 0/1/3 террейн идёт динамическим путём (ambient+солнце+CSM):
-    // так «динамика ВМЕСТО статики», а не поверх неё. Готов только офлайн
-    // (make mapbake) и по cvar r_baked_light.
-    // ВАЖНО: не unit 9 — там кубомап отражений uReflection (samplerCube).
-    // Два сэмплера разных типов на одном юните = INVALID_OPERATION на строгих
-    // десктоп-драйверах, и весь проход террейна молча пропадает (llvmpipe
-    // терпел, реальный GL — нет: рельеф не рисовался вообще).
+    // Baked light (unit 11): the RGB luxel replaces ambient+sun+shadow.
+    // This is a STATIC lighting solution (occluder shadows are baked offline), so it
+    // turns on ONLY in static-shadow mode (r_shadows_mode==2). In
+    // modes 0/1/3 the terrain takes the dynamic path (ambient+sun+CSM):
+    // that is "dynamics INSTEAD OF statics", not on top of them. Produced only offline
+    // (make mapbake) and gated by cvar r_baked_light.
+    // IMPORTANT: not unit 9 — that's the reflection cubemap uReflection (samplerCube).
+    // Two samplers of different types on one unit = INVALID_OPERATION on strict
+    // desktop drivers, and the whole terrain pass silently vanishes (llvmpipe
+    // tolerated it, real GL did not: the terrain wasn't drawn at all).
     {
         float on = 0.0f;
         if (cvar_get("r_shadows_mode") == 2.0f &&
@@ -754,10 +754,10 @@ void terrain_node_render(SceneNode *n, float dt)
             glBindTexture(GL_TEXTURE_2D, s_baked_lm_tex);
         }
     }
-    // Карта видимости солнца (unit 16): ТОЛЬКО в режиме 1 (CSM). Каскады кроют
-    // ближнюю зону; за их пределом теней не было (см. shadow_at → 1.0 за 250 м).
-    // Здесь на ДАЛЬНИХ дистанциях подмешиваем запечённую статичную тень — далёкие
-    // деревья/поле снова отбрасывают тень на горизонте.
+    // Sun visibility map (unit 16): ONLY in mode 1 (CSM). Cascades cover
+    // the near zone; beyond them there were no shadows (see shadow_at → 1.0 past 250 m).
+    // Here, at FAR distances we blend in the baked static shadow — distant
+    // trees/field cast a shadow on the horizon again.
     {
         float on = 0.0f;
         if (cvar_get("r_shadows_mode") == 1.0f && terrain_baked_sunvis_have())
@@ -768,19 +768,19 @@ void terrain_node_render(SceneNode *n, float dt)
             glBindTexture(GL_TEXTURE_2D, s_baked_sunvis_tex);
         }
     }
-    // Маска мокрости (под крышей): unit 8
+    // Wetness mask (under a roof): unit 8
     if (terrain_wetness_mask_have()) {
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, terrain_wetness_mask_tex());
     }
-    // LOD деталей: 0 = полный сплаттинг (дефолт), >0 = радиус деталей (м).
-    // Дальше — чистая базовая карта: 6-8 текстурных выборок на пиксель
-    // экономим на БОЛЬШОЙ части экрана (режим «КАРТОШКА»).
+    // Detail LOD: 0 = full splatting (default), >0 = detail radius (m).
+    // Beyond that — the plain base map: we save 6-8 texture samples per pixel
+    // over a LARGE part of the screen (the "POTATO" mode).
     if (p->u_detail_dist >= 0)
         glUniform1f(p->u_detail_dist, cvar_get("r_terr_detail_dist"));
     if (p->u_simple >= 0)
         glUniform1f(p->u_simple, cvar_get("r_simple_render"));
-    // Поверхности (splat): маска на юните 10, слои на 12..15
+    // Surfaces (splat): mask on unit 10, layers on 12..15
     if (p->u_splat_on >= 0)
         glUniform1f(p->u_splat_on, splat_have() ? 1.0f : 0.0f);
     if (splat_have()) {
@@ -793,18 +793,18 @@ void terrain_node_render(SceneNode *n, float dt)
         }
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, p->tex_base);     // земля (unit 0)
+    glBindTexture(GL_TEXTURE_2D, p->tex_base);     // ground (unit 0)
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, p->tex_norm);     // нормали (unit 1)
+    glBindTexture(GL_TEXTURE_2D, p->tex_norm);     // normals (unit 1)
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, p->tex_height);   // высоты (unit 2)
+    glBindTexture(GL_TEXTURE_2D, p->tex_height);   // heights (unit 2)
     glActiveTexture(GL_TEXTURE0);
-    terrain_draw_tiles(p, rc);           // LOD по дистанции + отсечение фрустумом
+    terrain_draw_tiles(p, rc);           // distance-based LOD + frustum culling
 }
 
 void terrain_cleanup(SceneNode *n)
 {
-    if (!n) return;   // безопасно при частичном построении сцены (error-path)
+    if (!n) return;   // safe during partial scene construction (error path)
     TerrainParams *p = n->params;
     resources_program_release(s_shadow_prog);
     s_shadow_prog = 0;
@@ -813,7 +813,7 @@ void terrain_cleanup(SceneNode *n)
     glDeleteBuffers(1, &p->vbo);
     glDeleteBuffers(1, &p->ibo);
     glDeleteVertexArrays(1, &p->vao);
-    glDeleteTextures(1, &p->tex_base);   // вычисленная текстура — не из кеша
+    glDeleteTextures(1, &p->tex_base);   // computed texture — not from the cache
     for (int i = 0; i < SPLAT_LAYERS; i++)
         if (p->tex_splat_layer[i]) {
             resources_texture_release(p->tex_splat_layer[i]);
@@ -832,8 +832,8 @@ int terrain_tile_count(void)
     return s_terr ? s_terr->tiles_n : 0;
 }
 
-// --- Статические тени (режим r_shadows_mode 2) ---------------------------------
-// (константы и статики — в начале файла)
+// --- Static shadows (r_shadows_mode 2) ---------------------------------
+// (constants and statics are at the top of the file)
 static float static_ground(const WorldState *w, float x, float z)
 {
     return sample_height(w, x, z);
@@ -842,7 +842,7 @@ static float static_ground(const WorldState *w, float x, float z)
 void terrain_shadows_bake(const WorldState *w, SunParams *sun)
 {
     if (!sun || sun->light_count < 1) return;
-    // Луч к солнцу (первый направленный источник)
+    // Ray to the sun (the first directional light)
     const float *ld = sun->light_dir[0];
     float len = sqrtf(ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2]);
     if (len < 0.001f) return;
@@ -850,7 +850,7 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
 
     unsigned char *tex = malloc((size_t)STATIC_SHADOW_W * STATIC_SHADOW_H);
     if (!tex) return;
-    shobjs_build(w);   // цилиндры объектов: один раз, отсортированы по x
+    shobjs_build(w);   // object cylinders: once, sorted by x
     Uint64 t0 = SDL_GetTicks();
     int shadow_px = 0, total_px = 0;
     for (int j = 0; j < STATIC_SHADOW_H; j++) {
@@ -859,18 +859,18 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
             float z = ((float)j + 0.5f) / STATIC_SHADOW_H * w->world_d;
             float y = static_ground(w, x, z);
             int shadow = 0;
-            // 1) рельеф: крупный шаг до 480 м
+            // 1) terrain: coarse step up to 480 m
             for (int s = 1; s <= STATIC_SHADOW_STEPS; s++) {
                 float tt = s * STATIC_SHADOW_STEP;
                 float px = x + dx * tt;
                 float pz = z + dz * tt;
                 float py = y + dy * tt;
                 if (px < 0 || pz < 0 || px > w->world_w || pz > w->world_d)
-                    break;                       // вышли за карту — свет
+                    break;                       // left the map — lit
                 if (static_ground(w, px, pz) > py + 1.0f) { shadow = 1; break; }
             }
-            // 2) объекты: МЕЛКИЙ шаг (4 м), до 240 м — непрерывные тени
-            //    от крон (крупный шаг "проскакивал" узкие деревья)
+            // 2) objects: FINE step (4 m), up to 240 m — continuous shadows
+            //    from canopies (the coarse step "stepped over" narrow trees)
             if (!shadow) {
                 for (int s = 1; s <= STATIC_OBJ_STEPS; s++) {
                     float tt = s * STATIC_OBJ_STEP;
@@ -882,11 +882,11 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
                     if (ray_hits_object(px, py, pz)) { shadow = 1; break; }
                 }
             }
-            // В OpenGL первый ряд данных glTexImage2D — это v=0 (НИЗ текстуры).
-            // У нас z=0 должен оказаться в v=0 (UV в шейдере = z/world_d),
-            // поэтому пишем БЕЗ инверсии (инверсия здесь давала тени
-            // зеркально по Z — "в сторону солнца").
-            tex[j * STATIC_SHADOW_W + i] = shadow ? 64 : 255;   // тень ~25%
+            // In OpenGL the first data row of glTexImage2D is v=0 (the BOTTOM of the texture).
+            // We want z=0 to land in v=0 (UV in the shader = z/world_d),
+            // so we write WITHOUT inversion (inversion here mirrored the shadows
+            // along Z — "toward the sun").
+            tex[j * STATIC_SHADOW_W + i] = shadow ? 64 : 255;   // shadow ~25%
             total_px++;
             if (shadow) shadow_px++;
         }
@@ -897,7 +897,7 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
             shadow_px, total_px,
             total_px ? 100.0 * shadow_px / total_px : 0.0);
 
-    // Отладка: дамп карты теней в PPM (FR_SHADOW_DUMP=1)
+    // Debug: dump the shadow map to a PPM (FR_SHADOW_DUMP=1)
     if (getenv("FR_SHADOW_DUMP")) {
         FILE *f = fopen("/tmp/static_shadow.ppm", "wb");
         if (f) {
@@ -912,7 +912,7 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
         }
     }
 
-    // Текстура: R8, nearest, clamp
+    // Texture: R8, nearest, clamp
     if (!s_static_tex)
         glGenTextures(1, &s_static_tex);
     glBindTexture(GL_TEXTURE_2D, s_static_tex);
@@ -929,17 +929,17 @@ void terrain_shadows_bake(const WorldState *w, SunParams *sun)
 }
 
 // ===========================================================================
-//  Запечённый свет (offline). Считается ОДИН раз в make mapbake (FR_BAKE),
-//  пишется в map/baked/, движок только читает. Динамика (fauna/particles/
-//  glb_anim) в запекании НЕ участвует — окклюдеры только статические
-//  (цилиндры ShadowObj из mapdata_object, как у теней).
+//  Baked light (offline). Computed ONCE in make mapbake (FR_BAKE),
+//  written to map/baked/, the engine only reads it. Dynamics (fauna/particles/
+//  glb_anim) do NOT participate in baking — occluders are static only
+//  (ShadowObj cylinders from mapdata_object, same as for shadows).
 // ===========================================================================
-// Разрешение офлайн-лайтмапа: 2 текселя/м (было 1) — чётче тени деревьев/поля.
-// Отвязан от STATIC_SHADOW_W/H (рантайм-R8-фолбэк остаётся 1 тексель/м).
+// Offline lightmap resolution: 2 texels/m (was 1) — sharper tree/field shadows.
+// Decoupled from STATIC_SHADOW_W/H (the runtime R8 fallback stays 1 texel/m).
 #define BAKE_LM_W 4096
 #define BAKE_LM_H 2304
 
-// Нормаль рельефа из конечных разностей карты высот (совпадает с геометрией).
+// Terrain normal from heightmap finite differences (matches the geometry).
 static void bl_normal(const WorldState *w, float x, float z, float N[3])
 {
     float e = 1.0f;
@@ -951,8 +951,8 @@ static void bl_normal(const WorldState *w, float x, float z, float N[3])
     N[0] = nx / l; N[1] = ny / l; N[2] = nz / l;
 }
 
-// Луч из точки в направлении (dx,dy,dz): упёрся ли в рельеф/статический объект
-// на дистанции до maxd? Выход за карту или выше мира — небо (0, не закрыт).
+// Ray from a point along (dx,dy,dz): does it hit terrain/a static object
+// within maxd? Leaving the map or going above the world means sky (0, not blocked).
 static int bl_ray_blocked(const WorldState *w, float x, float y, float z,
                           float dx, float dy, float dz,
                           float maxd, float step)
@@ -969,12 +969,12 @@ static int bl_ray_blocked(const WorldState *w, float x, float y, float z,
     return 0;
 }
 
-// Поле пшеницы (прямоугольник мира) — низкий полупрозрачный слой окклюдера.
-#define BAKE_WHEAT_H     1.4f    // высота колосьев над землёй, м
-#define BAKE_WHEAT_TRANS 0.72f   // пропускание света за шаг марша сквозь колосья
-                                 // (солнце низкое ~11°, луч идёт сквозь колосья
-                                 //  длинным косым путём ~5 шагов → V поля ~0.3;
-                                 //  иначе тень поля тонет в клампе яркой лайтмапы)
+// Wheat field (world rectangle) — a low semi-transparent occluder layer.
+#define BAKE_WHEAT_H     1.4f    // ear height above the ground, m
+#define BAKE_WHEAT_TRANS 0.72f   // light transmission per march step through the ears
+                                 // (the sun is low ~11°, the ray passes through the ears
+                                 //  along a long slanted path ~5 steps → field V ~0.3;
+                                 //  otherwise the field shadow drowns in the clamp of a bright lightmap)
 static int bl_in_field(const WorldState *w, float x, float z)
 {
     return w->field_w > 1.0f && w->field_d > 1.0f &&
@@ -982,13 +982,13 @@ static int bl_in_field(const WorldState *w, float x, float z)
            z >= w->field_z0 && z <= w->field_z0 + w->field_d;
 }
 
-// Луч к солнцу для ЗАПЕКАНИЯ: двухфазный шаг, возвращает ПРОПУСКАНИЕ [0..1].
-// Раньше единый шаг 8 м проскакивал кроны деревьев (радиус ~4.5 м) между
-// выборками — отсюда «дыры» в тени. Теперь вблизи (до 160 м, где живут объекты
-// и локальный рельеф) шаг 1.5 м, дальше — 10 м до 480 м (дальние гребни).
-// Смещение начала (t0) убирает самопопадание и сшивает выборки соседних
-// текселей, снимая «полосатость». Рельеф/крона — глухой блок (0); пшеница —
-// мягкий фильтр (тень поля на землю), произведение пропусканий по слою.
+// Sun ray for BAKING: two-phase step, returns TRANSMITTANCE [0..1].
+// Previously a single 8 m step skipped tree canopies (radius ~4.5 m) between
+// samples — hence "holes" in the shadow. Now near the point (up to 160 m, where objects
+// and local terrain live) the step is 1.5 m, farther — 10 m up to 480 m (distant ridges).
+// The start offset (t0) removes self-hits and stitches neighbouring texels'
+// samples, killing "banding". Terrain/canopy is a hard block (0); wheat is a
+// soft filter (the field's shadow on the ground), a product of transmittances over the layer.
 static float bl_sun_ray_vis(const WorldState *w, float x, float y, float z,
                             float dx, float dy, float dz, float t0)
 {
@@ -1002,10 +1002,10 @@ static float bl_sun_ray_vis(const WorldState *w, float x, float y, float z,
             if (px < 0 || pz < 0 || px > w->world_w || pz > w->world_d) return trans;
             if (py > w->max_height + 6.0f) return trans;
             float g = static_ground(w, px, pz);
-            if (g > py + 0.5f) return 0.0f;                 // рельеф — глухо
-            if (ray_hits_object(px, py, pz)) return 0.0f;   // крона — глухо
-            // Пшеница: точка внутри поля и НИЖЕ верхушки колосьев — фильтрует
-            // свет (мягкая тень поля). Только на ближней фазе (шаг 1.5 м).
+            if (g > py + 0.5f) return 0.0f;                 // terrain — opaque
+            if (ray_hits_object(px, py, pz)) return 0.0f;   // canopy — opaque
+            // Wheat: a point inside the field and BELOW the ear tops filters the
+            // light (a soft field shadow). Only in the near phase (1.5 m step).
             if (phase == 0 && py < g + BAKE_WHEAT_H && bl_in_field(w, px, pz)) {
                 trans *= BAKE_WHEAT_TRANS;
                 if (trans < 0.03f) return 0.0f;
@@ -1015,16 +1015,16 @@ static float bl_sun_ray_vis(const WorldState *w, float x, float y, float z,
     return trans;
 }
 
-// Дробная видимость солнца [0..1]: супервыборка лучей в узком конусе вокруг
-// направления на солнце (мягкая полутень) + разный сдвиг начала у каждого луча.
-// Бинарное 0/1 давало ступенчатые «кисточкой» края; усреднение по конусу +
-// пост-размытие поля дают гладкую стилизованную тень, совпадающую с геометрией.
+// Fractional sun visibility [0..1]: supersampled rays in a narrow cone around
+// the sun direction (a soft penumbra) + a different start offset per ray.
+// Binary 0/1 gave jagged "brush-stroke" edges; averaging over the cone +
+// post-blurring the field yield a smooth stylized shadow matching the geometry.
 #define BAKE_SUN_SAMPLES 8
-#define BAKE_SUN_CONE    0.055f   // полу-угол конуса (~3.1°) — ширина полутени
+#define BAKE_SUN_CONE    0.055f   // cone half-angle (~3.1°) — penumbra width
 static float bl_sun_vis(const WorldState *w, float x, float y, float z,
                         float dx, float dy, float dz)
 {
-    // Ортобазис (u,v), перпендикулярный направлению на солнце.
+    // Orthonormal basis (u,v) perpendicular to the sun direction.
     float ux, uy, uz;
     if (fabsf(dy) < 0.99f) { ux = dz; uy = 0.0f; uz = -dx; }
     else { ux = 1.0f; uy = 0.0f; uz = 0.0f; }
@@ -1032,7 +1032,7 @@ static float bl_sun_vis(const WorldState *w, float x, float y, float z,
     float vx = dy*uz - dz*uy, vy = dz*ux - dx*uz, vz = dx*uy - dy*ux;
     float acc = 0.0f;
     for (int s = 0; s < BAKE_SUN_SAMPLES; s++) {
-        // Диск конуса выборкой Фогеля (золотой угол) — равномерно, без сгустков.
+        // Cone disk via Vogel sampling (golden angle) — uniform, no clumping.
         float ang = 2.399963f * (float)s;
         float rr  = BAKE_SUN_CONE * sqrtf(((float)s + 0.5f) / BAKE_SUN_SAMPLES);
         float jx = cosf(ang) * rr, jy = sinf(ang) * rr;
@@ -1045,46 +1045,46 @@ static float bl_sun_vis(const WorldState *w, float x, float y, float z,
     return acc / (float)BAKE_SUN_SAMPLES;
 }
 
-// AO по небу: доля лучей верхней полусферы (смещённых к N), уходящих в небо.
-// Локальная окклюзия под кронами / у склонов (радиус ~26 м). 1 = открыто.
+// Sky AO: the fraction of upper-hemisphere rays (biased toward N) that reach the sky.
+// Local occlusion under canopies / near slopes (radius ~26 m). 1 = open.
 static float bl_sky_ao(const WorldState *w, float x, float y, float z,
                        const float N[3])
 {
-    // 9 фиксированных направлений: зенит + 8 по кольцу под 45°.
+    // 9 fixed directions: zenith + 8 around a ring at 45°.
     static const float ring[8][2] = {
         { 1, 0 }, { 0.707f, 0.707f }, { 0, 1 }, { -0.707f, 0.707f },
         { -1, 0 }, { -0.707f, -0.707f }, { 0, -1 }, { 0.707f, -0.707f }
     };
     int open = 0, total = 0;
     float dirs[9][3];
-    dirs[0][0] = 0; dirs[0][1] = 1; dirs[0][2] = 0;            // зенит
+    dirs[0][0] = 0; dirs[0][1] = 1; dirs[0][2] = 0;            // zenith
     for (int k = 0; k < 8; k++) {
         dirs[k + 1][0] = ring[k][0] * 0.6f;
-        dirs[k + 1][1] = 0.8f;                                 // наклон 45°+
+        dirs[k + 1][1] = 0.8f;                                 // 45°+ tilt
         dirs[k + 1][2] = ring[k][1] * 0.6f;
     }
     for (int k = 0; k < 9; k++) {
         float dx = dirs[k][0], dy = dirs[k][1], dz = dirs[k][2];
-        if (dx * N[0] + dy * N[1] + dz * N[2] <= 0.05f) continue; // за горизонтом
+        if (dx * N[0] + dy * N[1] + dz * N[2] <= 0.05f) continue; // below the horizon
         total++;
         if (!bl_ray_blocked(w, x, y + 0.4f, z, dx, dy, dz, 26.0f, 2.0f)) open++;
     }
     return total ? (float)open / (float)total : 1.0f;
 }
 
-// Кадровое состояние света для запекания (из RendererContext).
+// Per-frame light state for baking (from RendererContext).
 typedef struct {
     const WorldState *w;
-    float *E;                    // BAKE_LM_W*BAKE_LM_H*3 float (люксель)
-    const float *V;              // BAKE_LM_W*BAKE_LM_H — дробная видимость солнца
+    float *E;                    // BAKE_LM_W*BAKE_LM_H*3 float (luxel)
+    const float *V;              // BAKE_LM_W*BAKE_LM_H — fractional sun visibility
     float amb[3], sky[3], grd[3];
     float ldir[SUN_MAX_LIGHTS][3], lcol[SUN_MAX_LIGHTS][3], lint[SUN_MAX_LIGHTS];
     int lcount;
 } BakeLight;
 
-// Проход видимости солнца: дробная тень [0..1] с супервыборкой (см. bl_sun_vis).
-// Считается ОТДЕЛЬНО от освещения, чтобы поле можно было размыть (мягкая
-// полутень) до композиции — иначе тень выходит ступенчатой «кисточкой».
+// Sun visibility pass: fractional shadow [0..1] with supersampling (see bl_sun_vis).
+// Computed SEPARATELY from lighting so the field can be blurred (a soft
+// penumbra) before compositing — otherwise the shadow comes out jagged ("brush-stroke").
 static void bake_sunvis_rows(int j0, int j1, void *ud)
 {
     BakeLight *b = (BakeLight *)ud;
@@ -1110,8 +1110,8 @@ static void bake_sunvis_rows(int j0, int j1, void *ud)
     }
 }
 
-// Прямой проход: ambient (полусфера) * AO + прямой свет каждого направленного
-// источника; видимость солнца (0) — только у источника 0 (как в шейдере).
+// Direct pass: ambient (hemisphere) * AO + direct light from each directional
+// source; sun visibility (0) applies only to source 0 (as in the shader).
 static void bake_direct_rows(int j0, int j1, void *ud)
 {
     BakeLight *b = (BakeLight *)ud;
@@ -1123,7 +1123,7 @@ static void bake_direct_rows(int j0, int j1, void *ud)
             float y = static_ground(w, x, z);
             float N[3]; bl_normal(w, x, z, N);
             float ao = bl_sky_ao(w, x, y, z, N);
-            // Полусферный ambient (как terrain.fs), приглушённый AO.
+            // Hemispheric ambient (like terrain.fs), dimmed by AO.
             float t = N[1] * 0.5f + 0.5f;
             float aok = 0.35f + 0.65f * ao;
             float light[3];
@@ -1131,12 +1131,12 @@ static void bake_direct_rows(int j0, int j1, void *ud)
                 float amb = (b->grd[c] + (b->sky[c] - b->grd[c]) * t) * b->amb[c];
                 light[c] = amb * aok;
             }
-            // Видимость солнца — дробная, из размытого поля (мягкая полутень).
+            // Sun visibility — fractional, from the blurred field (soft penumbra).
             float shadow = b->V ? b->V[(size_t)j * BAKE_LM_W + i] : 1.0f;
-            // тень душит ambient до 1/4 (как mix(0.25,1,shadow) в шейдере)
+            // shadow chokes ambient down to 1/4 (like mix(0.25,1,shadow) in the shader)
             float ambmul = 0.25f + 0.75f * shadow;
             for (int c = 0; c < 3; c++) light[c] *= ambmul;
-            // Прямой свет: каждый направленный источник.
+            // Direct light: each directional source.
             for (int li = 0; li < b->lcount; li++) {
                 float dx = b->ldir[li][0], dy = b->ldir[li][1], dz = b->ldir[li][2];
                 float ln = sqrtf(dx*dx + dy*dy + dz*dz);
@@ -1153,19 +1153,19 @@ static void bake_direct_rows(int j0, int j1, void *ud)
     }
 }
 
-// Диффузный переотражённый бонс: собираем свет из кольца соседей (снимок src),
-// тонируем цветом земли (bounce tint) и добавляем к приёмнику (dst). Один
-// проход = "цвет земли перетекает в тень" — стилизованный GI без трассировки.
+// Diffuse bounce: gather light from a ring of neighbours (a src snapshot),
+// tint it with the ground color (bounce tint) and add it to the receiver (dst). One
+// pass = "the ground color bleeds into shadow" — stylized GI without tracing.
 typedef struct {
-    const float *src;   // снимок люкселя до бонса
-    float *dst;         // приёмник (= копия src + непрямой)
-    float tint[3];      // тон отражённого света (цвет земли * усиление)
+    const float *src;   // luxel snapshot before the bounce
+    float *dst;         // receiver (= a copy of src + indirect)
+    float tint[3];      // bounced-light tint (ground color * gain)
 } BounceJob;
 
 static void bake_bounce_rows(int j0, int j1, void *ud)
 {
     BounceJob *b = (BounceJob *)ud;
-    // Кольца выборок (в текселях): 32 соседа, вес спадает с дистанцией.
+    // Sample rings (in texels): 32 neighbours, weight falls off with distance.
     static const int rad[4] = { 5, 11, 23, 45 };
     static const float ring[8][2] = {
         { 1, 0 }, { 0.707f, 0.707f }, { 0, 1 }, { -0.707f, 0.707f },
@@ -1194,7 +1194,7 @@ static void bake_bounce_rows(int j0, int j1, void *ud)
     }
 }
 
-// Создать каталог map/baked (idempotent).
+// Create the map/baked directory (idempotent).
 static void bake_ensure_dir(void)
 {
 #ifdef _WIN32
@@ -1204,13 +1204,13 @@ static void bake_ensure_dir(void)
 #endif
 }
 
-// --- Сетка зондов освещённости (для динамических объектов) ------------------
+// --- Irradiance probe grid (for dynamic objects) ------------------
 #define BAKE_PROBE_NX 64
 #define BAKE_PROBE_NZ 36
 #define BAKE_PROBE_NY 8
 
-// Пишет probes.bin: заголовок + nx*ny*nz*4 float (ambient RGB + видимость
-// солнца). Каждый зонд — точка в 3D; объект берёт трилинейную выборку.
+// Writes probes.bin: header + nx*ny*nz*4 float (ambient RGB + sun
+// visibility). Each probe is a 3D point; an object takes a trilinear sample.
 static void bake_probes(const WorldState *w, const BakeLight *b)
 {
     int nx = BAKE_PROBE_NX, ny = BAKE_PROBE_NY, nz = BAKE_PROBE_NZ;
@@ -1232,12 +1232,12 @@ static void bake_probes(const WorldState *w, const BakeLight *b)
         float z = (nz > 1) ? (float)iz / (nz - 1) * w->world_d : 0;
         float y = y0 + (ny > 1 ? (float)iy / (ny - 1) : 0) * (y1 - y0);
         float g = static_ground(w, x, z);
-        if (y < g + 0.5f) y = g + 0.5f;            // зонд не под землёй
+        if (y < g + 0.5f) y = g + 0.5f;            // probe not underground
         float ao = bl_sky_ao(w, x, y, z, upN);
         float aok = 0.35f + 0.65f * ao;
         float sunv = (b->lcount > 0) ? bl_sun_vis(w, x, y, z, sdx, sdy, sdz) : 1.0f;
         float *o = &P[(((size_t)iz * ny + iy) * nx + ix) * 4];
-        for (int c = 0; c < 3; c++)               // всенаправленный ambient (t=0.5)
+        for (int c = 0; c < 3; c++)               // omnidirectional ambient (t=0.5)
             o[c] = (b->grd[c] + (b->sky[c] - b->grd[c]) * 0.5f) * b->amb[c] * aok;
         o[3] = sunv;
     }
@@ -1253,7 +1253,7 @@ static void bake_probes(const WorldState *w, const BakeLight *b)
         fclose(f);
         SDL_Log("Baked probes: %dx%dx%d -> map/baked/probes.bin", nx, ny, nz);
     }
-    // Оставляем сетку в памяти для превью в этом же процессе.
+    // Keep the grid in memory for a preview in this same process.
     free(s_probes);
     s_probes = P; s_pnx = nx; s_pny = ny; s_pnz = nz;
     s_py0 = y0; s_py1 = y1; s_pwx = w->world_w; s_pwz = w->world_d;
@@ -1263,7 +1263,7 @@ void terrain_light_bake(const WorldState *w, SunParams *sun,
                         const RendererContext *rc)
 {
     if (!w || !rc) return;
-    shobjs_build(w);   // статические окклюдеры (динамика исключена)
+    shobjs_build(w);   // static occluders (dynamics excluded)
 
     BakeLight b; memset(&b, 0, sizeof b);
     b.w = w;
@@ -1286,8 +1286,8 @@ void terrain_light_bake(const WorldState *w, SunParams *sun,
     size_t np = (size_t)BAKE_LM_W * BAKE_LM_H;
     float *E = malloc(n * sizeof(float));
     float *E2 = malloc(n * sizeof(float));
-    float *V = malloc(np * sizeof(float));      // дробная видимость солнца
-    float *V2 = malloc(np * sizeof(float));     // она же после размытия
+    float *V = malloc(np * sizeof(float));      // fractional sun visibility
+    float *V2 = malloc(np * sizeof(float));     // same, after blurring
     unsigned char *rgb = malloc((size_t)BAKE_LM_W * BAKE_LM_H * 3);
     if (!E || !E2 || !V || !V2 || !rgb) {
         free(E); free(E2); free(V); free(V2); free(rgb); return;
@@ -1295,14 +1295,14 @@ void terrain_light_bake(const WorldState *w, SunParams *sun,
 
     Uint64 t0 = SDL_GetTicks();
 
-    // 1) Дробная видимость солнца (супервыборка по конусу) — отдельным полем.
+    // 1) Fractional sun visibility (cone supersampling) — as a separate field.
     b.V = V;
     jobs_parallel_for(0, BAKE_LM_H, bake_sunvis_rows, &b);
-    // 2) Сепарабельное размытие поля тени (гаусс R=3) — мягкая полутень, снимает
-    //    «кисточкой» ступеньки. Горизонталь V->V2, вертикаль V2->V.
+    // 2) Separable blur of the shadow field (gauss R=3) — a soft penumbra, removes
+    //    the "brush-stroke" steps. Horizontal V->V2, vertical V2->V.
     {
         const int R = 3;
-        float wt[4] = { 0.383f, 0.242f, 0.061f, 0.006f };  // гаусс sigma~1.5
+        float wt[4] = { 0.383f, 0.242f, 0.061f, 0.006f };  // gauss sigma~1.5
         for (int j = 0; j < BAKE_LM_H; j++)
             for (int i = 0; i < BAKE_LM_W; i++) {
                 float acc = V[(size_t)j*BAKE_LM_W + i] * wt[0], ws = wt[0];
@@ -1326,18 +1326,18 @@ void terrain_light_bake(const WorldState *w, SunParams *sun,
                 V[(size_t)j*BAKE_LM_W + i] = acc / ws;
             }
     }
-    // 3) Прямой свет с дробной тенью из размытого поля V.
+    // 3) Direct light with a fractional shadow from the blurred field V.
     b.E = E;
     b.V = V;
     jobs_parallel_for(0, BAKE_LM_H, bake_direct_rows, &b);
 
-    // Один диффузный бонс (цвет земли перетекает в тень).
+    // One diffuse bounce (the ground color bleeds into shadow).
     BounceJob bj;
     bj.src = E; bj.dst = E2;
     for (int c = 0; c < 3; c++) bj.tint[c] = rc->ground_color[c] * 0.85f;
     jobs_parallel_for(0, BAKE_LM_H, bake_bounce_rows, &bj);
 
-    // Клампим итог к [0,1] (terrain.fs всё равно делает min(light,1)) -> RGB8.
+    // Clamp the result to [0,1] (terrain.fs does min(light,1) anyway) -> RGB8.
     for (size_t i = 0; i < n; i++) {
         float v = E2[i]; if (v < 0) v = 0; if (v > 1) v = 1;
         rgb[i] = (unsigned char)(v * 255.0f + 0.5f);
@@ -1348,7 +1348,7 @@ void terrain_light_bake(const WorldState *w, SunParams *sun,
                 BAKE_LM_W, BAKE_LM_H,
                 (unsigned long long)(SDL_GetTicks() - t0));
 
-    // Загрузить в GL сразу (превью в этом же процессе).
+    // Upload to GL immediately (preview in this same process).
     if (!s_baked_lm_tex) glGenTextures(1, &s_baked_lm_tex);
     glBindTexture(GL_TEXTURE_2D, s_baked_lm_tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1360,17 +1360,17 @@ void terrain_light_bake(const WorldState *w, SunParams *sun,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Карта видимости солнца (sunvis): дробное поле V, но в 2× меньшем разрешении
-    // (2048x1152). Нужна режиму 1 (динамика) для ДАЛЬНИХ теней за пределами
-    // каскадов CSM — статичные тени деревьев/поля «подгружаются» на горизонте.
-    // Серая (R=G=B), пишем через RGB-png (grayscale достаточно для дали).
+    // Sun visibility map (sunvis): the fractional field V, but at 2× lower
+    // resolution (2048x1152). Mode 1 (dynamic) needs it for FAR shadows beyond the
+    // CSM cascades — static tree/field shadows "load in" on the horizon.
+    // Grayscale (R=G=B), written via RGB-png (grayscale is enough for the distance).
     {
         int sw = BAKE_LM_W / 2, sh = BAKE_LM_H / 2;
         unsigned char *sv = malloc((size_t)sw * sh * 3);
         if (sv) {
             for (int j = 0; j < sh; j++)
                 for (int i = 0; i < sw; i++) {
-                    // 2x2 бокс-фильтр из полноразмерного V.
+                    // 2x2 box filter from the full-resolution V.
                     float a = V[(size_t)(2*j)  * BAKE_LM_W + 2*i]
                             + V[(size_t)(2*j)  * BAKE_LM_W + 2*i+1]
                             + V[(size_t)(2*j+1)* BAKE_LM_W + 2*i]
@@ -1438,7 +1438,7 @@ int terrain_baked_light_load(const WorldState *w)
     s_baked_have = 1;
     SDL_Log("Baked lightmap loaded (%dx%d)", lw, lh);
 
-    // Карта видимости солнца (для дальних теней в режиме 1). Необязательна.
+    // Sun visibility map (for distant shadows in mode 1). Optional.
     unsigned int svsz = 0;
     unsigned char *svpng = resources_read_file("baked/sunvis.png", &svsz);
     if (svpng) {
@@ -1461,7 +1461,7 @@ int terrain_baked_light_load(const WorldState *w)
         }
     }
 
-    // Сетка зондов (не критична: без неё объекты просто освещаются как раньше).
+    // Probe grid (non-critical: without it objects are just lit as before).
     unsigned int psz = 0;
     unsigned char *pb = resources_read_file("baked/probes.bin", &psz);
     if (pb && psz >= 36) {
@@ -1494,7 +1494,7 @@ int terrain_baked_light_load(const WorldState *w)
 
 void terrain_baked_probe(float x, float y, float z, float out[4])
 {
-    out[0] = out[1] = out[2] = 0.5f; out[3] = 1.0f;   // нейтраль без сетки
+    out[0] = out[1] = out[2] = 0.5f; out[3] = 1.0f;   // neutral without a grid
     if (!s_probes || s_pnx < 2 || s_pnz < 2) return;
     float fx = (x / (s_pwx > 0 ? s_pwx : 1)) * (s_pnx - 1);
     float fz = (z / (s_pwz > 0 ? s_pwz : 1)) * (s_pnz - 1);
@@ -1524,22 +1524,22 @@ void terrain_baked_probe(float x, float y, float z, float out[4])
 }
 
 
-// текстура видимости неба: RG8. R = 255 = открытое небо
-// (дождь/снег попадают), G = 255 = под крышей (сухо).
+// sky visibility texture: RG8. R = 255 = open sky
+// (rain/snow reaches), G = 255 = under a roof (dry).
 #define WETNESS_MASK_W 512
 #define WETNESS_MASK_H 512
-#define WETNESS_MASK_MAX_H 500.0f   // макс. высота луча вверх
-#define WETNESS_MASK_STEPS 256      // шагов луча
+#define WETNESS_MASK_MAX_H 500.0f   // max ray height upward
+#define WETNESS_MASK_STEPS 256      // ray steps
 
 static GLuint s_wetness_mask_tex = 0;
 static int s_wetness_mask_baked = 0;
 
-// Луч вверх: задевает ли крону дерева? Аналогично ray_hits_object, но луч
-// направлен строго вверх (0, 1, 0).
+// Ray upward: does it hit a tree canopy? Same as ray_hits_object, but the ray
+// points straight up (0, 1, 0).
 static int ray_hits_object_up(float x, float y, float z)
 {
     if (s_shobjs_n == 0) return 0;
-    // диапазон объектов с |ox| < 120 м
+    // object range with |ox| < 120 m
     int lo = 0, hi = s_shobjs_n - 1, first = -1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
@@ -1559,8 +1559,8 @@ static int ray_hits_object_up(float x, float y, float z)
     return 0;
 }
 
-// Один кусок строк маски мокрости для job-пула (см. jobs.h). Данные только
-// читаем (s_shobjs построен, w->heights готовы) — безопасно параллелить.
+// One block of wetness-mask rows for the job pool (see jobs.h). Data is read-only
+// (s_shobjs is built, w->heights ready) — safe to parallelize.
 typedef struct {
     const WorldState *w;
     unsigned char *tex;
@@ -1577,18 +1577,18 @@ static void wetness_rows(int i0, int i1, void *ud)
         for (int i = 0; i < WETNESS_MASK_W; i++) {
             float x = ((float)i + 0.5f) / WETNESS_MASK_W * w->world_w;
             float z = ((float)jj + 0.5f) / WETNESS_MASK_H * w->world_d;
-            float y = static_ground(w, x, z) + 0.1f; // чуть выше земли
+            float y = static_ground(w, x, z) + 0.1f; // slightly above the ground
             int dry = 0;
 
-            // Луч вверх: ищем нависающие объекты
+            // Ray upward: look for overhanging objects
             for (int s = 1; s <= WETNESS_MASK_STEPS; s++) {
                 float tt = s * (WETNESS_MASK_MAX_H / WETNESS_MASK_STEPS);
                 float py = y + tt;
                 if (ray_hits_object_up(x, py, z)) { dry = 1; break; }
             }
 
-            // В OpenGL первый ряд = v=0 (НИЗ текстуры), z=0 -> v=0.
-            // R = открытое небо (падает дождь/снег), G = под крышей (сухо).
+            // In OpenGL the first row = v=0 (texture BOTTOM), z=0 -> v=0.
+            // R = open sky (rain/snow falls), G = under a roof (dry).
             size_t k = ((size_t)jj * WETNESS_MASK_W + i) * 2;
             tex[k]     = dry ? 0 : 255;
             tex[k + 1] = dry ? 255 : 0;
@@ -1603,15 +1603,15 @@ static void wetness_rows(int i0, int i1, void *ud)
 void terrain_wetness_mask_bake(const WorldState *w)
 {
     if (s_wetness_mask_baked) return; // already baked this session
-    shobjs_build(w);   // строим список объектов (цилиндры крон)
+    shobjs_build(w);   // build the object list (canopy cylinders)
 
     unsigned char *tex = malloc((size_t)WETNESS_MASK_W * WETNESS_MASK_H * 2);
     if (!tex) return;
 
     Uint64 t0 = SDL_GetTicks();
 
-    // Параллельно по строкам: 512 строк * 256 шагов луча — чистый CPU,
-    // ни GL, ни общих записей (текстура режется по строкам без пересечений)
+    // Parallel by rows: 512 rows * 256 ray steps — pure CPU,
+    // no GL and no shared writes (the texture is split by rows without overlap)
     WetnessJob j;
     j.w = w;
     j.tex = tex;

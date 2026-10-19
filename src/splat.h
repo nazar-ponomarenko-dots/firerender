@@ -1,27 +1,27 @@
 // ============================================================================
-//  splat.h — поверхности рельефа: splat-карта материалов, дороги, занятость
+//  splat.h — terrain surfaces: material splat map, roads, occupancy
 // ----------------------------------------------------------------------------
-//  ОДНА карта на мир, запекается при загрузке (splat_build) и живёт до
-//  выгрузки. Хранит три вещи, которые нужны и рендеру, и логике:
+//  ONE map per world, baked at load time (splat_build) and living until
+//  unload. It stores three things needed by both the renderer and the logic:
 //
-//   1) SPLAT-МАСКА (RGBA8, 1 тексель = surfaces.resolution метров):
-//      R = грунт (dirt), G = песок (sand), B = щебень/тропинка (gravel),
-//      A = асфальт. Базовый слой (трава/земля terrain.ground_tex) виден там,
-//      где все каналы нули. terrain.fs смешивает слои по этой маске.
+//   1) SPLAT MASK (RGBA8, 1 texel = surfaces.resolution meters):
+//      R = dirt, G = sand, B = gravel/path, A = asphalt. The base layer
+//      (grass/soil terrain.ground_tex) shows wherever all channels are zero.
+//      terrain.fs blends layers using this mask.
 //
-//   2) ВЫРАВНИВАНИЕ ДОРОГ: дороги «режут» рельеф — полотно становится
-//      гладким по своей осевой линии (высоты в WorldState.heights правятся
-//      ДО генерации нормалей и сетки). Автодорога выравнивает сильно,
-//      тропинка — почти нет (flatten в MapRoad).
+//   2) ROAD LEVELING: roads "cut" the terrain — the surface becomes smooth
+//      along its centerline (heights in WorldState.heights are modified
+//      BEFORE normals and mesh generation). Car roads level strongly,
+//      footpaths — almost not at all (flatten in MapRoad).
 //
-//   3) КАРТА ЗАНЯТОСТИ (R8, отдельное разрешение): 0..1, где 1 = «здесь
-//      что-то стоит» (статический 3D-объект/модель) или «здесь дорога».
-//      Растительность (vegetation.c) не сеет траву там, где занятость
-//      высокая — трава больше не растёт сквозь машины, ящики и асфальт.
+//   3) OCCUPANCY MAP (R8, separate resolution): 0..1, where 1 = "something
+//      stands here" (static 3D object/model) or "this is a road".
+//      Vegetation (vegetation.c) doesn't seed grass where occupancy is
+//      high — grass no longer grows through cars, crates and asphalt.
 //
-//  Всё считается на CPU один раз: карта 2000x1125 при разрешении 1 м —
-//  2.2 МБ маски. Никаких пер-кадровых затрат, кроме одной текстурной
-//  выборки в шейдере рельефа.
+//  Everything is computed on the CPU once: a 2000x1125 map at 1 m resolution
+//  is a 2.2 MB mask. No per-frame costs beyond one texture sample
+//  in the terrain shader.
 // ============================================================================
 #ifndef SPLAT_H
 #define SPLAT_H
@@ -29,52 +29,52 @@
 #include "mapdata.h"
 #include "world.h"
 
-// Запекает splat-маску и карту занятости, ВЫРАВНИВАЕТ рельеф под дороги.
-// Вызывать ПОСЛЕ mapdata_load и загрузки высот, но ДО построения нормалей и
-// геометрии рельефа (правит w->heights). Идемпотентна: повторный вызов
-// пересобирает всё с нуля.
+// Bakes the splat mask and occupancy map, LEVELS the terrain under roads.
+// Call AFTER mapdata_load and height loading, but BEFORE building normals and
+// terrain geometry (modifies w->heights). Idempotent: a repeated call
+// rebuilds everything from scratch.
 void splat_build(WorldState *w);
 
-// Освобождает CPU-массивы и текстуры (при выгрузке мира).
+// Frees CPU arrays and textures (on world unload).
 void splat_free(void);
 
-// Правки высот под дороги: вызывается ИЗ world_load между расчётом высот и
-// нормалями. Возвращает 1, если рельеф менялся (есть дороги с flatten > 0).
-// Полный splat_build звать нельзя (нужны готовые размеры мира) — поэтому
-// выравнивание вынесено отдельным шагом.
+// Height modifications under roads: called FROM world_load between height
+// computation and normals. Returns 1 if the terrain changed (roads with
+// flatten > 0 exist). A full splat_build cannot be called (world dimensions
+// must be ready) — hence leveling is a separate step.
 int splat_flatten_roads(WorldState *w);
 
-// --- Доступ из шейдера --------------------------------------------------------
-// Текстура splat-маски (RGBA8, LINEAR, CLAMP). 0 — не запечена.
+// --- Access from the shader ----------------------------------------------------
+// Splat mask texture (RGBA8, LINEAR, CLAMP). 0 — not baked.
 GLuint splat_texture(void);
 int splat_have(void);
 
-// Параметры слоёв для uniform'ов рельефа (масштабы тайлов и пути текстур).
+// Layer parameters for terrain uniforms (tile scales and texture paths).
 const MapSurfaces *splat_surfaces(void);
 
-// --- Доступ из логики ---------------------------------------------------------
-// Вес материала в точке мира (0..1). Индекс — SPLAT_DIRT..SPLAT_ASPHALT.
+// --- Access from the logic -----------------------------------------------------
+// Material weight at a world point (0..1). Index — SPLAT_DIRT..SPLAT_ASPHALT.
 float splat_weight_at(int material, float wx, float wz);
 
-// Множитель плотности травы в точке (0 = не растёт, 1 = как обычно).
-// Учитывает и слои поверхности (surfaces.grass), и занятость объектами.
+// Grass density multiplier at a point (0 = doesn't grow, 1 = as usual).
+// Accounts for both surface layers (surfaces.grass) and object occupancy.
 float splat_grass_factor(float wx, float wz);
 
-// Занятость точки 0..1 (1 = стоит объект / лежит дорога).
+// Occupancy of a point 0..1 (1 = object stands / road lies there).
 float splat_occupancy_at(float wx, float wz);
 
-// --- Регистрация занятости из кода (модели, поставленные в рантайме) ----------
-// Круг занятости радиусом r вокруг (x, z) с силой strength (0..1).
-// Модели, поставленные командой glb/mesh, регистрируют себя здесь, чтобы
-// трава под ними исчезла при следующей перегенерации чанков.
+// --- Occupancy registration from code (models placed at runtime) ----------------
+// Occupancy circle of radius r around (x, z) with strength (0..1).
+// Models placed by the glb/mesh command register themselves here so that
+// grass under them disappears on the next chunk regeneration.
 void splat_occupy_circle(float x, float z, float r, float strength);
 
-// Прямоугольник занятости (AABB по XZ).
+// Occupancy rectangle (AABB in XZ).
 void splat_occupy_box(float x, float z, float hw, float hd, float strength);
 
-// Помечает динамический слой растительности как «надо пересобрать»
-// (после splat_occupy_*). Возвращает счётчик изменений — vegetation.c
-// сравнивает его со своим и перегенерирует чанки при расхождении.
+// Marks the dynamic vegetation layer as "needs rebuild"
+// (after splat_occupy_*). Returns the change counter — vegetation.c
+// compares it with its own and regenerates chunks on divergence.
 unsigned int splat_occupancy_version(void);
 
 #endif

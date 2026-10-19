@@ -1,11 +1,11 @@
 // ============================================================================
-//  json.h — мини-парсер JSON без зависимостей (объекты/массивы/строки/числа)
+//  json.h — dependency-free mini JSON parser (objects/arrays/strings/numbers)
 // ----------------------------------------------------------------------------
-//  Нужен только для map/map.json: грузим один раз при старте, парсим в пул
-//  узлов, который живёт до json_free(). Никаких библиотек — чистый C, как
-//  и весь проект. Ограничения (для наших данных их хватает с запасом):
-//    - глубина вложенности до JSON_MAX_DEPTH (64);
-//    - строки и числа хранятся как указатели на арену (json_free освобождает).
+//  Needed only for map/map.json: loaded once at startup, parsed into a node
+//  pool that lives until json_free(). No libraries — pure C, like the whole
+//  project. Limitations (more than enough for our data):
+//    - nesting depth up to JSON_MAX_DEPTH (64);
+//    - strings and numbers are stored as pointers into the arena (json_free releases it).
 // ============================================================================
 #ifndef JSON_H
 #define JSON_H
@@ -19,44 +19,44 @@ typedef enum {
 
 typedef struct JsonNode {
     JsonType type;
-    const char *key;     // имя поля (для объектов), NULL — у элементов массива
-    const char *sval;    // строка (JSON_STRING), уже с раскрытыми escape
-    double nval;         // число (JSON_NUMBER)
+    const char *key;     // field name (for objects), NULL for array elements
+    const char *sval;    // string (JSON_STRING), escapes already expanded
+    double nval;         // number (JSON_NUMBER)
     int bval;            // JSON_BOOL
-    int child;           // первый ребёнок (массив/объект), -1 = нет
-    int next;            // следующий узел на том же уровне, -1 = нет
+    int child;           // first child (array/object), -1 = none
+    int next;            // next node at the same level, -1 = none
 } JsonNode;
 
-// Парсит JSON-текст в пул узлов. Возвращает корневой узел (или NULL при
-// ошибке). Освобождать отдельные узлы не нужно — всё живёт до json_free().
+// Parses JSON text into a node pool. Returns the root node (or NULL on error).
+// Individual nodes need no freeing — everything lives until json_free().
 const JsonNode *json_parse(const char *text, size_t len);
 
-// Освобождает пул узлов и строк предыдущего json_parse.
+// Frees the node and string pool of the previous json_parse.
 void json_free(void);
 
-// --- Доступ к узлам -----------------------------------------------------------
+// --- Node access -------------------------------------------------------------
 
-// Ищет поле по имени в объекте. NULL, если нет или узел не объект.
+// Finds a field by name in an object. NULL if absent or the node is not an object.
 const JsonNode *json_find(const JsonNode *obj, const char *key);
 
-// Элемент массива по индексу (NULL, если нет или узел не массив).
+// Array element by index (NULL if absent or the node is not an array).
 const JsonNode *json_array_get(const JsonNode *arr, int idx);
 
-// Длина массива (0, если узел не массив).
+// Array length (0 if the node is not an array).
 int json_array_len(const JsonNode *arr);
 
-// Число (def — если узла нет или он не число).
+// Number (def — if the node is missing or not a number).
 double json_num(const JsonNode *n, double def);
 
-// Строка (def — если узла нет или он не строка).
+// String (def — if the node is missing or not a string).
 const char *json_str(const JsonNode *n, const char *def);
 
-// Булево (def — если узла нет или он не булев).
+// Boolean (def — if the node is missing or not a boolean).
 int json_bool(const JsonNode *n, int def);
 
-// Перебор элементов объекта или массива:
+// Iteration over object or array elements:
 //   for (n = json_child_first(o); n; n = json_child_next(o, n)) ...
-// У элементов объекта ключ лежит в n->key.
+// For object elements the key is in n->key.
 const JsonNode *json_child_first(const JsonNode *parent);
 const JsonNode *json_child_next(const JsonNode *parent, const JsonNode *cur);
 

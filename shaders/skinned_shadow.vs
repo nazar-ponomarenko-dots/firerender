@@ -1,23 +1,23 @@
 // ============================================================================
-//  SkinnedShadow — вершинный шейдер СКИННЕННЫХ мешей в карту теней
+//  SkinnedShadow — vertex shader of SKINNED meshes into the shadow map
 // ----------------------------------------------------------------------------
-//  Та же кожа, что в skinned.vs (до 4 костей на вершину, uBones[64] —
-//  jointMatrix), но на выходе только позиция в проекцию ОТ СОЛНЦА:
-//  анимированные модели отбрасывают тень в позе текущего кадра.
-//  UV — в FS (alpha-test прозрачных частей модели).
+//  Same skinning as in skinned.vs (up to 4 bones per vertex, uBones[64] —
+//  jointMatrix), but the output is only the position projected from the SUN:
+//  animated models cast a shadow in the current frame's pose.
+//  UV goes to the FS (alpha-test of the model's transparent parts).
 // ============================================================================
 
 layout (location = 0) in vec3 aPos;
 layout (location = 2) in vec2 aUV;
-layout (location = 3) in vec4 aBoneIndices;   // как в skinned.vs: vec4
+layout (location = 3) in vec4 aBoneIndices;   // same as skinned.vs: vec4
 layout (location = 4) in vec4 aBoneWeights;
 
-uniform mat4 uModel;            // мировая матрица узла
-uniform mat4 uViewProj;         // вид * проекция от солнца (rc->shadow_vp)
+uniform mat4 uModel;            // node's world matrix
+uniform mat4 uViewProj;         // sun view * projection (rc->shadow_vp)
 
 #define MAX_BONES 64
 uniform mat4 uBones[MAX_BONES];
-uniform int uHasSkin;           // 0 — не скиннинг (просто мат. трансформ)
+uniform int uHasSkin;           // 0 — no skinning (plain matrix transform)
 
 out vec2 vUV;
 

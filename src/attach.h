@@ -1,23 +1,23 @@
 // ============================================================================
-//  attach.h — крепление узлов к моделям (в т.ч. к КОСТЯМ скелета)
+//  attach.h — attaching nodes to models (including skeleton BONES)
 // ----------------------------------------------------------------------------
-//  «Гибкость» 3D-моделей: к персонажу (или к любой модели/узлу) можно
-//  прицепить что угодно — 2D-спрайт, статичный меш (.obj/.glb), другую
-//  анимированную модель, источник эффектов. Ребёнок едет вместе с родителем,
-//  а если задана КОСТЬ — вместе с этой костью (меч в руке, шляпа на голове,
-//  иконка над головой).
+//  "Flexibility" of 3D models: anything can be hooked onto a character
+//  (or any model/node) — a 2D sprite, a static mesh (.obj/.glb), another
+//  animated model, an effect emitter. The child travels with the parent,
+//  and if a BONE is given — with that bone (sword in hand, hat on head,
+//  icon over the head).
 //
-//  Механика (см. scene.h): у родителя есть хук attach_fn, отдающий матрицу
-//  точки крепления по индексу; у ребёнка — attach_slot (индекс) и флаг
-//  attach_upright («не крутиться вместе с костью»). node_update_transforms
-//  вставляет эту матрицу между мировой матрицей родителя и локальной
-//  матрицей ребёнка. Сам ребёнок остаётся обычным узлом: его pos/rot/scl —
-//  это СМЕЩЕНИЕ относительно точки крепления.
+//  Mechanics (see scene.h): the parent has an attach_fn hook returning the
+//  attachment-point matrix by index; the child has attach_slot (the index) and the
+//  attach_upright flag ("do not rotate together with the bone"). node_update_transforms
+//  inserts that matrix between the parent's world matrix and the child's
+//  local matrix. The child itself stays an ordinary node: its pos/rot/scl are
+//  the OFFSET relative to the attachment point.
 //
-//  Слоты:
-//    ATTACH_ORIGIN (-1)  — крепление к самому узлу (без кости);
-//    >= 0                — индекс кости скелета (для AnimInstance3D).
-//  Имя кости -> индекс: attach_bone_index (по имени узла из GLB).
+//  Slots:
+//    ATTACH_ORIGIN (-1)  — attach to the node itself (no bone);
+//    >= 0                — skeleton bone index (for AnimInstance3D).
+//  Bone name -> index: attach_bone_index (by the node name from the GLB).
 // ============================================================================
 #ifndef ATTACH_H
 #define ATTACH_H
@@ -26,46 +26,46 @@
 
 #define ATTACH_ORIGIN (-1)
 
-// Прикрепляет child к parent. bone — имя кости/узла модели (NULL или "" —
-// крепление к началу координат родителя). offset — смещение от точки, м
-// (может быть NULL). upright: 1 — гасить поворот кости (спрайт остаётся
-// вертикальным), 0 — наследовать поворот полностью.
-// Возвращает 0 при успехе, -1 если кость не найдена (child всё равно
-// прикрепляется к origin — объект не теряется).
+// Attaches child to parent. bone — the model bone/node name (NULL or "" —
+// attach to the parent's origin). offset — displacement from the point, m
+// (may be NULL). upright: 1 — cancel bone rotation (the sprite stays
+// vertical), 0 — inherit the rotation fully.
+// Returns 0 on success, -1 if the bone was not found (the child is still
+// attached to the origin — the object is not lost).
 int attach_node(SceneNode *parent, SceneNode *child, const char *bone,
                 const float offset[3], int upright);
 
-// Открепляет узел: он остаётся в дереве, но точка крепления сбрасывается
+// Detaches a node: it stays in the tree, but the attachment point is reset
 // (child->attach_slot = ATTACH_ORIGIN).
 void attach_detach(SceneNode *child);
 
-// Индекс кости по имени в модели (AnimInstance3D). -1 — нет такой.
+// Bone index by name in the model (AnimInstance3D). -1 — no such bone.
 int attach_bone_index(SceneNode *model, const char *bone);
 
-// Число костей у модели (0, если не скелетная).
+// Bone count of a model (0 if not skeletal).
 int attach_bone_count(SceneNode *model);
 
-// Имя кости по индексу (NULL, если нет).
+// Bone name by index (NULL if none).
 const char *attach_bone_name(SceneNode *model, int idx);
 
-// --- Спрайт как узел (Sprite3D) -----------------------------------------------
-//  Квад с текстурой, который можно прицепить к чему угодно. Режимы:
-//    billboard = 1 — всегда лицом к камере (иконки, метки, огоньки);
-//    billboard = 0 — плоский квад в системе узла (наклейки, гербы, таблички).
-//  Размер задаётся в метрах (w, h). Материал — обычный Material (material.h),
-//  поэтому доступны блендинг, tint, альфа, анимация UV.
+// --- Sprite as a node (Sprite3D) -----------------------------------------------
+//  A textured quad that can be hooked onto anything. Modes:
+//    billboard = 1 — always faces the camera (icons, labels, lights);
+//    billboard = 0 — flat quad in the node's space (stickers, emblems, signs).
+//  Size is given in meters (w, h). Material — a regular Material (material.h),
+//  so blending, tint, alpha, UV animation are all available.
 SceneNode *sprite_make_node(const char *tex_path, float w, float h,
                             int billboard, const RendererContext *rc);
 
-// Настройка спрайта после создания (можно и на живом узле).
+// Sprite configuration after creation (works on a live node too).
 void sprite_set_size(SceneNode *n, float w, float h);
 void sprite_set_tint(SceneNode *n, float r, float g, float b, float alpha);
 void sprite_set_billboard(SceneNode *n, int on);
-// Кадр из атласа: сетка cols x rows, index — номер кадра (слева-сверху).
+// Frame from an atlas: grid cols x rows, index — frame number (from top-left).
 void sprite_set_frame(SceneNode *n, int cols, int rows, int index);
-// Свечение: 1 — аддитивный блендинг (искры, магия), 0 — обычная альфа.
+// Glow: 1 — additive blending (sparks, magic), 0 — regular alpha.
 void sprite_set_additive(SceneNode *n, int on);
-// Без освещения: 1 — чистая текстура * tint (иконки, метки над головой).
+// Unlit: 1 — pure texture * tint (icons, labels over the head).
 void sprite_set_unlit(SceneNode *n, int on);
 
 void sprite_node_render(SceneNode *n, float dt);

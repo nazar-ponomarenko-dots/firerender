@@ -1,19 +1,19 @@
 // ============================================================================
-//  console.h — консоль разработчика (как в GoldSrc/X-Ray)
+//  console.h — developer console (GoldSrc/X-Ray style)
 // ----------------------------------------------------------------------------
-//  Клавиша ` (~) — открыть/закрыть. Пока открыта: курсор мыши виден,
-//  ввод текста работает (SDL text input), игра не реагирует на клавиши.
+//  Key ` (~) — open/close. While open: the mouse cursor is visible,
+//  text input works (SDL text input), the game ignores keys.
 //
-//  Ввод строки: ←/→ — курсор, Home/End, Delete, Backspace (по UTF-8),
-//  Ctrl+V — вставить из буфера, Ctrl+C — копировать, Ctrl+A/E — в начало/
-//  конец, Ctrl+U/K — стереть до/после курсора, Ctrl+W — стереть слово.
-//  Tab — дополнение имени команды/переменной (цикл по совпадениям).
-//  Прокрутка вывода: колесо мыши, PgUp/PgDn, Home/End.
-//  Enter — выполнить, ↑/↓ — история, Esc — закрыть.
+//  Line editing: ←/→ — cursor, Home/End, Delete, Backspace (UTF-8 aware),
+//  Ctrl+V — paste from clipboard, Ctrl+C — copy, Ctrl+A/E — line
+//  start/end, Ctrl+U/K — erase after/before the cursor, Ctrl+W — erase a word.
+//  Tab — completes command/variable names (cycles through matches).
+//  Scrolling output: mouse wheel, PgUp/PgDn, Home/End.
+//  Enter — execute, ↑/↓ — history, Esc — close.
 //
-//  Вывод SDL_Log попадает в консоль (cvar "developer"). Команды
-//  регистрируются через console_add_command — так позже Lua будет
-//  регистрировать свои. Встроенные команды: help, cvarlist, set, exec,
+//  SDL_Log output lands in the console (cvar "developer"). Commands are
+//  registered via console_add_command — later Lua will register its own the
+//  same way. Built-in commands: help, cvarlist, set, exec,
 //  clear, cfg, echo, quit, version.
 // ============================================================================
 #ifndef CONSOLE_H
@@ -24,47 +24,47 @@ typedef void (*ConsoleCmdFn)(const char *args);
 
 #define CON_MAX_COMMANDS 128
 
-// Флаг "запрошен выход" — ставит команда quit, читает главный цикл.
+// "quit requested" flag — set by the quit command, read by the main loop.
 extern int g_quit_request;
 
-// Инициализация: cvar'ы по умолчанию, встроенные команды, перехват
-// SDL_Log в кольцо консоли. Вызывать один раз после создания GL-контекста.
+// Initialization: default cvars, built-in commands, interception of
+// SDL_Log into the console ring buffer. Call once after creating the GL context.
 void console_init(void);
 
-// Открыть/закрыть (клавиша `). Шлёт EV_CONSOLE_OPENED/EV_CONSOLE_CLOSED.
+// Open/close (key `). Emits EV_CONSOLE_OPENED/EV_CONSOLE_CLOSED.
 void console_toggle(void);
 int console_active(void);
 
-// Отдать консоли событие SDL (текстовый ввод, клавиши). Возвращает 1, если
-// событие съедено консолью — главный цикл не должен обрабатывать его дальше.
+// Feed an SDL event to the console (text input, keys). Returns 1 if the
+// event was consumed by the console — the main loop must not process it further.
 int console_event(const SDL_Event *ev);
 
-// Печать строки в консоль (как printf).
+// Print a line to the console (printf-style).
 void console_print(const char *fmt, ...);
 
-// Регистрация команды. name — имя, help — подсказка, fn — обработчик
-// (args — остаток строки после имени команды).
+// Register a command. name — the command name, help — the hint text,
+// fn — the handler (args — the rest of the line after the command name).
 int console_add_command(const char *name, const char *help, ConsoleCmdFn fn);
 
-// Выполнить строку команды (Enter или из кода). Команды `wait` / `wait N`
-// в строке откладывают следующие за ними на 1 / N кадров.
+// Execute a command line (from Enter or from code). `wait` / `wait N`
+// in the line defer everything after them by 1 / N frames.
 void console_exec(const char *line);
 
-// Отложенное выполнение: выполнить cmd через frames кадров (wait/console_later).
-// Каждый кадр главный цикл вызывает console_drain().
+// Deferred execution: run cmd after `frames` frames (wait/console_later).
+// The main loop calls console_drain() every frame.
 void console_later(int frames, const char *cmd);
 void console_drain(void);
 
-// Рисует консоль (панель, строки вывода со скроллбеком, строка ввода
-// с курсором). Вызывать из главного цикла ПОСЛЕ отрисовки UI.
+// Draws the console (panel, output lines with a scrollbar, input line
+// with a cursor). Call from the main loop AFTER rendering the UI.
 void console_render(int vw, int vh);
 
-// Автозагрузка config.cfg при старте и сохранение при выходе.
+// Autoload config.cfg at startup and save it on exit.
 void console_autoload(void);
 void console_save_config(void);
 
-// Самопроверка: команды, cvar'ы, ввод (события SDL), история, Tab.
-// Запускается FR_TEST=x; печатает результат через SDL_Log.
+// Self-test: commands, cvars, input (SDL events), history, Tab.
+// Started by FR_TEST=x; prints the result via SDL_Log.
 void console_selftest(void);
 
 #endif

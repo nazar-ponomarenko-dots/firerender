@@ -1,5 +1,5 @@
 // ============================================================================
-//  fauna.h — живая карта: светлячки, бабочки, птицы (см. fauna.c)
+//  fauna.h — living map: fireflies, butterflies, birds (see fauna.c)
 // ============================================================================
 #ifndef FAUNA_H
 #define FAUNA_H
@@ -7,13 +7,13 @@
 #include "render_ctx.h"
 #include "scene.h"
 
-// Создаёт узел фауны из map.json (fauna[]). NULL, если в карте нет фауны.
+// Creates the fauna node from map.json (fauna[]). NULL if the map has no fauna.
 SceneNode *fauna_make_node(const RendererContext *rc);
 
 void fauna_node_update(SceneNode *n, float dt);
 void fauna_node_render(SceneNode *n, float dt);
 
-// Освобождает GL-ресурсы узла.
+// Frees the node's GL resources.
 void fauna_cleanup(SceneNode *n);
 
 #endif

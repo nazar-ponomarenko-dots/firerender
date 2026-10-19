@@ -1,16 +1,17 @@
 // ============================================================================
-//  fog_comp.fs — композит тумана на экран (после полноразмерного марша)
+//  fog_comp.fs — fog composite onto the screen (after the half-size march)
 // ----------------------------------------------------------------------------
-//  Марш объёмного тумана идёт в ПОЛРАЗМЕРНУЮ RGBA8-текстуру (цвет тумана +
-//  пропускание в альфе), здесь — один сэмпл тумана и один сцены, mix теми
-//  же формулами, что делал марш внутри себя. Картинка бит-в-бит та же,
-//  цена марша падает вчетверо (гладкий туман билинейку не выдаёт).
+//  The volumetric fog march writes into a HALF-SIZE RGBA8 texture (fog color +
+//  transmittance in alpha); here — one fog sample and one scene sample, mixed
+//  with the same formulas the march used internally. The picture is bit-for-bit
+//  the same while the march costs four times less (smooth fog survives the
+//  bilinear upscale).
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uScene;        // сцена (native)
-uniform sampler2D uFog;          // марш тумана (полразмера)
+uniform sampler2D uScene;        // scene (native)
+uniform sampler2D uFog;          // fog march (half size)
 
 out vec4 FragColor;
 

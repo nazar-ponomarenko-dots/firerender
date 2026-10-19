@@ -1,9 +1,10 @@
 // ============================================================================
-//  field.h — поле пшеницы (FieldArea3D)
+//  field.h — wheat field (FieldArea3D)
 // ----------------------------------------------------------------------------
-//  Визуально — рамка на земле (5 вершин замкнутой линии, высота берётся из
-//  рельефа). Задаёт, где растёт пшеница: координаты узла = центр, size =
-//  размер. Прямоугольник мира (g_field_*) main.c задаёт до создания узлов.
+//  Visually — a frame on the ground (5 vertices of a closed line, height taken
+//  from the terrain). Defines where wheat grows: node coordinates = center,
+//  size = extent. The world rectangle (g_field_*) is set by main.c before the
+//  nodes are created.
 // ============================================================================
 #ifndef FIELD_H
 #define FIELD_H
@@ -13,20 +14,20 @@
 #include "world.h"
 
 typedef struct {
-    GLuint prog, vao, vbo;         // линия-прямоугольник
+    GLuint prog, vao, vbo;         // rectangle outline
     GLint u_viewproj, u_color;
-    const WorldState *world;       // высоты рельефа (рамка ложится на землю)
-    const RendererContext *rc;     // матрицы вида/проекции
+    const WorldState *world;       // terrain heights (the frame lies on the ground)
+    const RendererContext *rc;     // view/projection matrices
 } FieldParams;
 
-// Создаёт узел FieldArea: центр и размер поля, компилирует шейдер.
-// center/size должны совпадать с g_field_* (глобалы мира).
+// Creates the FieldArea node: field center and size, compiles the shader.
+// center/size must match g_field_* (world globals).
 SceneNode *field_make_node(const WorldState *w, const float *center,
                            const float *size, const RendererContext *rc);
 
 void field_node_render(SceneNode *n, float dt);
 
-// Освобождает GL-ресурсы узла.
+// Frees the node's GL resources.
 void field_cleanup(SceneNode *n);
 
 #endif

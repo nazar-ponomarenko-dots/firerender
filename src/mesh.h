@@ -1,15 +1,16 @@
 // ============================================================================
-//  mesh.h — статичные меши (prop_static): загрузка .obj и рендер-узел
+//  mesh.h — static meshes (prop_static): .obj loading and render node
 // ----------------------------------------------------------------------------
-//  Фаза 4: движок умеет грузить 3D-геометрию из Wavefront .obj и ставить её
-//  как узел MeshInstance3D в сцене. В отличие от биллбордов дерева меш
-//  освещается ПО-НАСТОЯЩЕМУ: вершинные нормали, Ламбертов диффуз, спекуляр,
-//  каскадные тени, туман (shaders/mesh.vs + mesh.fs).
+//  Phase 4: the engine can load 3D geometry from Wavefront .obj and place it
+//  as a MeshInstance3D node in the scene. Unlike tree billboards, the mesh is
+//  lit FOR REAL: vertex normals, Lambertian diffuse, specular,
+//  cascaded shadows, fog (shaders/mesh.vs + mesh.fs).
 //
-//  Загрузчик: v/vt/vn + треугольники и четырёхугольники (фан-триангуляция).
-//  Вершины РАСШИРЯЮТСЯ по корнеру (каждая грань — свои вертексы), поэтому
-//  индексы тривиальны: рисуем glDrawArrays(GL_TRIANGLES). Упрощение оправдано
-//  для статичных декораций — ценой памяти, но зато без сложного индексирования.
+//  Loader: v/vt/vn + triangles and quads (fan triangulation).
+//  Vertices are EXPANDED per corner (each face gets its own vertices), so the
+//  indices are trivial: we draw glDrawArrays(GL_TRIANGLES). The simplification
+//  is justified for static decorations — at the cost of memory, but no complex
+//  indexing.
 // ============================================================================
 #ifndef MESH_H
 #define MESH_H
@@ -19,46 +20,46 @@
 #include "material.h"
 
 typedef struct {
-    float *verts;      // 3 * vcount  (позиции, расширены по корнеру)
-    float *normals;    // 3 * vcount  (или NULL, если в OBJ нет vn)
-    float *uvs;        // 2 * vcount  (или NULL, если в OBJ нет vt)
-    int vcount;        // всего вертексов = tri_count * 3
-    int tri_count;     // число треугольников
-    // GL-ресурсы (создаются при первом рендере)
+    float *verts;      // 3 * vcount  (positions, expanded per corner)
+    float *normals;    // 3 * vcount  (or NULL if the OBJ has no vn)
+    float *uvs;        // 2 * vcount  (or NULL if the OBJ has no vt)
+    int vcount;        // total vertices = tri_count * 3
+    int tri_count;     // number of triangles
+    // GL resources (created on the first render)
     GLuint vao, vbo_pos, vbo_nrm, vbo_uv;
-    int ready;         // 1 — геометрия загружена в GL
+    int ready;         // 1 — geometry uploaded to GL
 } Mesh;
 
-// Загружает .obj через resources_read_text. Вернёт NULL при ошибке.
-// Освобождение — mesh_free.
+// Loads a .obj via resources_read_text. Returns NULL on error.
+// Free with mesh_free.
 Mesh *mesh_load_obj(const char *path);
 
-// Загружает .obj из буфера в памяти (для тестов/селфтеста, без файла).
-// name — имя для логов.
+// Loads a .obj from a memory buffer (for tests/selftest, no file).
+// name — name for the logs.
 Mesh *mesh_load_obj_mem(const char *name, const char *src);
 
-// Освобождает CPU-данные и GL-объекты меша.
+// Frees the CPU data and GL objects of the mesh.
 void mesh_free(Mesh *m);
 
-// Гарантирует загрузку геометрии меша в GL (идемпотентно). Вызывается в render.
+// Ensures the mesh geometry is uploaded to GL (idempotent). Called in render.
 void mesh_gpu_upload(Mesh *m);
 
-// Параметры узла-инстанса меша.
+// Parameters of a mesh instance node.
 typedef struct {
     const RendererContext *rc;
-    Mesh *mesh;                  // общая геометрия (узел НЕ владеет — не free)
-    GLuint prog;                 // общий шейдер mesh.vs+mesh.fs
-    SceneUniforms su;            // общий набор сцены
-    Material mat;                // материал (tint/blend/UV, material.h)
-    MaterialLocs ml;             // его uniform-хендлы
-    GLint u_model, u_tex;        // своя модельная матрица и текстура
-    GLuint tex;                  // альбедо-текстура
-    float scale;                 // равномерный масштаб
+    Mesh *mesh;                  // shared geometry (the node does NOT own it — no free)
+    GLuint prog;                 // shared shader mesh.vs+mesh.fs
+    SceneUniforms su;            // shared scene uniform set
+    Material mat;                // material (tint/blend/UV, material.h)
+    MaterialLocs ml;             // its uniform handles
+    GLint u_model, u_tex;        // own model matrix and texture
+    GLuint tex;                  // albedo texture
+    float scale;                 // uniform scale
 } MeshLocs;
 
-// Создаёт узел MeshInstance3D: грузит .obj, берёт текстуру tex_path
-// (или img/notfound.png) и вешает узел с позицией pos и масштабом scale.
-// Вернёт NULL при ошибке загрузки. Узел НЕ привязан к родителю (node_add).
+// Creates a MeshInstance3D node: loads the .obj, takes the texture tex_path
+// (or img/notfound.png) and attaches a node at position pos with scale.
+// Returns NULL if loading fails. The node is NOT attached to a parent (node_add).
 SceneNode *mesh_make_node(const char *obj_path, const float pos[3],
                           float scale, const char *tex_path,
                           const RendererContext *rc);

@@ -1,11 +1,11 @@
 // ============================================================================
-//  objects.h — объекты из map/map.json (objects[]): биллборды с текстурой
+//  objects.h — objects from map/map.json (objects[]): textured billboards
 // ----------------------------------------------------------------------------
-//  Каждый объект — camera-facing квад с PNG-текстурой (model = путь к файлу,
-//  напр. "img/tree.png"). Позиция — pos [x,y,z] из JSON; y <= 0 — высота
-//  берётся из рельефа. Масштаб — scale (по умолчанию 1): высота = 5*scale.y.
-//  Свет — все направленные источники + CSM-тени солнца + туман, как у
-//  растительности.
+//  Each object is a camera-facing quad with a PNG texture (model = path to the
+//  file, e.g. "img/tree.png"). Position — pos [x,y,z] from JSON; y <= 0 means
+//  the height is taken from the terrain. Scale — scale (default 1): height = 5*scale.y.
+//  Lighting — all directional lights + the sun's CSM shadows + fog,
+//  same as vegetation.
 // ============================================================================
 #ifndef OBJECTS_H
 #define OBJECTS_H
@@ -14,17 +14,17 @@
 #include "scene.h"
 #include "world.h"
 
-// Создаёт узел Objects: грузит текстуры объектов из map.json, компилирует
-// шейдер, строит общий квад. NULL при ошибке.
+// Creates the Objects node: loads object textures from map.json, compiles
+// the shader, builds one shared quad. NULL on error.
 SceneNode *objects_make_node(const WorldState *w, const RendererContext *rc);
 
 void objects_node_render(SceneNode *n, float dt);
 
-// Коллизии объектов (collision=1): выталкивает точку (x,z) из цилиндров
-// radius+pr вокруг баз объектов. Вызывать после движения игрока (не в полёте).
+// Object collisions (collision=1): pushes the point (x,z) out of the
+// radius+pr cylinders around object bases. Call after player movement (not while flying).
 void objects_collide(float *x, float *z, float pr);
 
-// Освобождает GL-ресурсы узла.
+// Frees the node's GL resources.
 void objects_cleanup(SceneNode *n);
 
 #endif

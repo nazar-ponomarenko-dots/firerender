@@ -1,8 +1,9 @@
 // ============================================================================
-//  actions.c — действия и их +/-команды (см. actions.h)
+//  actions.c — actions and their +/-commands (see actions.h)
 // ----------------------------------------------------------------------------
-//  Здесь только состояние действий (g_act). Сами +/-команды регистрирует
-//  ЦЕНТРАЛЬНЫЙ реестр (cmdreg.c) — обработчики ставят соответствующий флаг.
+//  Only the action state (g_act) lives here. The +/-commands themselves are
+//  registered by the CENTRAL registry (cmdreg.c) — handlers set the matching
+//  flag.
 // ============================================================================
 #include "actions.h"
 

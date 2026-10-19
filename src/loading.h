@@ -1,21 +1,21 @@
 // ============================================================================
-//  loading.h — экран загрузки уровня
+//  loading.h — level loading screen
 // ----------------------------------------------------------------------------
-//  Пока грузится мир (game_load_world), на экране — фон img/loading.png
-//  (cover на весь экран) и полоса прогресса справа снизу с подписью.
-//  Загрузка синхронная, поэтому полосы рисуются и ПРЕЗЕНТЯТСЯ прямо между
-//  фазами загрузки (главный цикл в это время не крутится).
+//  While the world loads (game_load_world), the screen shows the img/loading.png
+//  background (cover over the whole screen) and a progress bar with a caption at
+//  the bottom right. Loading is synchronous, so the bars are drawn and PRESENTED
+//  right between loading phases (the main loop is not running at that time).
 // ============================================================================
 #ifndef LOADING_H
 #define LOADING_H
 
-// Подготовка экрана: текстура фона и квад (нужен живой GL-контекст).
+// Screen setup: background texture and quad (requires a live GL context).
 void loading_begin(void);
 
-// Нарисовать прогресс t [0..1] с подписью и предъявить кадр на окно.
+// Draw progress t [0..1] with a caption and present the frame to the window.
 void loading_progress(float t, const char *label);
 
-// Освободить ресурсы экрана загрузки.
+// Free the loading screen's resources.
 void loading_end(void);
 
 #endif

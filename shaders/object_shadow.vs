@@ -1,20 +1,20 @@
 // ============================================================================
-//  ObjectShadow — вершинный шейдер объектов в карту теней
+//  ObjectShadow — vertex shader of objects into the shadow map
 // ----------------------------------------------------------------------------
-//  Тот же крест из двух статичных квадов, что и в обычном рендере —
-//  только позиция и UV (альфа-тест делает фрагментный шейдер). Основание
-//  так же ложится по уклону земли (uObjSlope), иначе тень отрывалась бы от
-//  дерева на склоне.
+//  The same cross of two static quads as in the regular render — position and
+//  UV only (the fragment shader does the alpha-test). The base follows the
+//  ground slope just the same (uObjSlope), otherwise the shadow would detach
+//  from the tree on a hill.
 // ============================================================================
 
-layout (location = 0) in vec2 aPos;    // локально: x -0.5..0.5, y 0..1
+layout (location = 0) in vec2 aPos;    // local: x -0.5..0.5, y 0..1
 layout (location = 1) in vec2 aUV;
 
 uniform mat4 uViewProj;
 uniform vec3 uObjPos;
 uniform vec2 uObjSize;
 uniform vec3 uObjRight;
-uniform vec2 uObjSlope;     // уклон земли под объектом (dh/dx, dh/dz)
+uniform vec2 uObjSlope;     // ground slope under the object (dh/dx, dh/dz)
 
 out vec2 vUV;
 

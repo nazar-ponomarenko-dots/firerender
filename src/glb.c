@@ -1,17 +1,17 @@
 // ============================================================================
-//  glb.c — бинарный glTF 2.0 (.glb): парсер + GlbInstance3D-узел (см. glb.h)
+//  glb.c — binary glTF 2.0 (.glb): parser + GlbInstance3D node (see glb.h)
 // ----------------------------------------------------------------------------
-//  Два слоя:
-//    glb_parse_file() — только CPU: чанки, иерархия, запекание в мировые
-//                       координаты, группировка по материалам, декод альбедо.
-//                       Не трогает GL — вызывается в селфтесте/headless.
-//    glb_make_node()   — строит GL-буферы и текстуры, создаёт узел-инстанс.
+//  Two layers:
+//    glb_parse_file() — CPU only: chunks, hierarchy, baking into world
+//                       coordinates, grouping by material, albedo decode.
+//                       Does not touch GL — called from the selftest/headless.
+//    glb_make_node()   — builds GL buffers and textures, creates the instance node.
 //
-//  ПРАВИЛО РЕНДЕРА: движок — ПСЕВДО-PBR 2004 (как HL2/Source, Far Cry 1).
-//  Настоящие PBR-данные GLB ПЕРЕФОРМАТИРУЮТСЯ в наш материал (material.h):
+//  RENDER RULE: the engine is PSEUDO-PBR 2004 (like HL2/Source, Far Cry 1).
+//  Real GLB PBR data is REFORMATTED into our material type (material.h):
 //    baseColorFactor -> tint;      alphaMode -> blend/alpha
-//    roughness/металл -> specular (гладкость);
-//    emissiveFactor  -> прибавка к tint;     normalTexture -> игнор.
+//    roughness/metal -> specular (smoothness);
+//    emissiveFactor  -> added to tint;     normalTexture -> ignored.
 // ============================================================================
 #include "glb.h"
 
@@ -31,13 +31,17 @@
 
 #include <SDL3/SDL.h>
 
-// --- Компоненты glTF ----------------------------------------------------------
+// --- glTF components ----------------------------------------------------------
 #define C_BYTE 5120
 #define C_UBYTE 5121
 #define C_SHORT 5122
 #define C_USHORT 5123
 #define C_UINT 5125
 #define C_FLOAT 5126
+
+// fourcc of the GLB chunks: little-endian "JSON" and "BIN\0".
+#define GLB_CHUNK_JSON 0x4E4F534A
+#define GLB_CHUNK_BIN  0x004E4942
 
 static int comp_size(int c)
 {
@@ -49,9 +53,9 @@ static int comp_size(int c)
     return 0;
 }
 
-// Какой набор TEXCOORD использует baseColorTexture материала (0 по умолчанию).
-// glTF разрешает до двух развёрток на примитив: глаза/лицо персонажей часто
-// живут в TEXCOORD_1 — читать всегда только нулевую = сломанные текстуры.
+// Which TEXCOORD set the material's baseColorTexture uses (0 by default).
+// glTF allows up to two UV sets per primitive: character eyes/face maps often
+// live in TEXCOORD_1 — always reading only set 0 means broken textures.
 static int base_uv_set(const JsonNode *mt_a, const JsonNode *tx_a, int mat)
 {
     if (mat < 0 || !mt_a || mt_a->type != JSON_ARRAY) return 0;
@@ -73,6 +77,18 @@ static int type_vec(const char *t)
 }
 static float clamp01(float x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
 
+// A file-supplied size as a non-negative long, or -1 if it is negative, NaN or
+// larger than cap. A raw (long)json_num() cast is undefined behaviour past
+// LONG_MAX, and even an in-range but huge value defeats the bounds checks below:
+// they compare against the real buffer, so an out-of-range length must be
+// rejected here instead of being arithmetic-verified later.
+static long size_field(const JsonNode *obj, const char *key, long cap)
+{
+    double v = json_num(json_find(obj, key), 0);
+    if (!(v >= 0) || v > (double)cap) return -1;
+    return (long)v;
+}
+
 typedef struct {
     int bufferView;
     long byteOffset;
@@ -81,7 +97,7 @@ typedef struct {
 } GlbAcc;
 typedef struct { long byteOffset, byteLength; int byteStride; } GlbBv;
 
-// --- Матрицы 4x4 (column-major) -----------------------------------------------
+// --- 4x4 matrices (column-major) -----------------------------------------------
 static void mat4_identity(float m[16])
 {
     memset(m, 0, 16 * sizeof(float));
@@ -155,9 +171,9 @@ static int stack_push(GlbStackItem **stack, int *n, int *cap,
     return 1;
 }
 
-// --- Бакет вершин (по материалу) ----------------------------------------------
+// --- Vertex bucket (per material) ----------------------------------------------
 typedef struct {
-    int mat;                       // индекс материала (-1 = без)
+    int mat;                       // material index (-1 = none)
     float *verts, *nrm, *uv;
     int vcap, vn;
     unsigned int *idx;
@@ -218,9 +234,9 @@ static void b_free(Bucket *b)
     memset(b, 0, sizeof *b);
 }
 
-// --- Чтение данных accessor ---------------------------------------------------
-// Безопасное чтение индекса: только беззнаковые целые типа SCALAR.
-// Возвращает -1 на невалидный accessor/тип, иначе индекс в диапазоне [0,maxIdx].
+// --- Reading accessor data
+// Safe index read: only unsigned integers of SCALAR type.
+// Returns -1 for an invalid accessor/type, otherwise an index in [0,maxIdx].
 static long read_index(const unsigned char *bin, long base, const GlbAcc *a,
                        const GlbBv *bvs, int bv_n,
                        int elem, long maxIdx)
@@ -236,10 +252,10 @@ static long read_index(const unsigned char *bin, long base, const GlbAcc *a,
         case C_UINT:   { unsigned int v; memcpy(&v, p, 4); idx = (long)v; break; }
         case C_USHORT: { unsigned short v; memcpy(&v, p, 2); idx = (long)v; break; }
         case C_UBYTE:  { idx = (long)p[0]; break; }
-        default: return -1;   // FLOAT/SHORT/BYTE ненадёжны как индексы → отбросить
+        default: return -1;   // FLOAT/SHORT/BYTE are unreliable as indices → drop
     }
     if (idx < 0) return -1;
-    if (maxIdx > 0 && idx >= maxIdx) return -1;   // вне диапазона вершин примитива
+    if (maxIdx > 0 && idx >= maxIdx) return -1;   // outside the primitive's vertices
     return idx;
 }
 static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
@@ -264,15 +280,15 @@ static void read_vertex(const unsigned char *bin, long base, const GlbAcc *a,
     memcpy(out, f, (size_t)a->vec * sizeof(float));
 }
 
-// Псевдо-PBR 2004: гладкость -> спекуляр (rough 0 = блеск)
+// Pseudo-PBR 2004: smoothness -> specular (rough 0 = shiny)
 static float spec_from_rough(float rough, float metallic)
 {
     float g = 1.0f - clamp01(rough);
     return 0.05f + g * (0.55f + 0.45f * clamp01(metallic));
 }
 
-// Акцессор укладывается в свой bufferView и в bin-чанк (защита от
-// битого/вредоносного GLB: смещения/длины — из JSON, проверяются ДО чтения).
+// The accessor fits inside its bufferView and the BIN chunk (protection against
+// a broken/malicious GLB: offsets/lengths come from JSON, checked BEFORE reading).
 static int acc_fits(const GlbAcc *a, const GlbBv *bvs, int bv_n, long bin_len)
 {
     if (!a || a->count <= 0) return 0;
@@ -281,21 +297,32 @@ static int acc_fits(const GlbAcc *a, const GlbBv *bvs, int bv_n, long bin_len)
     long sz = (long)comp_size(a->comp) * a->vec;
     if (sz <= 0) return 0;
     if (a->count > bin_len) return 0;
-    // Интерливинг: реальный размер = (count-1)*stride + sz (stride > sz)
+    if (bv->byteOffset < 0 || bv->byteLength < 0 || a->byteOffset < 0) return 0;
+    // The view must lie inside BIN — by subtraction, never by addition.
+    if (bv->byteOffset > bin_len) return 0;
+    if (bv->byteLength > bin_len - bv->byteOffset) return 0;
+    if (a->byteOffset > bv->byteLength) return 0;
+    // Interleaved data: real size = (count-1)*stride + sz (stride > sz). Solved
+    // as a division: the product of two file-derived longs overflows a 32-bit
+    // long (Android/ILP32), and a wrapped negative passes any sum comparison.
     long stride = (bv->byteStride > 0) ? (long)bv->byteStride : sz;
-    long need = (a->count - 1) * stride + sz;
-    long base = bv->byteOffset + a->byteOffset;
-    return base >= 0 && bv->byteLength >= 0 && need <= bv->byteLength &&
-           base + need <= bin_len;
+    if (stride <= 0) return 0;
+    long avail = bv->byteLength - a->byteOffset;
+    if (avail < sz) return 0;
+    return (a->count - 1) <= (avail - sz) / stride;
 }
 static int bv_fits(const GlbBv *bvs, int bv_n, int i, long bin_len)
 {
     if (i < 0 || i >= bv_n) return 0;
-    return bvs[i].byteOffset >= 0 && bvs[i].byteLength >= 0 &&
-           bvs[i].byteOffset + bvs[i].byteLength <= bin_len;
+    if (bvs[i].byteOffset < 0 || bvs[i].byteLength < 0) return 0;
+    if (bvs[i].byteOffset > bin_len) return 0;
+    if (bvs[i].byteLength > bin_len - bvs[i].byteOffset) return 0;
+    // Sole caller hands the length to stbi as an int; a view longer than INT_MAX
+    // would truncate to a negative length.
+    return bvs[i].byteLength <= 0x7fffffffL;
 }
 
-// --- Альбедо из GLB (bufferView -> stb_image -> RGBA пиксели) ------------------
+// --- Albedo from the GLB (bufferView -> stb_image -> RGBA pixels) ------------------
 static int load_albedo(GlbItem *o, int mi,
                        const JsonNode *materials, const JsonNode *textures,
                        const JsonNode *images, const JsonNode *samplers,
@@ -326,8 +353,8 @@ static int load_albedo(GlbItem *o, int mi,
         const JsonNode *sa = json_array_get(samplers, smp);
         int wS = (int)json_num(json_find(sa, "wrapS"), 33071);
         int wT = (int)json_num(json_find(sa, "wrapT"), 33071);
-        // UV этих Sketchfab-моделей местами выходят за [0,1]; REPEAT из семплера
-        // (10497) тянул 2-й тайл -> «рваная» текстура. Используем CLAMP (по краю).
+        // UVs of these Sketchfab models sometimes leave [0,1]; REPEAT from the sampler
+        // (10497) pulled in the 2nd tile -> "torn" texture. Use CLAMP (edge) instead.
         o->wrap = (wS == 33648 || wT == 33648) ? MAT_WRAP_MIRROR : MAT_WRAP_CLAMP;
         int mag = (int)json_num(json_find(sa, "magFilter"), 9729);
         o->filter = (mag == 9728) ? MAT_FILTER_NEAREST : MAT_FILTER_MIPMAP;
@@ -335,14 +362,14 @@ static int load_albedo(GlbItem *o, int mi,
     return 1;
 }
 
-// --- Парсер (CPU, без GL) ------------------------------------------------------
+// --- Parser (CPU, no GL) ------------------------------------------------------
 GlbModel *glb_parse_file(const char *path)
 {
     unsigned int filesz = 0;
     unsigned char *file = resources_read_file(path, &filesz);
-    if (!file) { SDL_Log("glb: не найден %s", path); return NULL; }
+    if (!file) { SDL_Log("glb: not found %s", path); return NULL; }
     if (filesz < 20 || memcmp(file, "glTF", 4) != 0) {
-        SDL_Log("glb: %s — не GLB (заголовок)", path);
+        SDL_Log("glb: %s — not a GLB (header)", path);
         free(file); return NULL;
     }
 
@@ -353,21 +380,21 @@ GlbModel *glb_parse_file(const char *path)
         unsigned int clen, ctype;
         memcpy(&clen, file + off, 4); memcpy(&ctype, file + off + 4, 4);
         off += 8;
-        // clen приходит из файла: off+clen может завернуться по 32 биту и
-        // пропустить проверку, после чего bin_len станет ложно огромным и
-        // acc_fits/bv_fits валидировали бы по нему, а не по реальному буферу.
+        // clen comes from the file: off+clen can wrap around 32 bits and slip
+        // past the check, after which bin_len would be falsely huge and
+        // acc_fits/bv_fits would validate against it instead of the real buffer.
         if (clen > filesz - off) break;
-        if (ctype == 0x4E4F534A) { json_data = file + off; json_len = clen; }
-        else if (ctype == 0x004E4942) { bin = file + off; bin_len = clen; }
+        if (ctype == GLB_CHUNK_JSON) { json_data = file + off; json_len = clen; }
+        else if (ctype == GLB_CHUNK_BIN) { bin = file + off; bin_len = clen; }
         off += clen;
     }
     if (!json_data || !bin) {
-        SDL_Log("glb: %s — нет чанков JSON/BIN", path);
+        SDL_Log("glb: %s — no JSON/BIN chunks", path);
         free(file); return NULL;
     }
 
     const JsonNode *root = json_parse((const char *)json_data, (size_t)json_len);
-    if (!root) { SDL_Log("glb: %s — JSON не распознан", path); free(file); return NULL; }
+    if (!root) { SDL_Log("glb: %s — JSON not recognized", path); free(file); return NULL; }
 
     const JsonNode *acc_arr = json_find(root, "accessors");
     const JsonNode *bv_arr = json_find(root, "bufferViews");
@@ -380,7 +407,7 @@ GlbModel *glb_parse_file(const char *path)
     int acc_n = acc_arr && acc_arr->type == JSON_ARRAY ? json_array_len(acc_arr) : 0;
     int bv_n = bv_arr && bv_arr->type == JSON_ARRAY ? json_array_len(bv_arr) : 0;
     if (!nodes || nodes->type != JSON_ARRAY) {
-        SDL_Log("glb: %s — нет nodes", path);
+        SDL_Log("glb: %s — no nodes", path);
         json_free(); free(file); return NULL;
     }
 
@@ -388,20 +415,23 @@ GlbModel *glb_parse_file(const char *path)
     if (!bvs) { json_free(); free(file); return NULL; }
     for (int i = 0; i < bv_n; i++) {
         const JsonNode *b = json_array_get(bv_arr, i);
-        bvs[i].byteOffset = (long)json_num(json_find(b, "byteOffset"), 0);
-        bvs[i].byteLength = (long)json_num(json_find(b, "byteLength"), 0);
-        bvs[i].byteStride = (int)json_num(json_find(b, "byteStride"), 0);
+        bvs[i].byteOffset = size_field(b, "byteOffset", (long)bin_len);
+        bvs[i].byteLength = size_field(b, "byteLength", (long)bin_len);
+        // A stride above 64 KiB is garbage; -1/0 both mean "absent", i.e. the
+        // tight element packing (see acc_fits).
+        long st = size_field(b, "byteStride", 65536);
+        bvs[i].byteStride = st > 0 ? (int)st : 0;
     }
     GlbAcc *accs = calloc((size_t)(acc_n ? acc_n : 1), sizeof *accs);
     if (!accs) { free(bvs); json_free(); free(file); return NULL; }
     for (int i = 0; i < acc_n; i++) {
         const JsonNode *a = json_array_get(acc_arr, i);
         accs[i].bufferView = (int)json_num(json_find(a, "bufferView"), -1);
-        accs[i].byteOffset = (long)json_num(json_find(a, "byteOffset"), 0);
+        accs[i].byteOffset = size_field(a, "byteOffset", (long)bin_len);
         accs[i].comp = (int)json_num(json_find(a, "componentType"), C_FLOAT);
         accs[i].vec = type_vec(json_str(json_find(a, "type"), "SCALAR"));
         accs[i].normalized = json_bool(json_find(a, "normalized"), 0);
-        accs[i].count = (long)json_num(json_find(a, "count"), 0);
+        accs[i].count = size_field(a, "count", (long)bin_len);
     }
 
     Bucket *buckets = NULL; int bk_n = 0, bk_cap = 0;
@@ -419,15 +449,15 @@ GlbModel *glb_parse_file(const char *path)
             const JsonNode *nd = (ni >= 0 && ni < json_array_len(nodes)) ? json_array_get(nodes, ni) : NULL;
             if (!nd) continue;
             if (!stack_push(&stack, &st_n, &st_cap, nd, NULL)) {
-                ok = 0; err = "нехватка памяти стека узлов"; break;
+                ok = 0; err = "node stack out of memory"; break;
             }
         }
     } else {
-        // нет сцен — обходим все nodes как плоский список
+        // no scenes — walk all nodes as a flat list
         for (int i = 0; i < json_array_len(nodes); i++) {
             const JsonNode *nd = json_array_get(nodes, i);
             if (!stack_push(&stack, &st_n, &st_cap, nd, NULL)) {
-                ok = 0; err = "нехватка памяти стека узлов"; break;
+                ok = 0; err = "node stack out of memory"; break;
             }
         }
     }
@@ -456,8 +486,8 @@ GlbModel *glb_parse_file(const char *path)
                     const JsonNode *attrs = json_find(prim, "attributes");
                     int ipos = (int)json_num(attrs ? json_find(attrs, "POSITION") : NULL, -1);
                     int inrm = (int)json_num(attrs ? json_find(attrs, "NORMAL") : NULL, -1);
-                    // UV-набор — тот, на который ссылается baseColorTexture
-                    // материала (глаза/лицо персонажей часто в TEXCOORD_1)
+                    // The UV set is the one baseColorTexture of the material
+                    // refers to (character eyes/face often live in TEXCOORD_1)
                     int uvset = base_uv_set(materials, textures, mat_idx);
                     char uvkey[24];
                     snprintf(uvkey, sizeof uvkey, "TEXCOORD_%d", uvset);
@@ -465,48 +495,48 @@ GlbModel *glb_parse_file(const char *path)
                     if (iuv < 0)
                         iuv = (int)json_num(attrs ? json_find(attrs, "TEXCOORD_0") : NULL, -1);
                     int iidx = (int)json_num(json_find(prim, "indices"), -1);
-                    if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "нет POSITION"; break; }
+                    if (ipos < 0 || ipos >= acc_n) { ok = 0; err = "no POSITION"; break; }
                     GlbAcc *ap = &accs[ipos];
-                    // Защита от OOB: акцессор обязан укладываться в bin-чанк.
-                    // vec проверяем здесь же: read_vertex копирует vec float'ов
-                    // в p[3], поэтому POSITION обязан быть ровно VEC3.
+                    // OOB protection: the accessor must fit inside the BIN chunk.
+                    // vec is checked right here too: read_vertex copies vec
+                    // floats into vp[3], so POSITION must be exactly VEC3.
                     if (!acc_fits(ap, bvs, bv_n, (long)bin_len) || ap->vec != 3) {
-                        SDL_Log("glb: %s — POSITION акцессор вне буфера или не VEC3, примитив пропущен", path);
+                        SDL_Log("glb: %s — POSITION accessor out of buffer or not VEC3, primitive skipped", path);
                         continue;
                     }
                     if (ap->count > 16L * 1024 * 1024) {
-                        SDL_Log("glb: %s — POSITION count %ld слишком велик, примитив пропущен", path, ap->count);
+                        SDL_Log("glb: %s — POSITION count %ld too large, primitive skipped", path, ap->count);
                         continue;
                     }
-                    // NORMAL ровно VEC3 и UV не шире VEC2 — иначе read_vertex
-                    // затронул бы n[3]/u[2] больше их размера. Не подходит —
-                    // атрибут просто не читается (нормаль остаётся {0,1,0}, uv {0,0}).
+                    // NORMAL exactly VEC3, UV no wider than VEC2 — else read_vertex
+                    // would touch n[3]/u[2] beyond their size. If it does not fit —
+                    // the attribute is simply not read (normal stays {0,1,0}, uv {0,0}).
                     GlbAcc *an = (inrm >= 0 && inrm < acc_n && accs[inrm].vec == 3 && acc_fits(&accs[inrm], bvs, bv_n, (long)bin_len)) ? &accs[inrm] : NULL;
                     GlbAcc *au = (iuv >= 0 && iuv < acc_n && accs[iuv].vec <= 2 && acc_fits(&accs[iuv], bvs, bv_n, (long)bin_len)) ? &accs[iuv] : NULL;
                     GlbAcc *ai = (iidx >= 0 && iidx < acc_n && acc_fits(&accs[iidx], bvs, bv_n, (long)bin_len)) ? &accs[iidx] : NULL;
                     long nv = ap->count;
 
                     Bucket *bk = b_get(&buckets, &bk_n, &bk_cap, mat_idx);
-                    if (!bk) { ok = 0; err = "нехватка памяти бакетов"; break; }
+                    if (!bk) { ok = 0; err = "bucket out of memory"; break; }
                     unsigned int base = (unsigned int)bk->vn;
                     long pos_base = (ap->bufferView >= 0 && ap->bufferView < bv_n)
                                     ? bvs[ap->bufferView].byteOffset + ap->byteOffset : 0;
                     long nrm_base = an && an->bufferView >= 0 ? bvs[an->bufferView].byteOffset + an->byteOffset : 0;
                     long uv_base = au && au->bufferView >= 0 ? bvs[au->bufferView].byteOffset + au->byteOffset : 0;
                     for (long v = 0; v < nv; v++) {
-                        float p[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
-                        read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, p);
-                        mat4_transform_point(world, p, p);
-                        // NORMAL/UV индексируются тем же v, но acc_fits проверял
-                        // их по СВОЕМУ count. Битый GLB с count < POSITION.count
-                        // иначе читал бы за пределами bin-чанка (OOB) — читаем
-                        // атрибут только в пределах его собственного count.
+                        float vp[3], n[3] = {0, 1, 0}, u[2] = {0, 0};
+                        read_vertex(bin, pos_base, ap, bvs, bv_n, (int)v, vp);
+                        mat4_transform_point(world, vp, vp);
+                        // NORMAL/UV are indexed by the same v, but acc_fits checked
+                        // them against THEIR OWN count. A broken GLB with count <
+                        // POSITION.count would otherwise read past the BIN chunk
+                        // (OOB) — so read the attribute only within its own count.
                         if (an && v < an->count) { read_vertex(bin, nrm_base, an, bvs, bv_n, (int)v, n); mat4_transform_nrm(world, n, n); }
                         if (au && v < au->count) read_vertex(bin, uv_base, au, bvs, bv_n, (int)v, u);
-                        // БЕЗ флипа V: stb_image кладёт верхнюю строку
-                        // картинки в t=0, glTF v=0 — тоже верх (см. glb_anim)
-                        if (!b_push_v(bk, p[0], p[1], p[2], n[0], n[1], n[2], u[0], u[1])) {
-                            ok = 0; err = "нехватка памяти вершин"; break;
+                        // NO V flip: stb_image puts the top row of the image at
+                        // t=0, and glTF v=0 is also the top (see glb_anim)
+                        if (!b_push_v(bk, vp[0], vp[1], vp[2], n[0], n[1], n[2], u[0], u[1])) {
+                            ok = 0; err = "vertex out of memory"; break;
                         }
                     }
                     if (ok && ai) {
@@ -515,13 +545,13 @@ GlbModel *glb_parse_file(const char *path)
                         for (long i = 0; i < ai->count && ok; i++) {
                             long ii = read_index(bin, idx_base, ai, bvs, bv_n, (int)i, nv);
                             if (ii >= 0 && !b_push_i(bk, base + (unsigned int)ii)) {
-                                ok = 0; err = "нехватка памяти индексов"; break;
+                                ok = 0; err = "index out of memory"; break;
                             }
                         }
                     } else if (ok) {
                         for (long i = 0; i < nv && ok; i++) {
                             if (!b_push_i(bk, base + (unsigned int)i)) {
-                                ok = 0; err = "нехватка памяти индексов"; break;
+                                ok = 0; err = "index out of memory"; break;
                             }
                         }
                     }
@@ -536,7 +566,7 @@ GlbModel *glb_parse_file(const char *path)
                 const JsonNode *cnd = (ci >= 0 && ci < json_array_len(nodes)) ? json_array_get(nodes, ci) : NULL;
                 if (!cnd) continue;
                 if (!stack_push(&stack, &st_n, &st_cap, cnd, world)) {
-                    ok = 0; err = "нехватка памяти стека узлов"; break;
+                    ok = 0; err = "node stack out of memory"; break;
                 }
             }
         }
@@ -545,7 +575,7 @@ GlbModel *glb_parse_file(const char *path)
     free(accs);
 
     if (!ok || bk_n == 0) {
-        SDL_Log("glb: %s — %s", path, err[0] ? err : "нет примитивов");
+        SDL_Log("glb: %s — %s", path, err[0] ? err : "no primitives");
         for (int i = 0; i < bk_n; i++) b_free(&buckets[i]);
         free(buckets);
         free(bvs);
@@ -554,7 +584,7 @@ GlbModel *glb_parse_file(const char *path)
         return NULL;
     }
 
-    // --- Материалы (псевдо-PBR 2004) + альбедо ----------------------------------
+    // --- Materials (pseudo-PBR 2004) + albedo ----------------------------------
     GlbModel *model = calloc(1, sizeof *model);
     if (!model) {
         for (int i = 0; i < bk_n; i++) b_free(&buckets[i]);
@@ -600,8 +630,8 @@ GlbModel *glb_parse_file(const char *path)
             if (strcmp(am, "BLEND") == 0) o->blend = MAT_BLEND_ALPHA;
             else if (strcmp(am, "MASK") == 0) o->blend = MAT_BLEND_ALPHATEST;
             else o->blend = MAT_BLEND_OPAQUE;
-            // glTF-пропсы рендерим двусторонними (MAT_CULL_NONE): иначе тонкие
-            // односторонние панели и салон (видимый через стёкла извне) пропадают.
+            // glTF props are rendered two-sided (MAT_CULL_NONE): otherwise thin
+            // one-sided panels and the cabin (seen through the glass from outside) vanish.
             o->cull = MAT_CULL_NONE;
             const JsonNode *em = json_find(mt, "emissiveFactor");
             if (em && em->type == JSON_ARRAY && json_array_len(em) >= 3) {
@@ -610,14 +640,14 @@ GlbModel *glb_parse_file(const char *path)
                 o->tint[2] += (float)json_num(json_array_get(em, 2), 0);
             }
             if (json_find(mt, "normalTexture"))
-                SDL_Log("glb: %s — normalTexture игнор (псевдо-PBR 2004)", path);
+                SDL_Log("glb: %s — normalTexture ignored (2004-style pseudo-PBR)", path);
             load_albedo(o, mi, materials, textures, images, samplers, bvs, bv_n,
                         bin, (long)bin_len);
-            // «Стекло» в gltf-моделях часто нарисовано НЕпрозрачной текстурой
-            // (alpha=255). У BLEND-материала нет реальной альфы, с чем смешивать —
-            // панель остаётся сплошной и закрывает салон/внутренности. Если в
-            // текстуре нет ни одного полупрозрачного пикселя, считаем материал
-            // стеклом и снижаем общую прозрачность.
+            // "Glass" in gltf models is often painted with an OPAQUE texture
+            // (alpha=255). A BLEND material has no real alpha to mix with, so the
+            // panel stays solid and hides the interior/innards. If the
+            // texture has not a single translucent pixel, treat the material as
+            // glass and lower the overall opacity.
             if (o->blend == MAT_BLEND_ALPHA && o->img && o->alpha >= 0.95f) {
                 int has_trans = 0;
                 int npix = (int)((size_t)o->iw * o->ih);
@@ -627,7 +657,7 @@ GlbModel *glb_parse_file(const char *path)
                 if (!has_trans) o->alpha = 0.35f;
             }
         }
-        // Данные переданы GlbItem'у — не освобождать повторно в b_free
+        // Data handed over to GlbItem — do not free it again in b_free
         bk->verts = bk->nrm = bk->uv = (float *)NULL;
         bk->idx = NULL;
         bk->vn = bk->idxn = 0;
@@ -641,14 +671,14 @@ GlbModel *glb_parse_file(const char *path)
     return model;
 }
 
-// --- Узел-инстанс (GL) ---------------------------------------------------------
+// --- Instance node (GL) ---------------------------------------------------------
 typedef struct {
     GLuint vao, vbo, ebo;
-    GLuint snow_vbo;         // per-vertex "открыто небу сверху" (для снега), 0 если нет
+    GLuint snow_vbo;         // per-vertex "open to the sky above" (for snow), 0 if none
     int index_count;
     GLenum index_type;
     GLuint tex;
-    int tex_owned;           // 1 — glGenTextures (из img), 0 — кеш ресурсов
+    int tex_owned;           // 1 — glGenTextures (from img), 0 — resource cache
     Material mat;
     MaterialLocs ml;
     float specular;
@@ -661,7 +691,7 @@ typedef struct {
     SceneUniforms su;
     GLint u_model, u_tex, u_specular;
     float scale;
-    float radius;                  // огранич. сфера модели (в мировом масштабе)
+    float radius;                  // model bounding sphere (in world scale)
 } GlbParams;
 
 static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
@@ -675,7 +705,7 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
     const size_t elem = 8 * sizeof(float);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)gi->vcount * elem), NULL, GL_STATIC_DRAW);
     float *cpu = malloc((size_t)gi->vcount * 8 * sizeof(float));
-    if (!cpu) { SDL_Log("glb: нехватка памяти на CPU-буфер вершин"); glDeleteVertexArrays(1, &d->vao);
+    if (!cpu) { SDL_Log("glb: out of memory for CPU vertex buffer"); glDeleteVertexArrays(1, &d->vao);
                 glDeleteBuffers(1, &d->vbo); free(d); return NULL; }
     for (int i = 0; i < gi->vcount; i++) {
         cpu[8 * i + 0] = gi->verts[3 * i + 0];
@@ -747,13 +777,13 @@ static DrawItem *build_item(const GlbItem *gi, GLuint prog, const float *snow)
     return d;
 }
 
-static void glb_node_exit(const Event *e, void *user);   // forward (см. ниже)
+static void glb_node_exit(const Event *e, void *user);   // forward decl (see below)
 static void glb_free_resources(GlbParams *p);
 
 SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
                          const RendererContext *rc)
 {
-    // Один раз: узел GlbInstance3D при выходе из дерева освобождает ресурсы.
+    // Once: a GlbInstance3D node releases its resources when the tree exits.
     static int s_registered = 0;
     if (!s_registered) { events_listen(EV_NODE_EXIT, glb_node_exit, NULL); s_registered = 1; }
 
@@ -785,8 +815,8 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     }
     p->count = 0;
     p->radius = 0.0f;
-    // Per-vertex "открыто небу сверху": снег ляжет на крышу/капот/багажник,
-    // но не внутрь салона (под собственной крышей). Считается по всей модели.
+    // Per-vertex "open to the sky above": snow will settle on the roof/hood/trunk,
+    // but not inside the cabin (under its own roof). Computed over the whole model.
     const float **vp = malloc((size_t)gm->count * sizeof *vp);
     int *vc = malloc((size_t)gm->count * sizeof *vc);
     const unsigned **ip = malloc((size_t)gm->count * sizeof *ip);
@@ -810,10 +840,10 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
     for (int i = 0; i < gm->count; i++) {
         DrawItem *bi = build_item(&gm->items[i], prog, snow_mask ? snow_mask + snow_off : NULL);
         snow_off += gm->items[i].vcount;
-        if (!bi) continue;                 // OOM-пропуск, p->items[i] остаётся нулевой
+        if (!bi) continue;                 // OOM skip, p->items[i] stays zeroed
         DrawItem *d = &p->items[p->count++];
-        *d = *bi; free(bi);                // структура скопирована — обёртку освободить
-        // огранич. сфера из геометрии бакета (вершины уже в мировых коорд. GLB)
+        *d = *bi; free(bi);                // struct copied — free the wrapper
+        // bounding sphere from bucket geometry (verts already in GLB world coords)
         float mn[3] = {1e30f,1e30f,1e30f}, mx[3] = {-1e30f,-1e30f,-1e30f};
         for (int v = 0; v < gm->items[i].vcount; v++) {
             float dx = gm->items[i].verts[3*v+0], dy = gm->items[i].verts[3*v+1],
@@ -851,18 +881,18 @@ SceneNode *glb_make_node(const char *path, const float pos[3], float scale,
         free(p);
         return NULL;
     }
-    // Масштаб — в трансформ узла: мировую матрицу собирает scene.c, поэтому
-    // модель можно вращать (n->rot) и цеплять к костям других моделей.
+    // The scale goes into the node transform: scene.c assembles the world matrix, so
+    // the model can be rotated (n->rot) and attached to bones of other models.
     n->scl[0] = n->scl[1] = n->scl[2] = p->scale;
     node_update_transforms(n);
     return n;
 }
 
-// --- Тени: GLB-модели отбрасывают тень ----------------------------------------
-// Глубинный проход (mesh_shadow.vs/fs): позиция × мировая матрица узла ×
-// VP от солнца, alpha-test по текстуре багета (листья/травяные квады glTF
-// не затеняют всем квадом). Программа одна на все glb-узлы (модульный
-// статик, hot-reload через reshade-хук).
+// --- Shadows: GLB models cast a shadow ----------------------------------------
+// Depth pass (mesh_shadow.vs/fs): position × node world matrix ×
+// sun VP, alpha-test against the baguette texture (foliage/grass quads in glTF
+// must not cast a shadow with the whole quad). One program for all glb nodes
+// (module static, hot-reload via the reshade hook).
 static GLuint s_glb_shadow_prog = 0;
 static GLint s_glb_sh_model = -1, s_glb_sh_vp = -1, s_glb_sh_tex = -1,
              s_glb_sh_at = -1;
@@ -890,8 +920,8 @@ void glb_node_render(SceneNode *n, float dt)
     GlbParams *p = n->params;
     if (!p) return;
     if (p->rc->pass == RP_SHADOW) {
-        // Теневой проход: глубина модели с точки зрения солнца. Frustum не
-        // проверяем — отсечение по боксу каскада делает вызывающий код.
+        // Shadow pass: model depth from the sun's point of view. We do not check the
+        // frustum — clipping against the cascade box is done by the calling code.
         if (!s_glb_shadow_prog) {
             s_glb_shadow_prog = resources_program_replace(
                 0, "shaders/mesh_shadow.vs", "shaders/mesh_shadow.fs");
@@ -918,10 +948,10 @@ void glb_node_render(SceneNode *n, float dt)
                              n->world[14], p->radius))
         return;
 
-    // Модельная матрица = МИРОВАЯ матрица узла (scene.c): позиция, поворот,
-    // масштаб и — если узел прицеплен к костям/другому узлу — вся цепочка
-    // родителей. Раньше собиралась вручную из pos и скаляра scale, поэтому
-    // модель нельзя было ни повернуть, ни прицепить.
+    // The model matrix = the node WORLD matrix (scene.c): position, rotation,
+    // scale and — if the node is attached to bones/another node — the whole
+    // parent chain. It used to be assembled by hand from pos and the scale
+    // scalar, so the model could be neither rotated nor attached.
     const float *model = n->world;
     glEnable(GL_DEPTH_TEST);
     glUseProgram(p->prog);
@@ -942,9 +972,9 @@ void glb_node_render(SceneNode *n, float dt)
     glBindVertexArray(0);
 }
 
-// Освобождение ресурсов узла GlbInstance3D (по EV_NODE_EXIT из node_free_tree).
-// node_free_tree освобождает только структуру GlbParams; VAO/VBO/EBO каждой
-// бакеты, текстуры (свои + кеш) и refcount программы отдаём здесь.
+// Release of GlbInstance3D node resources (via EV_NODE_EXIT from node_free_tree).
+// node_free_tree frees only the GlbParams struct; the VAO/VBO/EBO of every
+// bucket, the textures (own + cache) and the program refcount are released here.
 static void glb_free_resources(GlbParams *p)
 {
     if (!p) return;
@@ -972,7 +1002,7 @@ static void glb_node_exit(const Event *e, void *user)
     glb_free_resources(n->params);
 }
 
-// --- Освобождение ---------------------------------------------------------------
+// --- Release ---------------------------------------------------------------
 void glb_model_free(GlbModel *m)
 {
     if (!m) return;

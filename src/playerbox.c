@@ -1,12 +1,12 @@
 // ============================================================================
-//  playerbox.c — бокс коллизии персонажа в режиме от 3-го лица (см. playerbox.h)
+//  playerbox.c — character collision box in third-person mode (see playerbox.h)
 // ----------------------------------------------------------------------------
-//  Персонаж в 3-м лице рисуется как ПОЛНЫЙ бокс его физической коллизии
-//  (ширина 1 м, высота 2 м — см. camera.h: PLAYER_HALF_W / PLAYER_HEIGHT).
-//  Бокс строится каждый кадр вокруг ног персонажа (ноги = позиция глаз минус
-//  текущая высота глаз, т.к. камера стоит на уровне глаз). Полупрозрачная
-//  закраска граней + видимые рёбра — коллизия видна целиком.
-//  В 1-м лице и в теневом проходе узел ничего не рисует.
+//  The third-person character is drawn as the FULL box of its physical collision
+//  (1 m wide, 2 m tall — see camera.h: PLAYER_HALF_W / PLAYER_HEIGHT).
+//  The box is built every frame around the character's feet (feet = eye position
+//  minus the current eye height, since the camera sits at eye level). Semi-transparent
+//  face fill + visible edges — the collision is fully visible.
+//  In first-person and in the shadow pass the node draws nothing.
 // ============================================================================
 #include "playerbox.h"
 
@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Вершина: позиция в мире + uv (для линий uv не используется, но атрибут общий)
+// Vertex: world position + uv (uv is unused for lines, but the attribute is shared)
 #define PB_STRIDE 5
 
 static void pb_setup_vao(GLuint vao, GLuint vbo)
@@ -71,12 +71,12 @@ SceneNode *playerbox_make_node(CameraParams *cam, const RendererContext *rc)
     return node;
 }
 
-// 8 углов бокса: низ 0-3, верх 4-7 (см. selection.c)
-// 12 рёбер — пары индексов углов.
+// 8 box corners: bottom 0-3, top 4-7 (see selection.c)
+// 12 edges — pairs of corner indices.
 static const int s_edges[24] = {
-    0,1, 1,2, 2,3, 3,0,     // нижняя грань
-    4,5, 5,6, 6,7, 7,4,     // верхняя грань
-    0,4, 1,5, 2,6, 3,7,     // вертикальные рёбра
+    0,1, 1,2, 2,3, 3,0,     // bottom face
+    4,5, 5,6, 6,7, 7,4,     // top face
+    0,4, 1,5, 2,6, 3,7,     // vertical edges
 };
 
 void playerbox_node_render(SceneNode *n, float dt)
@@ -85,38 +85,38 @@ void playerbox_node_render(SceneNode *n, float dt)
     PlayerBoxParams *p = n->params;
     if (!p || !p->cam) return;
     const RendererContext *rc = p->rc;
-    if (rc->pass == RP_SHADOW) return;            // в карты теней не пишем
-    // Только в режиме от 3-го лица: в 1-м лице персонаж = сама камера,
-    // рисовать его бокс на себя бессмысленно.
+    if (rc->pass == RP_SHADOW) return;            // don't write into shadow maps
+    // Third-person mode only: in first person the character IS the camera,
+    // drawing its box onto itself is pointless.
     if (cvar_get("cam_thirdperson") < 0.5f) return;
 
-    float half = PLAYER_HALF_W;        // 0.5 м -> бокс 1x1 м в сечении
-    float height = PLAYER_HEIGHT;      // 2 м — высота коллизии
+    float half = PLAYER_HALF_W;        // 0.5 m -> 1x1 m box cross-section
+    float height = PLAYER_HEIGHT;      // 2 m — collision height
 
-    // Ноги персонажа: камера на уровне глаз (EYE_H), высота глаз зависит
-    // от приседа (cam_duck из контекста).
+    // Character's feet: the camera is at eye level (EYE_H), eye height depends
+    // on crouching (cam_duck from the context).
     float eye = rc->cam_duck ? EYE_DUCK : EYE_H;
     float feet = p->cam->cam.pos[1] - eye;
     float cx = p->cam->cam.pos[0], cz = p->cam->cam.pos[2];
 
-    // 8 углов бокса (ось Y — вверх)
+    // 8 box corners (Y axis — up)
     float c[8][3] = {
-        {cx - half, feet,         cz - half},   // 0 низ
+        {cx - half, feet,         cz - half},   // 0 bottom
         {cx + half, feet,         cz - half},   // 1
         {cx + half, feet,         cz + half},   // 2
         {cx - half, feet,         cz + half},   // 3
-        {cx - half, feet + height, cz - half},  // 4 верх
+        {cx - half, feet + height, cz - half},  // 4 top
         {cx + half, feet + height, cz - half},  // 5
         {cx + half, feet + height, cz + half},  // 6
         {cx - half, feet + height, cz + half},  // 7
     };
 
-    // --- Закраска граней: 12 треугольников (6 граней по 2) --------------------
-    // Порядок углов грани: 4 индекса -> 2 треугольника (i0,i1,i2),(i0,i2,i3).
+    // --- Face fill: 12 triangles (6 faces x 2) --------------------
+    // Face corner order: 4 indices -> 2 triangles (i0,i1,i2),(i0,i2,i3).
     static const int face[6][4] = {
-        {0,1,2,3},   // низ
-        {4,5,6,7},   // верх
-        {0,1,5,4},   // перед/зад/лево/право
+        {0,1,2,3},   // bottom
+        {4,5,6,7},   // top
+        {0,1,5,4},   // front/back/left/right
         {2,3,7,6},
         {1,2,6,5},
         {3,0,4,7},
@@ -134,7 +134,7 @@ void playerbox_node_render(SceneNode *n, float dt)
             tri[nv++] = 0.0f;
         }
     }
-    // --- Рёбра: 12 отрезков = 24 вершины --------------------------------------
+    // --- Edges: 12 segments = 24 vertices --------------------------------------
     float lin[24 * PB_STRIDE];
     int nl = 0;
     for (int e = 0; e < 24; e++) {
@@ -147,22 +147,22 @@ void playerbox_node_render(SceneNode *n, float dt)
     glUseProgram(p->prog);
     glUniformMatrix4fv(p->u_viewproj, 1, GL_FALSE, rc->viewproj);
 
-    // Полупрозрачная закраска (depth test вкл — бокс за рельефом, но пишет
-    // глубину? Нет: пишем только цвет, глубину НЕ трогаем — иначе персонаж
-    // закрывал бы сам себя и мир. Blend вкл, DepthMask off.)
+    // Semi-transparent fill (depth test on — the box hides behind terrain, but does it
+    // write depth? No: we write only color, depth is NOT touched — otherwise the
+    // character would occlude itself and the world. Blend on, DepthMask off.)
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
-    glUniform4f(p->u_color, 0.90f, 0.30f, 0.25f, 0.35f);   // красный бокс
+    glUniform4f(p->u_color, 0.90f, 0.30f, 0.25f, 0.35f);   // red box
     glBindVertexArray(p->vao_fill);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo_fill);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nv * sizeof(float)), tri,
                  GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, nv / PB_STRIDE);
 
-    // Рёбра — яркие, поверх закраски
-    glUniform4f(p->u_color, 1.0f, 0.85f, 0.30f, 0.95f);   // жёлтые линии
+    // Edges — bright, on top of the fill
+    glUniform4f(p->u_color, 1.0f, 0.85f, 0.30f, 0.95f);   // yellow lines
     glBindVertexArray(p->vao_line);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo_line);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nl * sizeof(float)), lin,

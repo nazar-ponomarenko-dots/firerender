@@ -1,24 +1,24 @@
-# Сборки и бинарники
+# Builds and binaries
 build/
 firerender
 firerender-linux.zip
 
-# Локальные настройки/сохранения игрока
+# Local player settings/saves
 config.cfg
 save.cfg
 screenshots/
 *.ppm
 
-# Вендоренный исходник SDL3 (скачивается/собирается отдельно)
+# Vendored SDL3 source (downloaded/built separately)
 third_party/SDL/
 
-# Изучаемые/внешние исходники и сторонние 3D-модели (не часть проекта)
+# Studied/external sources and third-party 3D models (not part of the project)
 reference/
 models/
 
-# Номер сборки (локальный счётчик, инкрементируется каждым make)
+# Build number (local counter, incremented by every make)
 buildnum.txt
 src/buildnum.h
 
-# Локальные данные агента ZCode
+# Local ZCode agent data
 .zcode/

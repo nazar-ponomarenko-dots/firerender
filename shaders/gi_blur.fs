@@ -1,34 +1,35 @@
 // ============================================================================
-//  gi_blur.fs — пространственный денойзер GI (билатеральный, по плоскости)
+//  gi_blur.fs — spatial GI denoiser (bilateral, plane-based)
 // ----------------------------------------------------------------------------
-//  Экранное GI считается малым числом лучей — остаётся зерно. Гасим его
-//  широким размытием, но ТОЛЬКО внутри одной поверхности.
+//  Screen GI is computed from a small ray count — noise remains. We kill it
+//  with a wide blur, but ONLY within one surface.
 //
-//  Вес соседа даёт не разница глубин, а расстояние соседа до КАСАТЕЛЬНОЙ
-//  ПЛОСКОСТИ центрального пикселя. Разница глубин сама по себе плохой
-//  критерий: на скошенной поверхности (пол под углом к камере) она большая у
-//  соседей той же плоскости — фильтр вырождался в «почти без размытия», и
-//  зерно приходилось прятать увеличением радиуса, что размазывало углы.
-//  Плоскостной вес держит соседей одного пола/стены и рвёт связь на изломе,
-//  поэтому свет не перетекает через углы и силуэты.
+//  A neighbour's weight comes not from the depth difference but from the
+//  neighbour's distance to the TANGENT PLANE of the center pixel. The depth
+//  difference alone is a poor criterion: on a slanted surface (floor at an
+//  angle to the camera) it is large for neighbours in the same plane — the
+//  filter degraded into "almost no blur", and the noise had to be hidden by
+//  growing the radius, which smeared the corners. The plane weight keeps
+//  neighbours of the same floor/wall together and cuts the link at a fold,
+//  so light does not bleed across corners and silhouettes.
 //
-//  Ещё: сэмплы GI распределены по пикселям через IGN (см. gi.fs), то есть
-//  соседи держат РАЗНЫЕ направления полусферы. Этот фильтр их и складывает —
-//  фактически поднимает число лучей на пиксель без затрат на трассировку.
+//  Also: GI samples are spread over pixels via IGN (see gi.fs), i.e.
+//  neighbours hold DIFFERENT hemisphere directions. This filter sums them up —
+//  effectively raising the ray count per pixel without any tracing cost.
 //
-//  Проход разделяемый: uDir = (1,0) — горизонталь, (0,1) — вертикаль.
+//  The pass is separable: uDir = (1,0) — horizontal, (0,1) — vertical.
 // ============================================================================
 
 in vec2 vUV;
 
-uniform sampler2D uGI;        // GI (unit 0): rgb непрямой свет, a = затенение
-uniform sampler2D uDepth;     // глубина сцены (unit 1)
-uniform mat4 uInvViewProj;    // для реконструкции мировых позиций
+uniform sampler2D uGI;        // GI (unit 0): rgb indirect light, a = occlusion
+uniform sampler2D uDepth;     // scene depth (unit 1)
+uniform mat4 uInvViewProj;    // for reconstructing world positions
 uniform vec3 uCamPos;
-uniform vec2 uTexel;          // 1 / разрешение GI-таргета
-uniform vec2 uDir;            // направление прохода
+uniform vec2 uTexel;          // 1 / GI target resolution
+uniform vec2 uDir;            // pass direction
 uniform vec2 uZ;              // znear, zfar
-uniform float uRadius;        // радиус в текселях
+uniform float uRadius;        // radius in texels
 
 out vec4 FragColor;
 
@@ -65,22 +66,22 @@ vec3 wnormal(vec2 uv, float d0, vec3 p0) {
 void main() {
     float d0 = texture(uDepth, vUV).r;
     vec4 c0 = texture(uGI, vUV);
-    if (d0 >= 0.9999 || d0 <= 1e-5) { FragColor = c0; return; }   // небо не размываем
+    if (d0 >= 0.9999 || d0 <= 1e-5) { FragColor = c0; return; }   // do not blur the sky
 
     vec3 P = wpos(vUV, d0);
     vec3 N = wnormal(vUV, d0, P);
     float z0 = linz(d0 * 2.0 - 1.0);
 
-    // Допуск по плоскости растёт с дистанцией: далеко один тексель покрывает
-    // больше мира, и «своя» поверхность честно уходит дальше от плоскости.
+    // The plane tolerance grows with distance: far away one texel covers more
+    // of the world, and "own" surface honestly drifts further from the plane.
     float tol = 0.02 + 0.02 * z0;
-    // Радиус тоже: вдали лучей меньше (LOD трассировки) и один тексель GI
-    // покрывает больше экрана, поэтому шум крупнее — мазать нужно шире.
-    // Близко — узкий радиус держит контактные тени резкими.
+    // The radius too: at distance there are fewer rays (tracing LOD) and one GI
+    // texel covers more screen, so the noise is coarser — the blur must be wider.
+    // Up close — a narrow radius keeps contact shadows crisp.
     float lod = smoothstep(30.0, 150.0, z0);
     float rad = uRadius * (0.85 + 0.65 * lod);
 
-    // Гаусс 9 тапов; вес умножается на плоскостной множитель.
+    // 9-tap Gaussian; the weight is multiplied by the plane factor.
     const float w[5] = float[5](0.227, 0.194, 0.121, 0.054, 0.016);
     vec4 acc = c0 * w[0];
     float wsum = w[0];
@@ -91,7 +92,7 @@ void main() {
             float d = texture(uDepth, uv).r;
             if (d >= 0.9999 || d <= 1e-5) continue;
             vec3 q = wpos(uv, d);
-            float plane = abs(dot(q - P, N));           // отход от плоскости
+            float plane = abs(dot(q - P, N));           // deviation from the plane
             float bw = 1.0 - smoothstep(tol, tol * 4.0, plane);
             if (bw <= 0.0) continue;
             acc += texture(uGI, uv) * (w[i] * bw);

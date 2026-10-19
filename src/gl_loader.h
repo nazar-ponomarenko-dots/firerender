@@ -1,29 +1,29 @@
 // ============================================================================
-//  gl_loader.h — мини-загрузчик функций OpenGL вместо GLEW
+//  gl_loader.h — a minimal OpenGL function loader instead of GLEW
 // ----------------------------------------------------------------------------
-//  GL_FUNCS (X-макрос) генерирует указатели p_glXxx и код их загрузки через
-//  SDL_GL_GetProcAddress (работает на любом бэкенде SDL: Wayland/EGL,
+//  GL_FUNCS (X-macro) generates the p_glXxx pointers and the code loading them
+//  via SDL_GL_GetProcAddress (works on any SDL backend: Wayland/EGL,
 //  X11/GLX, Windows/WGL, macOS/CGL).
 //
-//  Заголовок также подключает платформенные GL-заголовки (типы/константы).
-//  Имя glXxx везде в коде — макрос на p_glXxx.
+//  The header also pulls in platform GL headers (types/constants).
+//  The name glXxx everywhere in the code is a macro to p_glXxx.
 // ============================================================================
 #ifndef GL_LOADER_H
 #define GL_LOADER_H
 
-// --- Платформенные заголовки OpenGL ------------------------------------------
-// Десктоп использует GL (gl.h + glext.h от Khronos), мобильные — GLES (gl3.h).
+// --- Platform OpenGL headers ------------------------------------------
+// Desktop uses GL (Khronos gl.h + glext.h), mobile — GLES (gl3.h).
 #if defined(__ANDROID__) || defined(__EMSCRIPTEN__) || defined(USE_GLES)
 #  define USE_GLES_PATH 1
-#  include <GLES3/gl3.h>          // GLES 3.x: Android, Web, ARM-платы
+#  include <GLES3/gl3.h>          // GLES 3.x: Android, Web, ARM boards
 #elif defined(_WIN32)
-#  include <GL/gl.h>              // Windows: системный GL 1.1...
-#  include <GL/glext.h>           // ...плюс Khronos-заголовки с константами GL3+
+#  include <GL/gl.h>              // Windows: system GL 1.1...
+#  include <GL/glext.h>           // ...plus Khronos headers with GL3+ constants
 #elif defined(__APPLE__)
-#  include <OpenGL/gl3.h>         // macOS: фреймворк OpenGL, заголовок GL 3.2+
+#  include <OpenGL/gl3.h>         // macOS: OpenGL framework, GL 3.2+ header
 #else
-#  include <GL/gl.h>              // Linux: системный GL (Mesa/драйвер)...
-#  include <GL/glext.h>           // ...и заголовок расширений/констант Khronos
+#  include <GL/gl.h>              // Linux: system GL (Mesa/driver)...
+#  include <GL/glext.h>           // ...and the Khronos extensions/constants header
 #endif
 
 #ifndef APIENTRY
@@ -34,11 +34,12 @@
 #  endif
 #endif
 
-// --- Константы GLES 3.1 / GL 4.3 (compute + SSBO) ----------------------------
-//  GLES3-заголовок (gl3.h) их не знает: это фичи GLES 3.1. Числовые значения
-//  одинаковы в OpenGL и OpenGL ES — просто доопределяем. Если контекст
-//  устройства младше 3.1, функции из GL_FUNCS_OPT останутся NULL и движок
-//  откатится на инстансный путь (g_gl_gpu_driven == 0).
+// --- GLES 3.1 / GL 4.3 constants (compute + SSBO) ----------------------------
+//  The GLES3 header (gl3.h) does not know them: these are GLES 3.1 features.
+//  The numeric values are the same in OpenGL and OpenGL ES — we just define
+//  the extras. If the device context is older than 3.1, the functions in
+//  GL_FUNCS_OPT stay NULL and the engine falls back to the instanced path
+//  (g_gl_gpu_driven == 0).
 #if defined(USE_GLES_PATH) && !defined(GL_SHADER_STORAGE_BUFFER)
 #define GL_COMPUTE_SHADER                0x91B9
 #define GL_MAX_COMPUTE_WORK_GROUP_COUNT  0x91BE
@@ -57,7 +58,7 @@
 #define GL_SHADER_STORAGE_BARRIER_BIT   0x00002000
 #define GL_DRAW_INDIRECT_BUFFER         0x8F3F
 #define GL_TIME_ELAPSED                 0x88BF
-#define GL_R16                          0x822A   // на GLES = GL_R16_EXT
+#define GL_R16                          0x822A   // on GLES = GL_R16_EXT
 #define GL_ALL_BARRIER_BITS              0xFFFFFFFFu
 #endif
 
@@ -111,11 +112,11 @@
     F(void,             glDrawElementsInstanced, (GLenum, GLsizei, GLenum, const void *, GLsizei)) \
     F(void,             glDrawArraysInstanced,  (GLenum, GLint, GLsizei, GLsizei)) \
 
-// --- OPTIONAL: GPU-driven рендер (compute + indirect) ------------------------
-//  Нужны для варианта Б (compute-cull + indirect draw). Доступны с GL 4.3
-//  (desktop) / GLES 3.1. Загружаются НЕ фатально: указатель == NULL, если
-//  контекст старый — тогда g_gl_gpu_driven = 0 и используется инстансный
-//  фолбэк. Не включены в GL_FUNCS, чтобы не ломать загрузку на GL 3.3.
+// --- OPTIONAL: GPU-driven rendering (compute + indirect) ------------------------
+//  Needed for variant B (compute-cull + indirect draw). Available since GL 4.3
+//  (desktop) / GLES 3.1. Loaded NON-fatally: the pointer == NULL if the
+//  context is old — then g_gl_gpu_driven = 0 and the instanced fallback is
+//  used. Kept out of GL_FUNCS so loading doesn't break on GL 3.3.
 #define GL_FUNCS_OPT(F)                                                          \
     F(void,             glDrawBuffer,                (GLenum))                   \
     F(void,             glReadBuffer,                (GLenum))                   \
@@ -176,13 +177,13 @@
 GL_FUNCS(F)
 #undef F
 
-// OPTIONAL GPU-driven указатели (NULL, если контекст < GL 4.3).
+// OPTIONAL GPU-driven pointers (NULL if the context is < GL 4.3).
 #define F(ret, name, args) extern ret (APIENTRY *p_##name) args;
 GL_FUNCS_OPT(F)
 #undef F
 
-// 1, если контекст поддерживает compute + indirect (GPU-driven рендер).
-// Устанавливается в load_gl_funcs().
+// 1 if the context supports compute + indirect (GPU-driven rendering).
+// Set in load_gl_funcs().
 extern int g_gl_gpu_driven;
 
 #define glGetString               p_glGetString
@@ -236,8 +237,8 @@ extern int g_gl_gpu_driven;
 #define glDrawElements            fr_glDrawElements
 #define glDrawElementsInstanced   fr_glDrawElementsInstanced
 #define glDrawElementsInstancedBaseInstance fr_glDrawElementsInstancedBaseInstance
-// OPTIONAL GPU-driven функции: макросы на указатели (NULL, если контекст
-// старый — вызов только под защитой g_gl_gpu_driven).
+// OPTIONAL GPU-driven functions: macros onto the pointers (NULL if the context
+// is old — call only under the g_gl_gpu_driven guard).
 #define glDispatchCompute            p_glDispatchCompute
 #define glMemoryBarrier              p_glMemoryBarrier
 #define glBindBufferBase             p_glBindBufferBase
@@ -289,12 +290,12 @@ extern int g_gl_gpu_driven;
 #define glGetQueryObjectiv        p_glGetQueryObjectiv
 #define glGetQueryObjectui64v     p_glGetQueryObjectui64v
 
-// Загружает все указатели из текущего GL-контекста. 0 — успех, -1 — ошибка.
+// Loads all pointers from the current GL context. 0 — success, -1 — error.
 int load_gl_funcs(void);
 
-// --- Счётчики профилирования (профайлер) ---------------------------------------
-// Обёртки glDraw* считают число вызовов, вершин и треугольников.
-// Обнуляются prof_reset() каждый кадр.
+// --- Profiling counters (profiler) ---------------------------------------
+// glDraw* wrappers count the number of calls, vertices and triangles.
+// Zeroed by prof_reset() every frame.
 extern int g_prof_draws;
 extern int g_prof_verts;
 extern int g_prof_tris;
@@ -308,12 +309,12 @@ void fr_glDrawElementsInstancedBaseInstance(GLenum mode, GLsizei count,
                                             GLenum type, const void *indices,
                                             GLsizei primcount, GLuint baseinstance);
 
-// --- Отсев избыточных смен GL-состояния ------------------------------------
-// Тонкий кэш поверх настоящих указателей: пропускает bind/use, если ресурс
-// уже привязан к этому слоту (аналог GL_Bind в xash — единственная воронка,
-// через которую идут ВСЕ модули). Чистая экономия CPU/драйвера, картинка
-// байт-в-байт та же. FR_GLCACHE=0 отключает (для A/B). g_prof_state_skipped —
-// число отсеянных вызовов за кадр (сбрасывает prof_reset()).
+// --- Filtering out redundant GL state changes ------------------------------------
+// A thin cache over the real pointers: skips bind/use when the resource is
+// already bound to that slot (analog of GL_Bind in xash — the single funnel
+// through which ALL modules go). Pure CPU/driver savings, the picture is
+// byte-for-byte the same. FR_GLCACHE=0 disables it (for A/B).
+// g_prof_state_skipped — number of calls filtered out per frame (reset by prof_reset()).
 extern int g_prof_state_skipped;
 void fr_glUseProgram(GLuint prog);
 void fr_glBindVertexArray(GLuint vao);

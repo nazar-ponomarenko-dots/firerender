@@ -1,10 +1,10 @@
 // ============================================================================
-//  ui.c — immediate-mode UI (см. ui.h)
+//  ui.c — immediate-mode UI (see ui.h)
 // ----------------------------------------------------------------------------
-//  Все виджеты рисуются через общий HUD-рендер (hud_rect_draw + текст):
-//  подложка фокуса — полупрозрачный жёлтый прямоугольник, текущий пункт —
-//  жёлтый текст с маркером ">", остальные — белые (стиль HL1).
-//  Навигация: мышь (hover -> focus, клик -> активация) и стрелки/WASD + Enter.
+//  All widgets draw through the shared HUD renderer (hud_rect_draw + text):
+//  the focus backdrop is a translucent yellow rectangle, the current item is
+//  yellow text with a ">" marker, the rest are white (HL1 style).
+//  Navigation: mouse (hover -> focus, click -> activate) and arrows/WASD + Enter.
 // ============================================================================
 #include "ui.h"
 
@@ -18,9 +18,9 @@
 float ui_layout_scale(Ui *u);
 #include <stdio.h>
 
-// Звук клика по элементу меню (audio/click.wav — движковый или из карты).
-// Играет ТОЛЬКО при смене фокуса (наведение на пункт, переключение
-// стрелками) — активация и удержание курсора молчат.
+// Click sound for a menu item (audio/click.wav — engine stock or from a map).
+// Plays ONLY on focus change (hovering a new item, switching with arrows) —
+// activation and holding the cursor in place stay silent.
 static Sound *s_click = NULL;
 static int s_click_tried = 0;
 
@@ -37,13 +37,13 @@ static void ui_click_hover(void)
     if (s_click) audio_play(s_click, 0.3f, 1.0f);
 }
 
-// --- Цвета ---------------------------------------------------------------------
+// --- Colors ----------------------------------------------------------------------
 #define C_WHITE  { 0.93f, 0.93f, 0.96f, 1.0f }
-#define C_HILITE { 1.0f, 0.78f, 0.20f, 1.0f }     // текущий пункт (жёлтый)
+#define C_HILITE { 1.0f, 0.78f, 0.20f, 1.0f }     // current item (yellow)
 #define C_DIM    { 0.62f, 0.66f, 0.72f, 1.0f }
-#define C_SHADOW { 0.0f, 0.0f, 0.0f, 0.55f }      // тень текста
+#define C_SHADOW { 0.0f, 0.0f, 0.0f, 0.55f }      // text shadow
 
-// Текст с тенью (Source-стиль): тёмная копия со смещением + основной
+// Text with a drop shadow (Source style): dark offset copy + main text
 static void ui_draw_text(Ui *u, float x, float y, const char *s,
                          const float c[4])
 {
@@ -57,8 +57,8 @@ static void ui_draw_text(Ui *u, float x, float y, const char *s,
     }
 }
 
-// Базовая линия, при которой ГЛИФЫ (а не метрика строки) по центру
-// прямоугольника y..y+h: иначе текст "вылезает" выше кнопки.
+// Baseline at which the GLYPHS (not the line metric) are centered inside
+// the rectangle y..y+h: otherwise text "sticks out" above the button.
 static float ui_baseline(Ui *u, float y, float h)
 {
     float asc = u->big ? hud_text_ascent() : hud_text_ascent_small();
@@ -68,7 +68,7 @@ static float ui_baseline(Ui *u, float y, float h)
     return y + h * 0.5f - (desc - asc) * 0.5f;
 }
 
-// Публичная версия: текст в произвольной точке экрана
+// Public version: text at an arbitrary screen point
 static int ui_hit(Ui *u, int id, float x, float y, float w, float h);
 static bool ui_activated(Ui *u, int id, bool hover);
 static float ui_text_w(Ui *u, const char *s);
@@ -78,7 +78,7 @@ void ui_text_at(Ui *u, float x, float y, const char *s, const float c[4])
     ui_draw_text(u, x, y, s, c);
 }
 
-// Кнопка в произвольной точке (не в колонке)
+// Button at an arbitrary point (not in a column)
 bool ui_button_at(Ui *u, float x, float y, float w, float h, const char *label)
 {
     int id = ++u->id;
@@ -97,10 +97,10 @@ static float ui_text_w(Ui *u, const char *s)
     return u->big ? hud_text_width(s) : hud_text_width_small(s);
 }
 
-// Общая обработка хитбокса виджета: hover -> hot/focus, клик -> active.
-// Возвращает 1, если курсор над виджетом. Фокус НЕ крадётся во время
-// перетаскивания (active >= 0): иначе драг слайдера через соседние строки
-// переключал фокус и спамил звук навигации.
+// Shared widget hitbox handling: hover -> hot/focus, click -> active.
+// Returns 1 when the cursor is over the widget. Focus is NOT stolen while
+// dragging (active >= 0): otherwise dragging a slider across neighbouring rows
+// would switch focus and spam the navigation sound.
 static int ui_hit(Ui *u, int id, float x, float y, float w, float h)
 {
     int hover = u->mx >= x && u->mx <= x + w &&
@@ -114,25 +114,25 @@ static int ui_hit(Ui *u, int id, float x, float y, float w, float h)
     return hover;
 }
 
-// Активация фокус-виджета клавишей (Enter) или кликом.
+// Activation of the focused widget by key (Enter) or by click.
 static bool ui_activated(Ui *u, int id, bool hover)
 {
-    // Активация БЕЗ звука: клик меню звучит только при смене фокуса
+    // Activation WITHOUT sound: a menu click sounds only on focus change
     return (u->focus == id && u->key_enter) || (hover && u->mouse_click);
 }
 
 void ui_begin(Ui *u, int vw, int vh, int big, int input)
 {
-    ui_click_sound();           // ленивая загрузка клика (после audio_init)
-    u->focus_prev = u->focus;   // фокус на начало кадра (для звука навигации)
+    ui_click_sound();           // lazy load of the click sound (after audio_init)
+    u->focus_prev = u->focus;   // focus at frame start (for the navigation sound)
     u->vw = vw;
     u->vh = vh;
     u->big = big;
     u->font_h = big ? hud_text_line_height() : hud_text_line_height_small();
 
-    // Ввод: читаем всегда (чтобы prev был актуален и после закрытия консоли
-    // не было ложных фронтов), но при input=0 события НЕ генерируем —
-    // консоль поверх меню забирает клавиатуру себе.
+    // Input: always read (so prev stays current and after closing the console
+    // there are no false edges), but with input=0 events are NOT generated —
+    // the console over the menu takes the keyboard for itself.
     float mx = 0, my = 0;
     Uint32 btns = SDL_GetMouseState(&mx, &my);
     bool down = (btns & SDL_BUTTON_LMASK) != 0;
@@ -159,7 +159,7 @@ void ui_begin(Ui *u, int vw, int vh, int big, int input)
         u->key_home = hm && !u->k_home_p;
         u->key_end = en2 && !u->k_end_p;
     } else {
-        u->mx = u->my = -10000;      // курсор "вне экрана" — hover нигде
+        u->mx = u->my = -10000;      // cursor "off screen" — hover nowhere
         u->mouse_click = u->mouse_release = false;
         u->mouse_down = false;
         u->key_up = u->key_down = u->key_left = u->key_right = false;
@@ -186,10 +186,10 @@ void ui_begin(Ui *u, int vw, int vh, int big, int input)
 
 void ui_end(Ui *u)
 {
-    // Навигация стрелками: фокус ходит по виджетам кадра, по кругу.
-    // Home/End — в начало/конец списка. Если слайдер уже съел Home/End
-    // (поставил min/max) — фокус ими не листаем: одно нажатие = одно
-    // действие.
+    // Arrow-key navigation: focus walks over the frame's widgets, cyclically.
+    // Home/End — to the start/end of the list. If a slider already consumed
+    // Home/End (set min/max) — don't page focus with them: one press = one
+    // action.
     if (u->key_up) u->focus = (u->focus <= 1 || u->focus > u->id) ? u->id : u->focus - 1;
     if (u->key_down) u->focus = (u->focus >= u->id || u->focus < 1) ? 1 : u->focus + 1;
     if (!u->eat_home_end) {
@@ -199,8 +199,8 @@ void ui_end(Ui *u)
     u->eat_home_end = false;
     if (u->focus < 0) u->focus = 0;
     if (u->focus > u->id) u->focus = u->id;
-    // Звук навигации: клик ТОЛЬКО при переходе на другой пункт
-    // (наведение мыши или стрелки). Удержание курсора на пункте — молчит.
+    // Navigation sound: click ONLY when moving to a different item
+    // (mouse hover or arrows). Holding the cursor on an item — silent.
     if (u->focus != u->focus_prev && u->focus > 0)
         ui_click_hover();
     if (u->active >= 0 && u->mouse_release) u->active = -1;
@@ -213,14 +213,14 @@ void ui_focus_reset(Ui *u)
     u->active = -1;
 }
 
-// Фокус на ПЕРВЫЙ пункт экрана: Enter сразу выбирает его (как в HL1)
+// Focus on the FIRST item of the screen: Enter selects it right away (as in HL1)
 void ui_focus_first(Ui *u)
 {
     u->focus = 1;
     u->active = -1;
 }
 
-// Слот бинда: действие слева, [клавиша] справа (экран "Клавиши")
+// Bind slot: action on the left, [key] on the right ("Keys" screen)
 
 bool ui_key_slot(Ui *u, const char *action, const char *key)
 {
@@ -265,8 +265,8 @@ float ui_layout_item_h(Ui *u)
     return (u->font_h + 10.0f) * ui_layout_scale(u);
 }
 
-// Кнопка в колонке: текст по центру строки, при фокусе/наведении — жёлтый.
-// Подложек нет — только цвет текста (как просили).
+// Button in a column: text centered on the row, yellow when focused/hovered.
+// No backdrops — text color only (as requested).
 bool ui_button(Ui *u, const char *label)
 {
     int id = ++u->id;
@@ -316,16 +316,16 @@ bool ui_slider(Ui *u, const char *label, float *value,
     float ih = ui_layout_item_h(u) + 8.0f;
     bool changed = false;
 
-    // Трек: сразу после label, до зоны значения. Бегунок всегда идёт
-    // ровно за курсором (t считается от начала трека).
+    // Track: right after the label, before the value zone. The knob always
+    // follows the cursor exactly (t is measured from the track start).
     float label_w = ui_text_w(u, label);
     float tx = u->cx + label_w + 14.0f;
     float tw = u->col_w - label_w - 14.0f - 74.0f;
     if (tw < 40.0f) tw = 40.0f;
     float tyy = u->cy + u->font_h + 7.0f;
 
-    // Захват — ТОЛЬКО кликом по треку (с запасом в пару пикселей): клик по
-    // подписи или числу справа раньше запускал драг со скачком значения.
+    // Grab — ONLY by clicking the track (with a couple pixels of slack): clicking
+    // the caption or the number on the right used to start a drag with a value jump.
     int track_hover = u->mx >= tx - 8.0f && u->mx <= tx + tw + 8.0f &&
                       u->my >= u->cy && u->my <= u->cy + ih;
     if (track_hover && u->mouse_click && u->active < 0) u->active = id;
@@ -338,9 +338,9 @@ bool ui_slider(Ui *u, const char *label, float *value,
     }
     if (u->active == id && u->mouse_release) u->active = -1;
 
-    // Клавиатура: ←/→ шаг 5% диапазона, Home/End — крайние значения.
-    // Съеденные Home/End помечаются: ui_end не должен ОДНОВРЕМЕННО листать
-    // фокус на первый/последний пункт (двойное действие на одно нажатие).
+    // Keyboard: left/right step 5% of the range, Home/End — extreme values.
+    // Consumed Home/End are flagged: ui_end must NOT simultaneously page
+    // focus to the first/last item (double action for a single press).
     if (u->focus == id) {
         float step = (max - min) * 0.05f;
         if (u->key_left)  { *value -= step; changed = true; }
@@ -355,14 +355,14 @@ bool ui_slider(Ui *u, const char *label, float *value,
     const float *col = u->focus == id ? (const float[4])C_HILITE : (const float[4])C_WHITE;
     ui_draw_text(u, u->cx + 10.0f, ty, label, col);
 
-    // Трек: тёмная линия, заполненная белым до бегунка
+    // Track: dark line, filled white up to the knob
     float t0 = (max > min) ? (*value - min) / (max - min) : 0.0f;
     const float track[4] = { 0.22f, 0.25f, 0.30f, 1.0f };
     hud_rect_draw(u->vw, u->vh, tx, tyy, tw, 3.0f, track);
     const float fill[4] = { 0.85f, 0.87f, 0.92f, 1.0f };
     if (t0 > 0.01f)
         hud_rect_draw(u->vw, u->vh, tx, tyy, tw * t0, 3.0f, fill);
-    // Бегунок: светлый прямоугольник с тонкими краями
+    // Knob: light rectangle with thin edges
     float bx = tx + t0 * tw - 5.0f;
     const float knob[4] = { 0.95f, 0.95f, 0.97f, 1.0f };
     hud_rect_draw(u->vw, u->vh, bx, tyy - 4.0f, 10.0f, 11.0f, knob);
@@ -370,7 +370,7 @@ bool ui_slider(Ui *u, const char *label, float *value,
     hud_rect_draw(u->vw, u->vh, bx, tyy - 4.0f, 10.0f, 2.0f, knobline);
     hud_rect_draw(u->vw, u->vh, bx, tyy + 5.0f, 10.0f, 2.0f, knobline);
 
-    // Значение справа
+    // Value on the right
     char val[32];
     snprintf(val, sizeof val, fmt, *value);
     ui_draw_text(u, u->cx + u->col_w - 66.0f, ty, val, col);
@@ -401,7 +401,7 @@ void ui_title(Ui *u, const char *label)
     float ty = u->big ? 60.0f : 40.0f;
     const float wc[4] = C_WHITE;
     ui_draw_text(u, (u->vw - tw) * 0.5f, ty, label, wc);
-    // Тонкая линия-подчёркивание под заголовком (стиль HL1)
+    // Thin underline below the title (HL1 style)
     const float line[4] = { 0.55f, 0.60f, 0.70f, 0.9f };
     hud_rect_draw(u->vw, u->vh, (u->vw - tw) * 0.5f, ty + u->font_h + 6.0f,
                   tw, 2.0f, line);
@@ -415,12 +415,12 @@ void ui_hint(Ui *u, const char *label)
     ui_draw_text(u, (u->vw - tw) * 0.5f, ty, label, dim);
 }
 
-// Крупный заголовок меню: слева по центру, 56px, с тенью.
+// Large menu title: left, vertically centered, 56px, with shadow.
 void ui_title_big(Ui *u, const char *label)
 {
     const float sh[4] = C_SHADOW;
     const float wc[4] = C_WHITE;
-    // Базовая линия по центру вертикали экрана (как глифы, не метрика)
+    // Baseline at the vertical center of the screen (glyphs, not the metric)
     float y = u->vh * 0.5f - (hud_text_descent_big() - hud_text_ascent_big()) * 0.5f;
     hud_text_draw_big(u->vw, u->vh, 90.0f + 3.0f, y + 3.0f, label, sh);
     hud_text_draw_big(u->vw, u->vh, 90.0f, y, label, wc);

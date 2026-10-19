@@ -1,10 +1,10 @@
 // ============================================================================
-//  json.c — мини-парсер JSON: токенизация + дерево узлов в одной арене
+//  json.c — mini JSON parser: tokenization + a node tree in one arena
 // ----------------------------------------------------------------------------
-//  Значения кладутся в растущий массив узлов (индексы вместо указателей:
-//  realloc не ломает связи), строки — в отдельную арену. Поддерживаются
-//  escape-последовательности, в т.ч. \uXXXX с суррогатными парами
-//  (кириллица в именах). Зависимостей нет — чистый C + SDL_Log.
+//  Values go into a growing node array (indices instead of pointers:
+//  realloc does not break links), strings into a separate arena. Escape
+//  sequences are supported, incl. \uXXXX with surrogate pairs
+//  (Cyrillic in names). No dependencies — pure C + SDL_Log.
 // ============================================================================
 #include "json.h"
 
@@ -15,13 +15,13 @@
 
 #define JSON_MAX_DEPTH 64
 
-// --- Арены: узлы и строки -----------------------------------------------------
+// --- Arenas: nodes and strings ------------------------------------------------
 static JsonNode *s_nodes;
 static size_t s_ncount, s_ncap;
 static char *s_strs;
 static size_t s_scount, s_scap;
 
-// --- Курсор парсера -----------------------------------------------------------
+// --- Parser cursor ------------------------------------------------------------
 static const char *s_p, *s_end;
 static int s_depth;
 
@@ -48,7 +48,7 @@ static JsonNode *new_node(void)
     return n;
 }
 
-// Копия строки в арену s_strs (NULL-terminated)
+// Copy a string into the s_strs arena (NULL-terminated)
 static const char *str_dup(const char *s, size_t len)
 {
     if (s_scount + len + 1 > s_scap) {
@@ -66,7 +66,7 @@ static const char *str_dup(const char *s, size_t len)
     return out;
 }
 
-// --- Вспомогательные лексемы --------------------------------------------------
+// --- Auxiliary lexemes --------------------------------------------------
 
 static int hex_val(char c)
 {
@@ -103,10 +103,10 @@ static int string_buf_reserve(char **buf, size_t *cap, size_t need)
     return 1;
 }
 
-// Строка в кавычках -> арена s_strs (с раскрытыми escape). NULL — ошибка.
+// Quoted string -> s_strs arena (escapes expanded). NULL — error.
 static const char *parse_string(void)
 {
-    s_p++;   // открывающая кавычка
+    s_p++;   // opening quote
     size_t cap = 64, len = 0;
     char *buf = malloc(cap);
     if (!buf) return NULL;
@@ -114,7 +114,7 @@ static const char *parse_string(void)
         if (s_p >= s_end) { free(buf); return NULL; }
         unsigned char c = (unsigned char)*s_p;
         if (c == '"') { s_p++; break; }
-        s_p++;   // курсор вперёд: для обычного символа и после '\\'
+        s_p++;   // advance the cursor: for a plain char and after '\\'
         if (c == '\\') {
             if (s_p >= s_end) { free(buf); return NULL; }
             char e = *s_p++;
@@ -130,7 +130,7 @@ static const char *parse_string(void)
             case 'u': {
                 int cp = parse_hex4();
                 if (cp < 0) { free(buf); return NULL; }
-                // Суррогатная пара: старшая половина + \uXXXX младшей
+                // Surrogate pair: high half + \uXXXX of the low half
                 if (cp >= 0xD800 && cp <= 0xDBFF) {
                     if (s_p + 1 < s_end && s_p[0] == '\\' && s_p[1] == 'u') {
                         s_p += 2;
@@ -140,7 +140,7 @@ static const char *parse_string(void)
                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                     } else { free(buf); return NULL; }
                 }
-                // Кодовая точка -> UTF-8 (1/2/3/4 байта)
+                // Code point -> UTF-8 (1/2/3/4 bytes)
                 if (cp < 0x80) {
                     c = (unsigned char)cp;
                 } else if (cp < 0x800) {
@@ -154,7 +154,7 @@ static const char *parse_string(void)
                     buf[len++] = (char)(0xE0 | (cp >> 12));
                     buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
                     c = (unsigned char)(0x80 | (cp & 0x3F));
-                } else {   // суррогатная пара: до 0x10FFFF — 4 байта
+                } else {   // surrogate pair: up to 0x10FFFF — 4 bytes
                     if (!string_buf_reserve(&buf, &cap, len + 5))
                         { free(buf); return NULL; }
                     buf[len++] = (char)(0xF0 | (cp >> 18));
@@ -164,7 +164,7 @@ static const char *parse_string(void)
                 }
                 break;
             }
-            default: free(buf); return NULL;   // неизвестный escape
+            default: free(buf); return NULL;   // unknown escape
             }
         }
         if (!string_buf_reserve(&buf, &cap, len + 2))
@@ -176,9 +176,9 @@ static const char *parse_string(void)
     return out;
 }
 
-// --- Значения ----------------------------------------------------------------
+// --- Values ----------------------------------------------------------------
 
-// Дословное совпадение (true/false/null)
+// Verbatim match (true/false/null)
 static int match_lit(const char *lit)
 {
     size_t n = strlen(lit);
@@ -270,22 +270,22 @@ static JsonNode *parse_value(const char *key)
     return n;
 }
 
-// --- Публичный API ------------------------------------------------------------
+// --- Public API ------------------------------------------------------------
 
 const JsonNode *json_parse(const char *text, size_t len)
 {
     json_free();
-    // Арены заранее выращены до МАКСИМУМА: во время парсинга realloc НЕ
-    // вызывается. Иначе выданные ранее указатели (sval/ключи, родительские
-    // узлы) инвалидируются — use-after-free: на больших map.json падало
-    // (30 деревьев проскакивали, 60 — краш в parse_value).
+    // Arenas are pre-grown to the MAXIMUM: no realloc is called during parsing.
+    // Otherwise previously handed-out pointers (sval/keys, parent nodes)
+    // would be invalidated — use-after-free: it crashed on large map.json files
+    // (30 trees got through, 60 — crash in parse_value).
     if (len == SIZE_MAX) return NULL;
-    size_t est_nodes = len / 2 + 32;      // узел почти на каждые 2 байта
+    size_t est_nodes = len / 2 + 32;      // almost a node per every 2 bytes
     if (est_nodes > SIZE_MAX / sizeof(JsonNode)) return NULL;
     s_nodes = malloc(est_nodes * sizeof(JsonNode));
     if (!s_nodes) return NULL;
     s_ncap = est_nodes;
-    s_strs = malloc(len + 1);             // суммарная длина строк ≤ len
+    s_strs = malloc(len + 1);             // total string length ≤ len
     if (!s_strs) { json_free(); return NULL; }
     s_scap = len + 1;
     s_p = text;
@@ -298,7 +298,7 @@ const JsonNode *json_parse(const char *text, size_t len)
         return NULL;
     }
     skip_ws();
-    if (s_p != s_end) {   // мусор после корневого значения
+    if (s_p != s_end) {   // junk after the root value
         SDL_Log("JSON parse error: trailing data at byte %ld", (long)(s_p - text));
         json_free();
         return NULL;

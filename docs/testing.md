@@ -1,106 +1,115 @@
-# Тестирование firerender headless-контуром
+# Testing firerender with the headless loop
 
-Документ для агентов и CI. Всё ниже — проверено на этом дереве; если расходится с
-кодом, верьте коду и почините документ.
+Document for agents and CI. Everything below has been verified on this tree; if it
+disagrees with the code, trust the code and fix the document.
 
 ---
 
-## 1. Три команды, которые надо прогнать после любой правки
+## 1. The three commands to run after any edit
 
 ```sh
-make BAKE=0                                                       # сборка без перепекки карт
-SDL_VIDEODRIVER=offscreen FR_TEST=SlS ./build/firerender            # GL-конвейер + glb + анимация
-SDL_VIDEODRIVER=offscreen FR_TEST=Sx ./build/firerender             # самотест консоли и cvar'ов
+make BAKE=0                                                       # build without re-baking the maps
+SDL_VIDEODRIVER=offscreen FR_TEST=SlS ./build/firerender          # GL pipeline + glb + animation
+SDL_VIDEODRIVER=offscreen FR_TEST=Sx ./build/firerender           # console and cvar selftest
 ```
 
-Буква `S` нужна и во втором прогоне: `FR_TEST=x` без неё лишь печатает
-`console selftest: OK` и продолжает крутить кадры — headless-прогон не завершится
-сам (CI-_style `timeout 5` тогда обязателен).
+The letter `S` is needed in the second run as well: `FR_TEST=x` without it only
+prints `console selftest: OK` and keeps spinning frames — the headless run will not
+finish on its own (a CI-style `timeout 5` is then mandatory).
 
-`make` без `BAKE=0` перепечёт свет **всех** карт (`BAKE ?= 1`, `Makefile:208-211`,
-штамп `build/.baked.stamp`) — минуты вместо секунд. Штамп защищает от повторной
-перепекки только если шейдеры/карты не менялись.
+`make` without `BAKE=0` re-bakes the light of **all** maps (`BAKE ?= 1`,
+`Makefile:208-211`, stamp `build/.baked.stamp`) — minutes instead of seconds. The
+stamp prevents a repeated re-bake only if shaders/maps have not changed.
 
-### Почему `dummy` ≠ headless-рендер
+### Why `dummy` ≠ headless render
 
-| `SDL_VIDEODRIVER` | Что происходит |
+| `SDL_VIDEODRIVER` | What happens |
 |---|---|
-| `offscreen` | GL-контекст создаётся, кадр рисуется, `FR_TEST=S` пишет PNG. Работает **без** `DISPLAY` — проверено. |
-| `dummy` | `SDL_CreateWindow failed: OpenGL support is either not configured in SDL or not available in current SDL video driver (dummy)`, **exit 1**. Ни одного кадра. |
-| `x11`/`wayland` | обычный запуск, окно видно пользователю. |
+| `offscreen` | A GL context is created, the frame is drawn, `FR_TEST=S` writes a PNG. Works **without** `DISPLAY` — verified. |
+| `dummy` | `SDL_CreateWindow failed: OpenGL support is either not configured in SDL or not available in current SDL video driver (dummy)`, **exit 1**. Not a single frame. |
+| `x11`/`wayland` | normal launch, the window is visible to the user. |
 
-CI (`.github/workflows/ci.yml`) использует `dummy` и терпит `exit 1` через
-`|| true`. Значит **«build with ASAN/UBSAN → run basic test» в CI покрывает только
-путь до создания окна** (`boot_init` до `SDL_CreateWindow`) и ничего рендер-логикой.
-Настоящий headless-прогон агент обязан сделать сам на `offscreen`.
+CI (`.github/workflows/ci.yml`) uses `dummy` and tolerates `exit 1` via `|| true`.
+That means **"build with ASAN/UBSAN → run basic test" in CI covers only the path up
+to window creation** (`boot_init` before `SDL_CreateWindow`) and nothing
+related to render logic. The agent must run the real headless pass on `offscreen`
+itself.
 
 ---
 
-## 2. Переменные окружения (`FR_*`)
+## 2. Environment variables (`FR_*`)
 
-| Переменная | Значение | Где читается |
+| Variable | Meaning | Where it is read |
 |---|---|---|
-| `FR_TEST` | строка букв — набор тестов, применяются все | `main.c:232` `fr_test_apply`, далее в игровом цикле |
-| `FR_MAP` | имя карты поверх выбора в `config.cfg` | `game.c:724` |
-| `FR_POS` | `"x,z[,yaw_deg[,pitch]]"` — телепорт после загрузки мира; включает `fly`, глаз = высота+2.4 м | `main.c:252` |
-| `FR_W`, `FR_H` | размер окна (скриншоты в другом разрешении) | `main.c:432` |
-| `FR_MSAA` | число семплов MSAA поверх пресета | `app.c:456` |
-| `FR_CONSOLE` | открыть консоль на старте | `main.c:600` |
-| `FR_BAKE` | режим офлайн-компляции света (пишет `map/baked/`) | `main.c:765`, цель `make mapbake` |
-| `FR_BENCH` | включить замер кадров, применить бенчмарк-пресет, **окно = нативное разрешение** | `main.c:527,545,594` |
-| `FR_BENCH_PRESET` | `0..3` — какой пресет качества взять для замера | `main.c:595` (`app_apply_benchmark_preset`) |
-| `FR_BENCH_GPU` | замер GPU-elapsed-запросами (`GL_TIME_ELAPSED`, кольцо из 8) | `main.c:546` |
+| `FR_TEST` | string of letters — a set of tests, all of them are applied | `main.c:250` `fr_test_apply`, then in the game loop |
+| `FR_MAP` | map name overriding the choice in `config.cfg` | `game.c:729` |
+| `FR_POS` | `"x,z[,yaw_deg[,pitch]]"` — teleport after the world loads; enables `fly`, eye = height + 2.4 m | `main.c:298` |
+| `FR_W`, `FR_H` | window size (screenshots at a different resolution) | `main.c:592` |
+| `FR_SHOT` | `<frame>` — dump that frame to `/tmp/fr_shot.ppm`; `<from>-<to>` — dump **every** frame of the range to `/tmp/fr_shot_<n>.ppm`. Consecutive frames of one run differ by a single logic tick, so the range form is how temporal instability (flicker, z-fighting) is measured headlessly | `main.c:505` `loop_fr_shot` |
+| `FR_MSAA` | number of MSAA samples overriding the preset | `app.c:456` |
+| `FR_GL_PROBE_FAIL` | forces the GLSL dialect probe to report "unsupported" — exercises the boot path of a driver that cannot compile the engine's shaders (log + window title + native dialog, map load refused). Under `FR_TEST` the dialog is skipped, and the run exits `1` with `FR_TEST: map load refused` | `shader.c:227` `shader_dialect_supported` |
+| `FR_CONSOLE` | open the console at startup | `main.c:770` |
+| `FR_BAKE` | offline light-compilation mode (writes to `map/baked/`) | `main.c:938`, target `make mapbake` |
+| `FR_BENCH` | enable frame timing and apply the benchmark quality preset (the window is NOT resized) | `main.c:697,715` |
+| `FR_BENCH_PRESET` | `0..3` — which quality preset to use for the measurement | `main.c:765` (`app_apply_benchmark_preset`) |
+| `FR_BENCH_GPU` | measure with GPU elapsed queries (`GL_TIME_ELAPSED`, ring of 8) | `main.c:716` |
 
 ---
 
-## 3. Буквы `FR_TEST`
+## 3. `FR_TEST` letters
 
-Смотри `src/main.c:226-345` и цикл в `main.c:696-760`.
+See `src/main.c:250-400` (`fr_test_apply`) and the frame loop at `main.c:722` (`while (running)`).
 
-### Что запустить/включить
+### What to launch/enable
 
-| Буква | Действие |
+| Letter | Action |
 |---|---|
-| `x` | `console_selftest()` — set/клэмп cvar'ов, ввод текста, Left/Backspace/Delete, алиасы, история (`console.c:1177`) |
-| `S` | автоскриншот на **450-м** кадре, выход на **480-м** (без `FR_BENCH`) — `main.c:746-759` |
-| `D` | демо-полёт камеры (`game_demo_toggle`) — красивый ракурс для снимка: `FR_TEST=SD` |
-| `g` | `cmd_glb("models/vaz-2105.glb")` — статика с автопостановкой на рельеф |
-| `l` | `cmd_glbanim` анимированной модели + камера вниз — skinning, UV лица |
-| `R` | `cmd_phys_rope("16")` — Verlet-верёвка перед камерой |
-| `H` | женщина + рэгдолл с толчком, плюс автонаведение камеры каждый кадр |
-| `K` | убить игрока за ~1.2 с до снимка (киллкемера, `health`) |
-| `m` | burst частиц `"fire"` у игрока |
-| `d` | декаль под игроком (`decal_place`) |
-| `a` | дождь (`fx_weather_start("rain", ...)`) |
-| `n` | снег |
-| `y` | взрыв |
-| `w` | принудительная мокрость 1.0 без частиц дождя — чистый A/B SSR |
+| `x` | `console_selftest()` — set/clamp of cvars, text input, Left/Backspace/Delete, aliases, history (`console.c:1177`) |
+| `S` | automatic screenshot on **frame 450**, exit on **frame 480** (without `FR_BENCH`) — `main.c:924-932` |
+| `D` | camera demo flight (`game_demo_toggle`) — a nice viewpoint for a shot: `FR_TEST=SD` |
+| `g` | `cmd_glb("models/vaz-2105.glb")` — static mesh with automatic placement on the terrain |
+| `l` | `cmd_glbanim` animated model + camera looking down — skinning, face UV |
+| `R` | `cmd_phys_rope("16")` — Verlet rope in front of the camera |
+| `H` | female + ragdoll with a push, plus automatic camera aim every frame |
+| `K` | kill the player ~1.2 s before the shot (killcam, `health`) |
+| `m` | `"fire"` particle burst at the player |
+| `d` | decal under the player (`decal_place`) |
+| `a` | rain (`fx_weather_start("rain", ...)`) |
+| `n` | snow |
+| `y` | explosion |
+| `w` | forced wetness 1.0 without rain particles — clean SSR A/B |
+| `E` | `ecs_enable 1` + `ecs_selftest()` (ECS core) + a clean generation after the test |
+| `V` | `ecs_enable 1` + `ecs_scene_verify_once()` — scene<->ECS bridge consistency on the first tick |
+| `u` | `phys_bodies 1` + `phys_body_selftest()` — bodies: fall onto static, stack, impulse, box, cylinder, limit, kill switch, push |
+| `U` | `phys_bodies 1` + `cmd_phys_props("8")` — stack of crates in front of the camera (after load_world and `FR_POS`) |
+| `Z` | `audio_selftest()` (occlusion on a synthetic wall) + after load — the muffling multiplier for each map `sounds[]` entry and a reference point "under the feet" |
 
-### Что выключить (тумблеры подсистем «поверх режима» — для A/B-кадров)
+### What to disable (subsystem toggles "overriding the mode" — for A/B frames)
 
-| Буква | Что гасится |
+| Letter | What gets switched off |
 |---|---|
 | `r` | SSR (`r_ssr 0`) |
-| `s` | тени (`shadow_toggle()`) — применяется **после** ресинка cvar'ов, иначе `shadow_init` затирает (`main.c:617`) |
-| `o` | воксельный туман (`voxfog_set(1)`) — та же история с порядком |
-| `C` | кэш статических каскадов (`g_shadow_cache = 0`) |
-| `p` | тени от рельефа (`g_shadow_terrain = 0`) |
-| `q` | тени от растительности (`g_shadow_veg = 0`) |
-| `c` | cull-проверки теней (`g_shadow_cull = 0`) |
-| `v` | вся растительность (`veg_set_visible_test(0)`) |
-| `e` | статичный слой растительности (`veg_set_static_main(0)`) |
-| `f` | динамический слой растительности (`veg_set_dyn_main(0)`) |
-| `t` | узел рельефа (`g->terr_node->render = NULL`) — нужен уже загруженный мир, поэтому после load |
-| `k` | узел неба (`g->sky_node->render = NULL`) |
+| `s` | shadows (`shadow_toggle()`) — applied **after** the cvar resync, otherwise `shadow_init` overwrites it (`main.c:788`) |
+| `o` | voxel fog (`voxfog_set(1)`) — same story with the ordering |
+| `C` | static cascade cache (`g_shadow_cache = 0`) |
+| `p` | terrain shadows (`g_shadow_terrain = 0`) |
+| `q` | vegetation shadows (`g_shadow_veg = 0`) |
+| `c` | shadow cull checks (`g_shadow_cull = 0`) |
+| `v` | all vegetation (`veg_set_visible_test(0)`) |
+| `e` | static vegetation layer (`veg_set_static_main(0)`) |
+| `f` | dynamic vegetation layer (`veg_set_dyn_main(0)`) |
+| `t` | terrain node (`g->terr_node->render = NULL`) — requires an already loaded world, hence applied after load |
+| `k` | sky node (`g->sky_node->render = NULL`) |
+| `O` | positional audio occlusion (`snd_occlusion 0`) — A/B pair for `Z` |
 
-Буквы комбинируются в одной строке: `FR_TEST=SlS` = загрузить мир + анимация +
-скриншот + авто-выход. `FR_TEST=SqS` — снимок без теней травы.
+Letters combine in a single string: `FR_TEST=SlS` = load the world + animation +
+screenshot + automatic exit. `FR_TEST=SqS` — a shot without grass shadows.
 
 ---
 
-## 4. Санитайзеры
+## 4. Sanitizers
 
-Как в CI (и это же надо прогонять локально на парсерах):
+As in CI (and the same must be run locally on the parsers):
 
 ```sh
 make clean
@@ -110,84 +119,99 @@ UBSAN_OPTIONS=print_stacktrace=1:abort_on_error=1 \
 SDL_VIDEODRIVER=offscreen FR_TEST=SlS ./build/firerender
 ```
 
-- `detect_leaks=0` — SDL3 сам утекает ~256 байт на выходе (внутренние потоки);
-  это не код проекта. Локальные утечки искать отдельно, без CI-режима.
-- На парсерах ассетов прогонять **битыми файлами**: обрезанный `.glb`, чанк с
-  `chunk_len ≈ 0xFFFFFFFF`, модель с `"POSITION"` типа `VEC4`, `map.json` с
-  индексами за границами массивов. Ожидаемое поведение — сообщение в лог и пропуск
-  элемента, а не SEGV/stack-buffer-overflow.
-- `EXTRA_CFLAGS` — единственный хук Makefile для флагов; `CFLAGS` перезаписывает
-  весь набор и ломает `-I` пути.
+- `detect_leaks=0` — SDL3 itself leaks ~256 bytes at shutdown (internal threads);
+  that is not project code. Look for local leaks separately, without CI mode.
+- On asset parsers run **broken files**: a truncated `.glb`, a chunk with
+  `chunk_len ≈ 0xFFFFFFFF`, a model with `"POSITION"` of type `VEC4`, a `map.json`
+  with indices beyond array bounds. Expected behaviour — a message in the log and
+  the element skipped, not SEGV/stack-buffer-overflow.
+- `EXTRA_CFLAGS` is the only Makefile hook for flags; `CFLAGS` overwrites the whole
+  set and breaks the `-I` paths.
 
 ---
 
-## 5. Замер производительности
+## 5. Performance measurement
 
-`FR_BENCH=1` (`main.c:127-148`): 600 кадров **и** 10 с прогрева, затем 30 с выборки
-(до 60000 кадров), потом одна строка в лог:
+`FR_BENCH=1` (`main.c:129-153`): 600 frames **and** 10 s of warm-up, then 30 s of
+sampling (up to 60000 frames), then one line in the log:
 
 ```
 BENCH native wall-clock: N frames 30.0x s | NN.N fps | mean X.XXX ms p50 ... p95 ... p99 ... | GPU X.XXX ms
 ```
 
-Особенности, которые надо знать, чтобы не обмануть себя цифрами:
+Details one must know in order not to fool oneself with the numbers:
 
-- `FR_BENCH` заставляет окно = нативный размер экрана (`main.c:527`), применяет
-  бенчмарк-пресет качества и **выключает hot-reload шейдеров/текстур**
-  (`main.c:628`) — иначе 1 Гц `stat()` будит диск внутри замера.
-- `GPU` — только с `FR_BENCH_GPU=1` и если есть GL timer queries; без них `0.000`.
-- `p95/p99` важнее среднего: регрессия в этом движке выглядит как «среднее то же,
-  p99 вырос» (бюджет регенерации чанков, аллокации, пересборка травы).
-- Сравнивать всегда в одинаковых `FR_POS`/`FR_MAP`/`FR_W`/`FR_H`/`FR_MSAA` и на
-  одинаковом пресете. Разные точки карты — несравнимые числа.
-- Выборка заканчивается по `min(30 с, 60000 кадров)` — на очень быстром стенке
-  отчётом правит лимит кадров, а не время.
-- **Цифры под `offscreen` несравнимы с реальной игрой.** Проверено:
-  `FR_BENCH=1 FR_BENCH_PRESET=2` на offscreen-стенде даёт
+- `FR_BENCH` does **not** resize the window: it only warns when the drawable ended up
+  a different size than requested (`main.c:697`). It applies the benchmark quality
+  preset (`main.c:765`) and **disables hot-reload of shaders/textures** (`main.c:798`)
+  — otherwise the 1 Hz `stat()` wakes the disk inside the measurement.
+- `GPU` is present only with `FR_BENCH_GPU=1` and if GL timer queries exist; without
+  them it is `0.000`.
+- **`FR_MSAA` can silently do nothing.** It is applied inside the benchmark preset
+  (`app.c:456`), so it is read only with `FR_BENCH=1`, and anything loaded later —
+  `config.cfg` (`r_msaa` is `CVAR_ARCHIVE`) or a map's own cvars — overwrites it.
+  Measured: `FR_MSAA=0` still logged `MSAA: 4x`. To force a value use
+  `FR_CVAR="r_msaa 0"` (applied after the preset, `main.c:860`) and confirm it in the
+  log — otherwise an "MSAA on/off" A/B measures the same configuration twice.
+- `p95/p99` matter more than the mean: a regression in this engine looks like "the
+  mean is the same, p99 grew" (chunk regeneration budget, allocations, grass
+  rebuild).
+- Always compare with identical `FR_POS`/`FR_MAP`/`FR_W`/`FR_H`/`FR_MSAA` and on the
+  same preset. Different points on the map — non-comparable numbers.
+- Sampling ends at `min(30 s, 60000 frames)` — on a very fast rig the frame limit,
+  not the time, determines the report.
+- **Numbers under `offscreen` are not comparable with real gameplay.** Verified:
+  `FR_BENCH=1 FR_BENCH_PRESET=2` on the offscreen rig gives
   `BENCH native wall-clock: 60000 frames 1.11 s | 54035.8 fps | mean 0.019 ms …`
-  — кадр там почти ничего не стоит. Для A/B по FPS нужен настоящий вывод
-  (`x11`/`wayland` на том же GPU и разрешении, или устройство), а `offscreen` —
-  только для «не упало / нарисовалось». В CI GPU-замеров нет вовсе.
-- Внутрикадрные тайминги по модулям: команда `profiler` (`src/profiler.h`, 14
-  слотов, CPU-время + GPU-время за прошлый кадр; счётчики вершин/треугольников/
-  draw-вызовов ведёт `gl_loader.c` автоматически).
+  — a frame costs almost nothing there. For FPS A/B you need a real output
+  (`x11`/`wayland` on the same GPU and resolution, or the device), while `offscreen`
+  is only for "did not crash / did render". CI has no GPU measurements at all.
+- Per-module in-frame timings: the `profiler` command (`src/profiler.h`, 14 slots,
+  CPU time + GPU time for the previous frame; the vertex/triangle/draw-call counters
+  are maintained by `gl_loader.c` automatically).
 
 ---
 
-## 6. Скриншоты и A/B-картинка
+## 6. Screenshots and A/B images
 
-- Автоснимок: `FR_TEST=S` → `screenshots/shot_<ГГГГММДД_ЧЧММСС>.png`
-  (`commands.c:305-361`, папка создаётся сама). Ручной снимок — команда `screenshot`
-  или `F12`.
-- Точка обзора — `FR_POS="300,500,180,-0.2"` (x, z, yaw°, pitch°).
-- A/B: один и тот же `FR_POS` + `FR_MAP`, две буквы тумблера, два файла, сравнение
-  side-by-side. Это и есть доказательство «картинка не испортилась».
-- `screenshots/` в `.gitignore`; **не удалять чужие снимки** — папка общая с
-  ручными прогонами пользователя.
+- Automatic shot: `FR_TEST=S` → `screenshots/shot_<YYYYMMDD_HHMMSS>.png`
+  (`commands.c:305-361`, the folder is created by itself). A manual shot — the
+  `screenshot` command or `F12`.
+- Viewpoint — `FR_POS="300,500,180,-0.2"` (x, z, yaw°, pitch°).
+- A/B: the same `FR_POS` + `FR_MAP`, two toggle letters, two files, side-by-side
+  comparison. That is exactly the proof that "the image did not get worse".
+- **Never A/B two runs of the engine.** The simulation is driven by wall-clock
+  time, so frame N is not reproducible between processes: two runs of the SAME
+  binary at `FR_SHOT=900` differ in ~50% of pixels (measured 2026-10-15, 640x360,
+  `FR_TEST=Sv`, HEAD vs HEAD). Compare frames **inside one run** — that is what
+  the `FR_SHOT=<from>-<to>` form is for.
+- `screenshots/` is in `.gitignore`; **do not delete other people's shots** — the
+  folder is shared with the user's manual runs.
 
 ---
 
-## 7. Побочные эффекты прогонов (знать, не пугаться)
+## 7. Side effects of runs (know them, do not panic)
 
-- Любой выход из движка **перезаписывает `config.cfg`** (архивные cvar'ы,
-  diff-against-default). Файл в `.gitignore`; если пользователь держал там ручные
-  настройки — не коммитить и не «чинить» его содержимое.
-- Каждый `make` инкрементирует счётчик сборки → меняются `buildnum.txt` и
-  `src/buildnum.h` (оба в `.gitignore`), строка версии становится
+- Any engine exit **overwrites `config.cfg`** (archived cvars, diff-against-default).
+  The file is in `.gitignore`; if the user kept manual settings there — do not commit
+  it and do not "fix" its contents.
+- Every `make` increments the build counter → `buildnum.txt` and `src/buildnum.h`
+  change (both in `.gitignore`), the version string becomes
   `firerender 0.4 build #N`.
-- Headless-прогон может положить PNG в `screenshots/`.
-- Первый `FR_TEST=S` после изменения шейдеров длиннее: перепекка/прогрев, потом
-  цифры стабилизуются.
+- A headless run may drop a PNG into `screenshots/`.
+- The first `FR_TEST=S` after a shader change takes longer: re-bake/warm-up, then the
+  numbers stabilize.
 
 ---
 
-## 8. Чего здесь нет
+## 8. What is not here
 
-- **Юнит-тестов и тест-фреймворка нет.** `console_selftest` — единственный
-  встроенный набор ассертов. Не придумывать `tests/`, `make test`, pytest-обвязку;
-  контур — «собрал, прогнал headless, прочитал лог и числа».
-- **GL-регрессия не проверяется пиксельно.** Сравнение картинок — человеческое
-  (или свой скрипт вне репозитория). Не добавлять бинарные эталоны в git.
-- **`make apk`, `make vulkan`, `make metal`** — отдельные сборки; если задача их не
-  касается, достаточно desktop + `make gles`.
-- **Web/Emscripten — цели в Makefile нет**, не «доделывать попутно».
+- **There are no unit tests and no test framework.** `console_selftest` is the only
+  built-in set of assertions. Do not invent `tests/`, `make test`, a pytest wrapper;
+  the loop is "built, ran headless, read the log and the numbers".
+- **GL regression is not checked pixel-wise.** Image comparison is done by a human
+  (or by your own script outside the repository). Do not add binary references to git.
+- **`make apk`, `make vulkan`, `make metal`** are separate builds; if the task does
+  not concern them, desktop + `make gles` is enough.
+- **Web/Emscripten — there is no Makefile target for it**, do not "finish it along
+  the way".

@@ -1,8 +1,8 @@
 // ============================================================================
-//  png.c — сохранение RGB-кадра в PNG (через miniz: deflate + crc32)
+//  png.c — saving an RGB frame to PNG (via miniz: deflate + crc32)
 // ----------------------------------------------------------------------------
-//  Пишет 8-битный truecolor PNG (color type 2) без фильтров. Нужен только
-//  для скриншотов — поэтому мини-реализация без stb_image_write.
+//  Writes an 8-bit truecolor PNG (color type 2) without filters. Only needed
+//  for screenshots — hence a mini implementation without stb_image_write.
 // ============================================================================
 #include "png.h"
 
@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Помощник: big-endian uint32 в буфер
+// Helper: big-endian uint32 into a buffer
 static void put_u32(unsigned char *b, unsigned int v)
 {
     b[0] = (unsigned char)(v >> 24);
@@ -22,7 +22,7 @@ static void put_u32(unsigned char *b, unsigned int v)
     b[3] = (unsigned char)v;
 }
 
-// Записывает chunk PNG: длина, тип, данные, crc32
+// Writes a PNG chunk: length, type, data, crc32
 static void write_chunk(FILE *f, const char *type, const unsigned char *data,
                         unsigned int len)
 {
@@ -40,15 +40,15 @@ static void write_chunk(FILE *f, const char *type, const unsigned char *data,
     fwrite(crcb, 1, 4, f);
 }
 
-// Сохраняет кадр RGB (w*h*3 байт, строки сверху вниз) в PNG.
-// 0 — успех, -1 — ошибка.
+// Saves the RGB frame (w*h*3 bytes, rows top to bottom) to PNG.
+// 0 on success, -1 on error.
 int png_save(const char *path, int w, int h, const unsigned char *rgb)
 {
     if (w <= 0 || h <= 0 || !rgb) return -1;
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
 
-    // Сырые scanline'ы: каждая строка — байт фильтра (0) + RGB пиксели
+    // Raw scanlines: each row is a filter byte (0) + RGB pixels
     if ((size_t)w > (SIZE_MAX - 1) / 3) { fclose(f); return -1; }
     size_t row_bytes = (size_t)w * 3;
     if ((size_t)h > SIZE_MAX / (row_bytes + 1)) { fclose(f); return -1; }
@@ -77,7 +77,7 @@ int png_save(const char *path, int w, int h, const unsigned char *rgb)
     fwrite(sig, 1, 8, f);
     write_chunk(f, "IHDR", ihdr, 13);
 
-    // IDAT: zlib-сжатые scanline'ы (miniz: mz_compress — zlib-поток)
+    // IDAT: zlib-compressed scanlines (miniz: mz_compress — a zlib stream)
     mz_ulong clen = mz_compressBound((mz_ulong)raw_len);
     unsigned char *comp = malloc(clen);
     if (!comp) {

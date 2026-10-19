@@ -1,23 +1,23 @@
 // ============================================================================
-//  scene.h — сцена в духе Godot: всё на сцене — Узел
+//  scene.h — a Godot-style scene: everything on the scene is a Node
 // ----------------------------------------------------------------------------
-//  Мини-дерево узлов. У каждого узла: имя, тип, ТРАНСФОРМ (позиция, поворот,
-//  масштаб), размер и параметры. Движок каждый кадр обходит дерево:
-//  сначала update() всех узлов (логика, ввод, физика), затем считает мировые
-//  матрицы (node_update_transforms), потом render() (отрисовка).
+//  Mini node tree. Each node has: name, type, TRANSFORM (position, rotation,
+//  scale), size and parameters. The engine traverses the tree every frame:
+//  first update() on all nodes (logic, input, physics), then computes world
+//  matrices (node_update_transforms), then render() (drawing).
 //
-//  ТРАНСФОРМ (как Node3D в Godot): pos + rot (радианы, порядок Y->X->Z) +
-//  scl. Мировая матрица world = world(родителя) * [точка крепления] *
-//  local(TRS) — её считает node_update_transforms и читают рендеры мешей
-//  (mesh/glb/glb_anim/sprite). Раньше каждый рендер собирал матрицу сам из
-//  pos и своего скаляра scale — повернуть или прицепить узел было нельзя.
+//  TRANSFORM (like Node3D in Godot): pos + rot (radians, Y->X->Z order) +
+//  scl. World matrix world = world(parent) * [attachment point] *
+//  local(TRS) — node_update_transforms computes it and mesh renderers
+//  read it (mesh/glb/glb_anim/sprite). Previously each renderer built the
+//  matrix itself from pos and its own scale scalar — you could not rotate a
+//  node or attach it to something.
 //
-//  ТОЧКИ КРЕПЛЕНИЯ (attachment points): родитель может отдать ребёнку
-//  дополнительную матрицу — например матрицу КОСТИ скелета. Тогда ребёнок
-//  (спрайт, меш, другая модель) едет вместе с рукой персонажа. Родитель
-//  выставляет attach_fn, ребёнок — attach_slot (индекс точки; -1 = нет).
-//  Реализацию хука для скелетных моделей даёт glb_anim.c, удобный API —
-//  attach.h.
+//  ATTACHMENT POINTS: a parent can hand a child an extra matrix — e.g. the
+//  BONE matrix of a skeleton. Then the child (sprite, mesh, another model)
+//  moves along with the character's arm. The parent sets attach_fn, the
+//  child sets attach_slot (point index; -1 = none). glb_anim.c provides the
+//  hook implementation for skeletal models, attach.h — a convenient API.
 // ============================================================================
 #ifndef SCENE_H
 #define SCENE_H
@@ -25,30 +25,30 @@
 typedef struct SceneNode SceneNode;
 typedef void (*NodeFn)(SceneNode *node, float dt);
 
-// Хук родителя: положить в out[16] мировую-относительно-родителя матрицу
-// точки крепления slot (например кости скелета). Если точки нет — оставить
-// единичную матрицу (out уже единичный на входе).
+// Parent hook: write into out[16] the parent-relative world matrix of
+// attachment point slot (e.g. a skeleton bone). If the point doesn't exist,
+// leave the identity matrix (out is already identity on entry).
 typedef void (*NodeAttachFn)(SceneNode *parent, int slot, float out[16]);
 
 struct SceneNode {
-    const char *name;          // имя узла, как в Godot ("Sun", "Terrain"…)
-    const char *type;          // тип ("DirectionalLight3D", "MeshInstance3D"…)
-    SceneNode *parent;         // родитель (у корня — NULL)
-    SceneNode *first_child;    // первый ребёнок
-    SceneNode *last_child;     // последний ребёнок (для добавления в конец)
-    SceneNode *next;           // следующий брат
-    float pos[3];              // положение (в системе родителя)
-    float rot[3];              // поворот, радианы (Y-yaw, X-pitch, Z-roll)
-    float scl[3];              // масштаб (по умолчанию 1,1,1)
-    float world[16];           // мировая матрица (node_update_transforms)
-    float size[3];             // размер узла (у кого он есть: мир, мини-карта…)
-    void *params;              // типизированные параметры узла
-    NodeFn update;             // вызывается каждый кадр до render
-    NodeFn render;             // вызывается каждый кадр (рисует себя)
-    // Точки крепления
-    NodeAttachFn attach_fn;    // РОДИТЕЛЬ: выдаёт матрицу точки по индексу
-    int attach_slot;           // РЕБЁНОК: какую точку родителя занимает (-1 нет)
-    int attach_upright;        // РЕБЁНОК: 1 — гасить поворот точки (только позиция)
+    const char *name;          // node name, as in Godot ("Sun", "Terrain"…)
+    const char *type;          // type ("DirectionalLight3D", "MeshInstance3D"…)
+    SceneNode *parent;         // parent (NULL for the root)
+    SceneNode *first_child;    // first child
+    SceneNode *last_child;     // last child (for appending at the end)
+    SceneNode *next;           // next sibling
+    float pos[3];              // position (in the parent's space)
+    float rot[3];              // rotation, radians (Y-yaw, X-pitch, Z-roll)
+    float scl[3];              // scale (defaults to 1,1,1)
+    float world[16];           // world matrix (node_update_transforms)
+    float size[3];             // node size (where applicable: world, minimap…)
+    void *params;              // typed node parameters
+    NodeFn update;             // called every frame before render
+    NodeFn render;             // called every frame (draws itself)
+    // Attachment points
+    NodeAttachFn attach_fn;    // PARENT: yields the point matrix by index
+    int attach_slot;           // CHILD: which parent point it occupies (-1 = none)
+    int attach_upright;        // CHILD: 1 — cancel the point's rotation (position only)
 };
 
 SceneNode *node_new(const char *name, const char *type,
@@ -56,23 +56,23 @@ SceneNode *node_new(const char *name, const char *type,
                     void *params, NodeFn update, NodeFn render);
 void node_add(SceneNode *parent, SceneNode *child);
 
-// Отвязать узел от родителя (сам узел и его params не освобождаются).
-// Удобно перед node_free_tree, чтобы не освобождать узел дважды.
+// Detach a node from its parent (the node itself and its params are NOT freed).
+// Convenient before node_free_tree so as not to free the node twice.
 void node_remove(SceneNode *node);
 
-// Найти узел по имени в поддереве (DFS). NULL — не найден.
+// Find a node by name in the subtree (DFS). NULL — not found.
 SceneNode *node_find(SceneNode *root, const char *name);
 
 void node_update_tree(SceneNode *n, float dt);
 
-// Пересчитывает мировые матрицы всего поддерева (после update, до render).
-// Вызывать для корня один раз за кадр.
+// Recomputes world matrices of the whole subtree (after update, before render).
+// Call once per frame on the root.
 void node_update_transforms(SceneNode *n);
 
-// Локальная матрица узла из pos/rot/scl (для отладки и ручных расчётов).
+// Node's local matrix from pos/rot/scl (for debugging and manual computations).
 void node_local_matrix(const SceneNode *n, float out[16]);
 
-// Мировая позиция узла из его мировой матрицы.
+// Node's world position from its world matrix.
 void node_world_pos(const SceneNode *n, float out[3]);
 
 void node_render_tree(SceneNode *n, float dt);

@@ -1,5 +1,5 @@
 // ============================================================================
-//  attach.c — крепление узлов к моделям/костям + узел Sprite3D (см. attach.h)
+//  attach.c — attaching nodes to models/bones + the Sprite3D node (see attach.h)
 // ============================================================================
 #include "attach.h"
 
@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// --- Крепление -----------------------------------------------------------------
+// --- Attaching -----------------------------------------------------------------
 int attach_bone_count(SceneNode *model)
 {
     return glb_anim_bone_count(model);
@@ -41,16 +41,16 @@ int attach_node(SceneNode *parent, SceneNode *child, const char *bone,
     if (bone && bone[0]) {
         slot = attach_bone_index(parent, bone);
         if (slot < 0) {
-            SDL_Log("attach: кость '%s' не найдена у %s — цепляю к origin",
+            SDL_Log("attach: bone '%s' not found in %s — attaching to origin",
                     bone, parent->name ? parent->name : "?");
             slot = ATTACH_ORIGIN;
             rc = -1;
         }
     }
-    // Кость -> хук родителя обязателен. Для не-скелетных узлов слот остаётся
-    // ATTACH_ORIGIN, и трансформ считается просто от родителя.
+    // Bone -> parent hook is mandatory. For non-skeletal nodes the slot stays
+    // ATTACH_ORIGIN and the transform is simply computed from the parent.
     if (slot >= 0 && !parent->attach_fn) {
-        SDL_Log("attach: у %s нет точек крепления — цепляю к origin",
+        SDL_Log("attach: %s has no attach points — attaching to origin",
                 parent->name ? parent->name : "?");
         slot = ATTACH_ORIGIN;
         rc = -1;
@@ -73,7 +73,7 @@ void attach_detach(SceneNode *child)
     child->attach_upright = 0;
 }
 
-// --- Узел Sprite3D --------------------------------------------------------------
+// --- Sprite3D node --------------------------------------------------------------
 typedef struct {
     const RendererContext *rc;
     GLuint prog, vao, vbo, ibo, tex;
@@ -148,11 +148,11 @@ SceneNode *sprite_make_node(const char *tex_path, float w, float h,
     p->tex = resources_texture(tex_path ? tex_path : "img/notfound.png", 4,
                                GL_CLAMP_TO_EDGE, 1);
     material_defaults(&p->mat);
-    p->mat.blend = MAT_BLEND_ALPHA;    // спрайты чаще всего полупрозрачные
+    p->mat.blend = MAT_BLEND_ALPHA;    // sprites are mostly semi-transparent
     p->mat.cull = MAT_CULL_NONE;
     p->mat.set = 1;
 
-    // Квад -0.5..0.5 с UV 0..1
+    // Quad -0.5..0.5 with UV 0..1
     glGenVertexArrays(1, &p->vao);
     glBindVertexArray(p->vao);
     glGenBuffers(1, &p->vbo);
@@ -234,7 +234,7 @@ void sprite_set_additive(SceneNode *n, int on)
     SpriteParams *p = sprite_params(n);
     if (!p) return;
     p->mat.blend = on ? MAT_BLEND_ADDITIVE : MAT_BLEND_ALPHA;
-    // Аддитивные спрайты не пишут глубину: они «светятся» поверх сцены
+    // Additive sprites don't write depth: they "glow" over the scene
     p->mat.depth_write = on ? 0 : 1;
 }
 
@@ -249,9 +249,9 @@ void sprite_node_render(SceneNode *n, float dt)
     SpriteParams *p = sprite_params(n);
     if (!p) return;
     const RendererContext *rc = p->rc;
-    if (rc->pass == RP_SHADOW) return;    // спрайты в карты теней не пишут
+    if (rc->pass == RP_SHADOW) return;    // sprites don't write into shadow maps
     p->time += dt;
-    // Отсечение: сфера радиусом по большей стороне (учтён масштаб узла)
+    // Culling: sphere with radius along the longer side (node scale accounted for)
     float sx = n->world[0] * n->world[0] + n->world[1] * n->world[1]
              + n->world[2] * n->world[2];
     float r = (p->w > p->h ? p->w : p->h) * 0.5f * (sx > 0.0f ? sqrtf(sx) : 1.0f);
@@ -266,8 +266,8 @@ void sprite_node_render(SceneNode *n, float dt)
     if (p->u_size >= 0) glUniform2f(p->u_size, p->w, p->h);
     if (p->u_billboard >= 0)
         glUniform1f(p->u_billboard, p->billboard ? 1.0f : 0.0f);
-    // Базис ВИДОВОЙ камеры: биллборд смотрит туда, откуда рендерится кадр
-    // (в 3-м лице это камера за персонажем, не сам персонаж).
+    // Basis of the VIEW camera: the billboard faces where the frame is rendered
+    // from (in third person that's the camera behind the character, not the character).
     if (p->u_camright >= 0)
         glUniform3f(p->u_camright, rc->view_right[0], rc->view_right[1],
                     rc->view_right[2]);

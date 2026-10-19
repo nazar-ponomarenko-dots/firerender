@@ -1,11 +1,12 @@
 // ============================================================================
-//  Fauna — вершинный шейдер частиц (светлячки/бабочки/птицы)
+//  Fauna — particle vertex shader (fireflies/butterflies/birds)
 // ----------------------------------------------------------------------------
-//  Квад центрирован (x -0.5..0.5, y -0.5..0.5), ось ширины uObjRight —
-//  перпендикуляр к камере (биллборд). uMode в FS решает тип отрисовки.
+//  The quad is centered (x -0.5..0.5, y -0.5..0.5), the width axis uObjRight
+//  is perpendicular to the camera (billboard). uMode in the FS picks the draw
+//  type.
 // ============================================================================
 
-layout (location = 0) in vec2 aPos;    // локально: x -0.5..0.5, y -0.5..0.5
+layout (location = 0) in vec2 aPos;    // local: x -0.5..0.5, y -0.5..0.5
 layout (location = 1) in vec2 aUV;
 
 uniform mat4 uViewProj;
